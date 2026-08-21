@@ -23,7 +23,7 @@ import {
   Sun,
   Moon
 } from 'lucide-react'
-import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/src/config/plans'
+import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans'
 import { useTheme } from 'next-themes'
 
 // Icon mapping

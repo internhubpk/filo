@@ -47,7 +47,7 @@ import {
   Shield,
   Sparkles
 } from 'lucide-react'
-import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/src/config/plans'
+import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans'
 
 // Icon mapping
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
