@@ -1,46 +1,363 @@
-// ==================== CORE TYPES ====================
+// ==================== CORE TYPES (Convex-based) ====================
 
-export type { 
-  User, 
-  Workspace, 
-  WorkspaceMember, 
-  Artifact, 
-  ArtifactVersion,
-  ArtifactComponent,
-  ArtifactJob,
-  File,
-  KnowledgeSource,
-  Brand,
-  Plan,
-  Subscription,
-  Payment,
-  Invoice,
-  UsageRecord,
-  AiRequest,
-  WebhookEvent,
-  Notification
-} from '@prisma/client'
+// User Types
+export interface User {
+  id: string
+  name: string
+  email: string
+  emailVerified?: boolean
+  image?: string
+  planId?: string
+  stripeCustomerId?: string
+  createdAt: number
+  updatedAt: number
+}
 
-export type {
-  UserRole,
-  UserStatus,
-  MemberRole,
-  ArtifactType,
-  ArtifactStatus,
-  OutputFormat,
-  ComponentType,
-  JobType,
-  JobStatus,
-  KnowledgeType,
-  SubscriptionStatus,
-  PaymentProvider,
-  PaymentStatus,
-  InvoiceStatus,
-  UsageCategory,
-  AiProvider,
-  WebhookProvider,
-  NotificationType
-} from '@prisma/client'
+export type UserRole = 'user' | 'admin' | 'super_admin'
+export type UserStatus = 'active' | 'inactive' | 'suspended' | 'banned'
+
+// Workspace Types
+export interface Workspace {
+  id: string
+  name: string
+  description?: string
+  ownerId: string
+  createdAt: number
+  updatedAt: number
+}
+
+export interface WorkspaceMember {
+  id: string
+  workspaceId: string
+  userId: string
+  role: MemberRole
+  joinedAt: number
+}
+
+export type MemberRole = 'owner' | 'admin' | 'member' | 'viewer'
+
+// Artifact Types
+export interface Artifact {
+  id: string
+  userId: string
+  title: string
+  type: ArtifactType
+  format: OutputFormat
+  prompt: string
+  status: ArtifactStatus
+  fileId?: string
+  versionCount: number
+  metadata?: Record<string, unknown>
+  createdAt: number
+  updatedAt: number
+}
+
+export interface ArtifactVersion {
+  id: string
+  artifactId: string
+  version: number
+  content: string
+  changes?: string
+  createdAt: number
+}
+
+export interface ArtifactComponent {
+  id: string
+  artifactVersionId: string
+  type: ComponentType
+  content: unknown
+  order: number
+  metadata?: Record<string, unknown>
+}
+
+export interface ArtifactJob {
+  id: string
+  artifactId: string
+  type: JobType
+  status: JobStatus
+  progress: number
+  input: Record<string, unknown>
+  output?: Record<string, unknown>
+  error?: string
+  startedAt?: number
+  completedAt?: number
+  createdAt: number
+  updatedAt: number
+}
+
+export type ArtifactType = 
+  | 'document'
+  | 'spreadsheet'
+  | 'presentation'
+  | 'proposal'
+  | 'invoice'
+  | 'resume'
+  | 'lesson_plan'
+  | 'report'
+  | 'contract'
+  | 'email'
+  | 'custom'
+
+export type ArtifactStatus = 
+  | 'draft'
+  | 'generating'
+  | 'completed'
+  | 'error'
+  | 'archived'
+
+export type OutputFormat = 
+  | 'DOCX'
+  | 'PDF'
+  | 'XLSX'
+  | 'PPTX'
+  | 'CSV'
+  | 'TXT'
+  | 'HTML'
+  | 'MD'
+
+export type ComponentType = 
+  | 'text'
+  | 'heading'
+  | 'list'
+  | 'table'
+  | 'image'
+  | 'chart'
+  | 'code'
+  | 'quote'
+  | 'divider'
+  | 'custom'
+
+// File Types
+export interface File {
+  id: string
+  userId: string
+  artifactId?: string
+  originalName: string
+  mimeType: string
+  size: number
+  r2Key: string
+  r2Bucket: string
+  url?: string
+  uploaded: boolean
+  createdAt: number
+}
+
+// Knowledge Source Types
+export interface KnowledgeSource {
+  id: string
+  userId: string
+  name: string
+  type: KnowledgeType
+  content?: string
+  fileId?: string
+  url?: string
+  embeddingGenerated: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type KnowledgeType = 
+  | 'document'
+  | 'website'
+  | 'text'
+  | 'database'
+
+// Brand Types
+export interface Brand {
+  id: string
+  userId: string
+  name: string
+  logoUrl?: string
+  colors?: Record<string, string>
+  fonts?: Record<string, string>
+  contactInfo?: Record<string, string>
+  footerText?: string
+  createdAt: number
+  updatedAt: number
+}
+
+// Plan & Subscription Types
+export interface Plan {
+  id: string
+  name: string
+  description: string
+  priceMonthly: number
+  priceYearly: number
+  features: string[]
+  limitations: string[]
+  popular: boolean
+  active: boolean
+  maxAiGenerations: number
+  maxStorageMb: number
+  icon: string
+  order: number
+  createdAt: number
+  updatedAt: number
+}
+
+export interface Subscription {
+  id: string
+  userId: string
+  planId: string
+  status: SubscriptionStatus
+  stripeSubscriptionId?: string
+  currentPeriodStart: number
+  currentPeriodEnd: number
+  cancelAtPeriodEnd: boolean
+  createdAt: number
+  updatedAt: number
+}
+
+export type SubscriptionStatus = 
+  | 'active'
+  | 'canceled'
+  | 'past_due'
+  | 'trialing'
+  | 'expired'
+
+// Payment Types
+export interface Payment {
+  id: string
+  userId: string
+  subscriptionId?: string
+  amount: number
+  currency: string
+  status: PaymentStatus
+  payfastPaymentId?: string
+  payfastToken?: string
+  invoiceId?: string
+  description: string
+  metadata?: Record<string, unknown>
+  createdAt: number
+  updatedAt: number
+}
+
+export type PaymentProvider = 'payfast' | 'stripe' | 'paypal'
+export type PaymentStatus = 
+  | 'pending'
+  | 'completed'
+  | 'failed'
+  | 'refunded'
+  | 'cancelled'
+
+export interface Invoice {
+  id: string
+  paymentId: string
+  invoiceNumber: string
+  amount: number
+  currency: string
+  status: InvoiceStatus
+  pdfUrl?: string
+  createdAt: number
+}
+
+export type InvoiceStatus = 
+  | 'draft'
+  | 'sent'
+  | 'paid'
+  | 'overdue'
+  | 'cancelled'
+  | 'refunded'
+
+// Usage Tracking Types
+export interface UsageRecord {
+  id: string
+  userId: string
+  type: UsageCategory
+  amount: number
+  periodStart: number
+  periodEnd: number
+  metadata?: Record<string, unknown>
+  createdAt: number
+}
+
+export type UsageCategory = 
+  | 'ai_generation'
+  | 'file_upload'
+  | 'storage_used'
+  | 'api_call'
+  | 'download'
+
+// AI Request Types
+export interface AiRequest {
+  id: string
+  userId: string
+  provider: AiProvider
+  model: string
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  latencyMs: number
+  success: boolean
+  error?: string
+  artifactId?: string
+  createdAt: number
+}
+
+export type AiProvider = 
+  | 'openai'
+  | 'openrouter'
+  | 'anthropic'
+  | 'google'
+  | 'local'
+
+// Webhook Event Types
+export interface WebhookEvent {
+  id: string
+  provider: WebhookProvider
+  eventId: string
+  type: string
+  data: Record<string, unknown>
+  processed: boolean
+  processingError?: string
+  receivedAt: number
+  processedAt?: number
+}
+
+export type WebhookProvider = 
+  | 'payfast'
+  | 'stripe'
+  | 'paypal'
+  | 'custom'
+
+// Notification Types
+export interface Notification {
+  id: string
+  userId: string
+  type: NotificationType
+  title: string
+  message: string
+  data?: Record<string, unknown>
+  read: boolean
+  actionUrl?: string
+  createdAt: number
+}
+
+export type NotificationType = 
+  | 'info'
+  | 'success'
+  | 'warning'
+  | 'error'
+  | 'payment'
+  | 'artifact_ready'
+  | 'system'
+
+// Job System Types
+export type JobType = 
+  | 'artifact_generation'
+  | 'file_processing'
+  | 'email_sending'
+  | 'data_export'
+  | 'backup'
+  | 'cleanup'
+
+export type JobStatus = 
+  | 'queued'
+  | 'processing'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  | 'retrying'
 
 // ==================== ARTIFACT SPECIFICATION TYPES ====================
 
