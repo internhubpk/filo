@@ -1,0 +1,670 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→import React, { useState, useCallback } from 'react'
+     4→     4→import { Button } from '@/components/ui/button'
+     5→     5→import { Textarea } from '@/components/ui/textarea'
+     6→     6→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+     7→     7→import { Badge } from '@/components/ui/badge'
+     8→     8→import { Progress } from '@/components/ui/progress'
+     9→     9→import {
+    10→    10→  Dialog,
+    11→    11→  DialogContent,
+    12→    12→  DialogDescription,
+    13→    13→  DialogHeader,
+    14→    14→  DialogTitle,
+    15→    15→} from '@/components/ui/dialog'
+    16→    16→import {
+    17→    17→  Select,
+    18→    18→  SelectContent,
+    19→    19→  SelectItem,
+    20→    20→  SelectTrigger,
+    21→    21→  SelectValue,
+    22→    22→} from '@/components/ui/select'
+    23→    23→import { 
+    24→    24→  Sparkles,
+    25→    25→  Upload,
+    26→    26→  FileText,
+    27→    27→  Table,
+    28→    28→  Presentation,
+    29→    29→  FileSpreadsheet,
+    30→    30→  BarChart3,
+    31→    31→  PenTool,
+    32→    32→  BookOpen,
+    33→    33→  Briefcase,
+    34→    34→  GraduationCap,
+    35→    35→  Receipt,
+    36→    36→  UserCircle,
+    37→    37→  ArrowRight,
+    38→    38→  Loader2,
+    39→    39→  Check,
+    40→    40→  AlertCircle,
+    41→    41→  X,
+    42→    42→  Download,
+    43→    43→  Copy,
+    44→    44→  Eye,
+    45→    45→  Edit3,
+    46→    46→  History
+    47→    47→} from 'lucide-react'
+    48→    48→
+    49→    49→// ==================== TYPES ====================
+    50→    50→
+    51→    51→interface CreationRequest {
+    52→    52→  prompt: string
+    53→    53→  files?: File[]
+    54→    54→  outputFormat?: string
+    55→    55→}
+    56→    56→
+    57→    57→interface GenerationStage {
+    58→    58→  id: string
+    59→    59→  label: string
+    60→    60→  status: 'pending' | 'active' | 'completed' | 'error'
+    61→    61→  detail?: string
+    62→    62→}
+    63→    63→
+    64→    64→interface ArtifactPreview {
+    65→    65→  id: string
+    66→    66→  title: string
+    67→    67→  type: string
+    68→    68→  format: string
+    69→    69→  status: 'completed' | 'generating' | 'failed'
+    70→    70→  createdAt: Date
+    71→    71→  thumbnail?: string
+    72→    72→}
+    73→    73→
+    74→    74→// ==================== EXAMPLE PROMPTS ====================
+    75→    75→
+    76→    76→const examplePrompts = [
+    77→    77→  {
+    78→    78→    icon: Briefcase,
+    79→    79→    title: 'Business Proposal',
+    80→    80→    prompt: 'Create a professional business proposal for a digital marketing agency targeting small businesses',
+    81→    81→    category: 'business',
+    82→    82→  },
+    83→    83→  {
+    84→    84→    icon: GraduationCap,
+    85→    85→    title: 'Lesson Plan',
+    86→    86→    prompt: 'Design a comprehensive 16-week lesson plan for an introductory Python programming course',
+    87→    87→    category: 'education',
+    88→    88→  },
+    89→    89→  {
+    90→    90→    icon: Receipt,
+    91→    91→    title: 'Invoice',
+    92→    92→    prompt: 'Generate a professional invoice for consulting services with hourly rates and itemized billing',
+    93→    93→    category: 'finance',
+    94→    94→  },
+    95→    95→  {
+    96→    96→    icon: PenTool,
+    97→    97→    title: 'Resume',
+    98→    98→    prompt: 'Create a modern, professional resume for a senior software engineer with 8 years of experience',
+    99→    99→    category: 'career',
+   100→   100→  },
+   101→   101→  {
+   102→   102→    icon: Presentation,
+   103→   103→    title: 'Presentation',
+   104→   104→    prompt: 'Turn this quarterly business report into an engaging 12-slide executive presentation',
+   105→   105→    category: 'presentation',
+   106→   106→  },
+   107→   107→  {
+   108→   108→    icon: BarChart3,
+   109→   109→    title: 'Financial Report',
+   110→   110→    prompt: 'Analyze this spreadsheet data and create a professional financial report with charts and insights',
+   111→   111→    category: 'analytics',
+   112→   112→  },
+   113→   113→]
+   114→   114→
+   115→   115→// ==================== OUTPUT FORMATS ====================
+   116→   116→
+   117→   117→const outputFormats = [
+   118→   118→  { value: 'auto', label: 'Auto-detect', description: 'Let Filo choose the best format' },
+   119→   119→  { value: 'DOCX', label: 'Word Document', description: '.docx - Best for text documents' },
+   120→   120→  { value: 'PDF', label: 'PDF', description: '.pdf - Universal format' },
+   121→   121→  { value: 'XLSX', label: 'Excel Spreadsheet', description: '.xlsx - For data and calculations' },
+   122→   122→  { value: 'PPTX', label: 'PowerPoint', description: '.pptx - For presentations' },
+   123→   123→  { value: 'CSV', label: 'CSV', description: '.csv - For data export' },
+   124→   124→]
+   125→   125→
+   126→   126→// ==================== MAIN COMPONENT ====================
+   127→   127→
+   128→   128→export function MainDashboard() {
+   129→   129→  const [prompt, setPrompt] = useState('')
+   130→   130→  const [files, setFiles] = useState<File[]>([])
+   131→   131→  const [selectedFormat, setSelectedFormat] = useState('auto')
+   132→   132→  const [isGenerating, setIsGenerating] = useState(false)
+   133→   133→  const [showResultDialog, setShowResultDialog] = useState(false)
+   134→   134→  const [generationStages, setGenerationStages] = useState<GenerationStage[]>([])
+   135→   135→  const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview | null>(null)
+   136→   136→  const [dragActive, setDragActive] = useState(false)
+   137→   137→
+   138→   138→  // Handle file upload
+   139→   139→  const handleFiles = useCallback((newFiles: FileList | null) => {
+   140→   140→    if (!newFiles) return
+   141→   141→    
+   142→   142→    const fileArray = Array.from(newFiles)
+   143→   143→    setFiles(prev => [...prev, ...fileArray])
+   144→   144→  }, [])
+   145→   145→
+   146→   146→  const handleDrag = useCallback((e: React.DragEvent) => {
+   147→   147→    e.preventDefault()
+   148→   148→    e.stopPropagation()
+   149→   149→    if (e.type === 'dragenter' || e.type === 'dragover') {
+   150→   150→      setDragActive(true)
+   151→   151→    } else if (e.type === 'dragleave') {
+   152→   152→      setDragActive(false)
+   153→   153→    }
+   154→   154→  }, [])
+   155→   155→
+   156→   156→  const handleDrop = useCallback((e: React.DragEvent) => {
+   157→   157→    e.preventDefault()
+   158→   158→    e.stopPropagation()
+   159→   159→    setDragActive(false)
+   160→   160→    handleFiles(e.dataTransfer.files)
+   161→   161→  }, [handleFiles])
+   162→   162→
+   163→   163→  const removeFile = (index: number) => {
+   164→   164→    setFiles(prev => prev.filter((_, i) => i !== index))
+   165→   165→  }
+   166→   166→
+   167→   167→  // Handle generation
+   168→   168→  const handleGenerate = async () => {
+   169→   169→    if (!prompt.trim()) return
+   170→   170→
+   171→   171→    setIsGenerating(true)
+   172→   172→    
+   173→   173→    // Initialize generation stages
+   174→   174→    const stages: GenerationStage[] = [
+   175→   175→      { id: '1', label: 'Understanding request', status: 'pending' },
+   176→   176→      { id: '2', label: 'Reading files', status: 'pending' },
+   177→   177→      { id: '3', label: 'Planning artifact', status: 'pending' },
+   178→   178→      { id: '4', label: 'Generating content', status: 'pending' },
+   179→   179→      { id: '5', label: 'Creating visuals', status: 'pending' },
+   180→   180→      { id: '6', label: 'Formatting document', status: 'pending' },
+   181→   181→      { id: '7', label: 'Checking quality', status: 'pending' },
+   182→   182→      { id: '8', label: 'Finalizing', status: 'pending' },
+   183→   183→    ]
+   184→   184→    setGenerationStages(stages)
+   185→   185→
+   186→   186→    try {
+   187→   187→      // Simulate generation stages (in production, these would be real API calls)
+   188→   188→      for (let i = 0; i < stages.length; i++) {
+   189→   189→        await new Promise(resolve => setTimeout(resolve, 800 + Math.random() * 1200))
+   190→   190→        
+   191→   191→        setGenerationStages(prev => 
+   192→   192→          prev.map(stage => 
+   193→   193→            stage.id === String(i + 1) 
+   194→   194→              ? { ...stage, status: 'completed' }
+   195→   195→              : stage
+   196→   196→          )
+   197→   197→        )
+   198→   198→        
+   199→   199→        if (i < stages.length - 1) {
+   200→   200→          setGenerationStages(prev =>
+   201→   201→            prev.map(stage =>
+   202→   202→              stage.id === String(i + 2)
+   203→   203→                ? { ...stage, status: 'active' }
+   204→   204→                : stage
+   205→   205→            )
+   206→   206→          )
+   207→   207→        }
+   208→   208→      }
+   209→   209→
+   210→   210→      // Create artifact preview
+   211→   211→      const artifact: ArtifactPreview = {
+   212→   212→        id: crypto.randomUUID(),
+   213→   213→        title: extractTitle(prompt),
+   214→   214→        type: detectArtifactType(prompt),
+   215→   215→        format: selectedFormat === 'auto' ? 'DOCX' : selectedFormat,
+   216→   216→        status: 'completed',
+   217→   217→        createdAt: new Date(),
+   218→   218→      }
+   219→   219→
+   220→   220→      setCurrentArtifact(artifact)
+   221→   221→      setShowResultDialog(true)
+   222→   222→    } catch (error) {
+   223→   223→      console.error('Generation failed:', error)
+   224→   224→      setGenerationStages(prev =>
+   225→   225→        prev.map(stage =>
+   226→   226→          stage.status === 'active'
+   227→   227→            ? { ...stage, status: 'error', detail: 'Generation failed' }
+   228→   228→            : stage
+   229→   229→        )
+   230→   230→      )
+   231→   231→    } finally {
+   232→   232→      setIsGenerating(false)
+   233→   233→    }
+   234→   234→  }
+   235→   235→
+   236→   236→  // Helper functions
+   237→   237→  const extractTitle = (text: string): string => {
+   238→   238→    const words = text.split(' ').slice(0, 8).join(' ')
+   239→   239→    return words.length > 50 ? words + '...' : words
+   240→   240→  }
+   241→   241→
+   242→   242→  const detectArtifactType = (text: string): string => {
+   243→   243→    const lower = text.toLowerCase()
+   244→   244→    if (lower.includes('proposal') || lower.includes('business')) return 'Proposal'
+   245→   245→    if (lower.includes('lesson') || lower.includes('course')) return 'Lesson Plan'
+   246→   246→    if (lower.includes('invoice')) return 'Invoice'
+   247→   247→    if (lower.includes('resume') || lower.includes('cv')) return 'Resume'
+   248→   248→    if (lower.includes('presentation') || lower.includes('slide')) return 'Presentation'
+   249→   249→    if (lower.includes('spreadsheet') || lower.includes('excel') || lower.includes('budget')) return 'Spreadsheet'
+   250→   250→    if (lower.includes('report')) return 'Report'
+   251→   251→    return 'Document'
+   252→   252→  }
+   253→   253→
+   254→   254→  const handleExampleClick = (examplePrompt: string) => {
+   255→   255→    setPrompt(examplePrompt)
+   256→   256→  }
+   257→   257→
+   258→   258→  return (
+   259→   259→    <div className="min-h-screen bg-background">
+   260→   260→      {/* Hero Section */}
+   261→   261→      <section className="relative overflow-hidden border-b bg-gradient-to-br from-background via-background to-muted/30">
+   262→   262→        <div className="absolute inset-0 bg-[linear-gradient(to_right,#8882_1px,transparent_1px),linear-gradient(to_bottom,#8882_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]" />
+   263→   263→        
+   264→   264→        <div className="container relative mx-auto px-4 py-16 lg:py-24">
+   265→   265→          <div className="mx-auto max-w-4xl text-center">
+   266→   266→            {/* Badge */}
+   267→   267→            <Badge variant="secondary" className="mb-6 px-4 py-1.5 text-sm">
+   268→   268→              <Sparkles className="mr-2 h-3.5 w-3.5" />
+   269→   269→              AI-Powered Artifact Generation
+   270→   270→            </Badge>
+   271→   271→
+   272→   272→            {/* Headline */}
+   273→   273→            <h1 className="mb-6 text-4xl font-bold tracking-tight sm:text-5xl lg:text-6xl">
+   274→   274→              Describe what you need.
+   275→   275→              <br />
+   276→   276→              <span className="bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent">
+   277→   277→                Filo creates it.
+   278→   278→              </span>
+   279→   279→            </h1>
+   280→   280→
+   281→   281→            {/* Subheadline */}
+   282→   282→            <p className="mx-auto mb-10 max-w-2xl text-lg text-muted-foreground">
+   283→   283→              Transform your ideas into professional documents, spreadsheets, presentations, and more. 
+   284→   284→              No templates. No formatting. Just describe what you want.
+   285→   285→            </p>
+   286→   286→
+   287→   287→            {/* Main Input */}
+   288→   288→            <div className="mx-auto max-w-3xl">
+   289→   289→              <div className="rounded-xl border bg-card p-2 shadow-lg">
+   290→   290→                <Textarea
+   291→   291→                  placeholder="What do you want to create? Be specific about what you need..."
+   292→   292→                  value={prompt}
+   293→   293→                  onChange={(e) => setPrompt(e.target.value)}
+   294→   294→                  className="min-h-[120px] resize-none border-0 bg-transparent text-base focus-visible:ring-0"
+   295→   295→                  disabled={isGenerating}
+   296→   296→                />
+   297→   297→
+   298→   298→                {/* Files area */}
+   299→   299→                {(files.length > 0 || dragActive) && (
+   300→   300→                  <div
+   301→   301→                    className={`mx-2 mb-2 rounded-lg border-2 border-dashed p-4 transition-colors ${
+   302→   302→                      dragActive ? 'border-primary bg-primary/5' : 'border-muted-foreground/25'
+   303→   303→                    }`}
+   304→   304→                    onDragEnter={handleDrag}
+   305→   305→                    onDragLeave={handleDrag}
+   306→   306→                    onDragOver={handleDrag}
+   307→   307→                    onDrop={handleDrop}
+   308→   308→                  >
+   309→   309→                    {files.length > 0 ? (
+   310→   310→                      <div className="space-y-2">
+   311→   311→                        {files.map((file, index) => (
+   312→   312→                          <div key={index} className="flex items-center gap-2 rounded bg-muted/50 p-2">
+   313→   313→                            <FileText className="h-4 w-4 text-muted-foreground" />
+   314→   314→                            <span className="flex-1 truncate text-sm">{file.name}</span>
+   315→   315→                            <span className="text-xs text-muted-foreground">
+   316→   316→                              {(file.size / 1024).toFixed(1)} KB
+   317→   317→                            </span>
+   318→   318→                            <Button
+   319→   319→                              variant="ghost"
+   320→   320→                              size="icon"
+   321→   321→                              className="h-6 w-6"
+   322→   322→                              onClick={() => removeFile(index)}
+   323→   323→                              disabled={isGenerating}
+   324→   324→                            >
+   325→   325→                              <X className="h-3 w-3" />
+   326→   326→                            </Button>
+   327→   327→                          </div>
+   328→   328→                        ))}
+   329→   329→                        <label>
+   330→   330→                          <span className="cursor-pointer text-sm text-muted-foreground hover:text-foreground">
+   331→   331→                            + Add more files
+   332→   332→                          </span>
+   333→   333→                          <input
+   334→   334→                            type="file"
+   335→   335→                            multiple
+   336→   336→                            className="hidden"
+   337→   337→                            onChange={(e) => handleFiles(e.target.files)}
+   338→   338→                            disabled={isGenerating}
+   339→   339→                          />
+   340→   340→                        </label>
+   341→   341→                      </div>
+   342→   342→                    ) : (
+   343→   343→                      <div className="flex flex-col items-center justify-center py-4 text-sm text-muted-foreground">
+   344→   344→                        <Upload className="mb-2 h-8 w-8" />
+   345→   345→                        <p>Drop files here or click to upload</p>
+   346→   346→                        <input
+   347→   347→                          type="file"
+   348→   348→                          multiple
+   349→   349→                          className="hidden"
+   350→   350→                          onChange={(e) => handleFiles(e.target.files)}
+   351→   351→                          disabled={isGenerating}
+   352→   352→                        />
+   353→   353→                        <label className="mt-2 cursor-pointer text-xs text-primary hover:underline">
+   354→   354→                          Browse files
+   355→   355→                        </label>
+   356→   356→                      </div>
+   357→   357→                    )}
+   358→   358→                  </div>
+   359→   359→                )}
+   360→   360→
+   361→   361→                {/* Actions */}
+   362→   362→                <div className="flex flex-wrap items-center gap-3 border-t pt-3">
+   363→   363→                  {!files.length && (
+   364→   364→                    <label className="cursor-pointer">
+   365→   365→                      <Button variant="outline" size="sm" className="gap-2" asChild>
+   366→   366→                        <>
+   367→   367→                          <Upload className="h-4 w-4" />
+   368→   368→                          Add files
+   369→   369→                        </>
+   370→   370→                      </Button>
+   371→   371→                      <input
+   372→   372→                        type="file"
+   373→   373→                        multiple
+   374→   374→                        className="hidden"
+   375→   375→                        onChange={(e) => handleFiles(e.target.files)}
+   376→   376→                        disabled={isGenerating}
+   377→   377→                      />
+   378→   378→                    </label>
+   379→   379→                  )}
+   380→   380→
+   381→   381→                  <Select value={selectedFormat} onValueChange={setSelectedFormat}>
+   382→   382→                    <SelectTrigger className="w-[180px]" disabled={isGenerating}>
+   383→   383→                      <SelectValue placeholder="Output format" />
+   384→   384→                    </SelectTrigger>
+   385→   385→                    <SelectContent>
+   386→   386→                      {outputFormats.map(format => (
+   387→   387→                        <SelectItem key={format.value} value={format.value}>
+   388→   388→                          <div className="flex flex-col items-start">
+   389→   389→                            <span>{format.label}</span>
+   390→   390→                            <span className="text-xs text-muted-foreground">{format.description}</span>
+   391→   391→                          </div>
+   392→   392→                        </SelectItem>
+   393→   393→                      ))}
+   394→   394→                    </SelectContent>
+   395→   395→                  </Select>
+   396→   396→
+   397→   397→                  <div className="ml-auto flex gap-2">
+   398→   398→                    <Button variant="ghost" onClick={() => { setPrompt(''); setFiles([]); }} disabled={isGenerating}>
+   399→   399→                      Clear
+   400→   400→                    </Button>
+   401→   401→                    <Button
+   402→   402→                      onClick={handleGenerate}
+   403→   403→                      disabled={!prompt.trim() || isGenerating}
+   404→   404→                      className="gap-2 min-w-[120px]"
+   405→   405→                    >
+   406→   406→                      {isGenerating ? (
+   407→   407→                        <>
+   408→   408→                          <Loader2 className="h-4 w-4 animate-spin" />
+   409→   409→                          Creating...
+   410→   410→                        </>
+   411→   411→                      ) : (
+   412→   412→                        <>
+   413→   413→                          <Sparkles className="h-4 w-4" />
+   414→   414→                          Create
+   415→   415→                        </>
+   416→   416→                      )}
+   417→   417→                    </Button>
+   418→   418→                  </div>
+   419→   419→                </div>
+   420→   420→              </div>
+   421→   421→            </div>
+   422→   422→          </div>
+   423→   423→        </div>
+   424→   424→      </section>
+   425→   425→
+   426→   426→      {/* Progress Section */}
+   427→   427→      {isGenerating && (
+   428→   428→        <section className="border-b bg-muted/30">
+   429→   429→          <div className="container mx-auto px-4 py-8">
+   430→   430→            <div className="mx-auto max-w-2xl">
+   431→   431→              <div className="mb-4 flex items-center justify-between">
+   432→   432→                <h3 className="font-semibold">Generating your artifact</h3>
+   433→   433→                <Badge variant="secondary">
+   434→   434→                  {generationStages.filter(s => s.status === 'completed').length}/{generationStages.length}
+   435→   435→                </Badge>
+   436→   436→              </div>
+   437→   437→              
+   438→   438→              <Progress 
+   439→   439→                value={(generationStages.filter(s => s.status === 'completed').length / generationStages.length) * 100} 
+   440→   440→                className="mb-6"
+   441→   441→              />
+   442→   442→
+   443→   443→              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   444→   444→                {generationStages.map(stage => (
+   445→   445→                  <div
+   446→   446→                    key={stage.id}
+   447→   447→                    className={`flex items-center gap-2 rounded-lg border p-3 transition-colors ${
+   448→   448→                      stage.status === 'active' ? 'border-primary bg-primary/5' :
+   449→   449→                      stage.status === 'completed' ? 'border-green-200 bg-green-50 dark:border-green-900 dark:bg-green-950' :
+   450→   450→                      stage.status === 'error' ? 'border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950' :
+   451→   451→                      'border-transparent'
+   452→   452→                    }`}
+   453→   453→                  >
+   454→   454→                    {stage.status === 'active' && <Loader2 className="h-4 w-4 animate-spin text-primary" />}
+   455→   455→                    {stage.status === 'completed' && <Check className="h-4 w-4 text-green-600" />}
+   456→   456→                    {stage.status === 'error' && <AlertCircle className="h-4 w-4 text-red-600" />}
+   457→   457→                    {stage.status === 'pending' && <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/20" />}
+   458→   458→                    
+   459→   459→                    <span className={`text-sm ${
+   460→   460→                      stage.status === 'active' ? 'font-medium text-primary' :
+   461→   461→                      stage.status === 'completed' ? 'text-green-700 dark:text-green-400' :
+   462→   462→                      stage.status === 'error' ? 'text-red-700 dark:text-red-400' :
+   463→   463→                      'text-muted-foreground'
+   464→   464→                    }`}>
+   465→   465→                      {stage.label}
+   466→   466→                    </span>
+   467→   467→                  </div>
+   468→   468→                ))}
+   469→   469→              </div>
+   470→   470→            </div>
+   471→   471→          </div>
+   472→   472→        </section>
+   473→   473→      )}
+   474→   474→
+   475→   475→      {/* Example Prompts */}
+   476→   476→      <section className="py-12 lg:py-16">
+   477→   477→        <div className="container mx-auto px-4">
+   478→   478→          <div className="mb-8 text-center">
+   479→   479→            <h2 className="text-2xl font-bold tracking-tight">What can you create?</h2>
+   480→   480→            <p className="mt-2 text-muted-foreground">
+   481→   481→              Click any example to get started, or describe your own needs above
+   482→   482→            </p>
+   483→   483→          </div>
+   484→   484→
+   485→   485→          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
+   486→   486→            {examplePrompts.map((example, index) => (
+   487→   487→              <Card
+   488→   488→                key={index}
+   489→   489→                className="group cursor-pointer transition-all hover:border-primary/50 hover:shadow-md"
+   490→   490→                onClick={() => handleExampleClick(example.prompt)}
+   491→   491→              >
+   492→   492→                <CardHeader className="pb-3">
+   493→   493→                  <div className="flex items-center gap-3">
+   494→   494→                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 transition-colors group-hover:bg-primary/20">
+   495→   495→                      <example.icon className="h-5 w-5 text-primary" />
+   496→   496→                    </div>
+   497→   497→                    <div>
+   498→   498→                      <CardTitle className="text-base">{example.title}</CardTitle>
+   499→   499→                      <Badge variant="secondary" className="mt-1 text-xs capitalize">
+   500→   500→                        {example.category}
+   501→   501→                      </Badge>
+   502→   502→                    </div>
+   503→   503→                  </div>
+   504→   504→                </CardHeader>
+   505→   505→                <CardContent>
+   506→   506→                  <CardDescription className="line-clamp-2 text-sm">
+   507→   507→                    {example.prompt}
+   508→   508→                  </CardDescription>
+   509→   509→                  <div className="mt-3 flex items-center text-sm font-medium text-primary opacity-0 transition-opacity group-hover:opacity-100">
+   510→   510→                    Use this example
+   511→   511→                    <ArrowRight className="ml-1 h-4 w-4" />
+   512→   512→                  </div>
+   513→   513→                </CardContent>
+   514→   514→              </Card>
+   515→   515→            ))}
+   516→   516→          </div>
+   517→   517→        </div>
+   518→   518→      </section>
+   519→   519→
+   520→   520→      {/* Capabilities */}
+   521→   521→      <section className="border-t bg-muted/30 py-12 lg:py-16">
+   522→   522→        <div className="container mx-auto px-4">
+   523→   523→          <div className="mb-10 text-center">
+   524→   524→            <h2 className="text-2xl font-bold tracking-tight">Professional outputs</h2>
+   525→   525→            <p className="mt-2 text-muted-foreground">
+   526→   526→              Every artifact is formatted, designed, and ready to use
+   527→   527→            </p>
+   528→   528→          </div>
+   529→   529→
+   530→   530→          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
+   531→   531→            {[
+   532→   532→              {
+   533→   533→                icon: FileText,
+   534→   534→                title: 'Documents',
+   535→   535→                formats: ['DOCX', 'PDF'],
+   536→   536→                description: 'Reports, proposals, plans, research papers with proper formatting',
+   537→   537→              },
+   538→   538→              {
+   539→   539→                icon: Table,
+   540→   540→                title: 'Spreadsheets',
+   541→   541→                formats: ['XLSX', 'CSV'],
+   542→   542→                description: 'Budgets, trackers, schedules with formulas and calculations',
+   543→   543→              },
+   544→   544→              {
+   545→   545→                icon: Presentation,
+   546→   546→                title: 'Presentations',
+   547→   547→                formats: ['PPTX'],
+   548→   548→                description: 'Engaging slides with consistent design and visuals',
+   549→   549→              },
+   550→   550→              {
+   551→   551→                icon: BarChart3,
+   552→   552→                title: 'Charts & Diagrams',
+   553→   553→                formats: ['Embedded'],
+   554→   554→                description: 'Data visualizations, flowcharts, org charts, and more',
+   555→   555→              },
+   556→   556→            ].map((capability, index) => (
+   557→   557→              <Card key={index} className="text-center">
+   558→   558→                <CardContent className="pt-6">
+   559→   559→                  <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary/10">
+   560→   560→                    <capability.icon className="h-7 w-7 text-primary" />
+   561→   561→                  </div>
+   562→   562→                  <h3 className="mb-2 font-semibold">{capability.title}</h3>
+   563→   563→                  <div className="mb-2 flex justify-center gap-1">
+   564→   564→                    {capability.formats.map(format => (
+   565→   565→                      <Badge key={format} variant="secondary" className="text-xs">
+   566→   566→                        {format}
+   567→   567→                      </Badge>
+   568→   568→                    ))}
+   569→   569→                  </div>
+   570→   570→                  <p className="text-sm text-muted-foreground">{capability.description}</p>
+   571→   571→                </CardContent>
+   572→   572→              </Card>
+   573→   573→            ))}
+   574→   574→          </div>
+   575→   575→        </div>
+   576→   576→      </section>
+   577→   577→
+   578→   578→      {/* Result Dialog */}
+   579→   579→      <Dialog open={showResultDialog} onOpenChange={setShowResultDialog}>
+   580→   580→        <DialogContent className="max-w-3xl">
+   581→   581→          <DialogHeader>
+   582→   582→            <DialogTitle className="flex items-center gap-2">
+   583→   583→              <Check className="h-5 w-5 text-green-600" />
+   584→   584→              Artifact Ready!
+   585→   585→            </DialogTitle>
+   586→   586→            <DialogDescription>
+   587→   587→              Your artifact has been generated and is ready to download or edit.
+   588→   588→            </DialogDescription>
+   589→   589→          </DialogHeader>
+   590→   590→
+   591→   591→          {currentArtifact && (
+   592→   592→            <div className="space-y-6">
+   593→   593→              {/* Preview card */}
+   594→   594→              <Card>
+   595→   595→                <CardContent className="pt-6">
+   596→   596→                  <div className="flex items-start justify-between">
+   597→   597→                    <div className="flex items-start gap-4">
+   598→   598→                      <div className="flex h-16 w-16 items-center justify-center rounded-xl bg-primary/10">
+   599→   599→                        {currentArtifact.type === 'Document' && <FileText className="h-8 w-8 text-primary" />}
+   600→   600→                        {currentArtifact.type === 'Spreadsheet' && <Table className="h-8 w-8 text-primary" />}
+   601→   601→                        {currentArtifact.type === 'Presentation' && <Presentation className="h-8 w-8 text-primary" />}
+   602→   602→                        {currentArtifact.type === 'Proposal' && <Briefcase className="h-8 w-8 text-primary" />}
+   603→   603→                        {currentArtifact.type === 'Lesson Plan' && <GraduationCap className="h-8 w-8 text-primary" />}
+   604→   604→                        {currentArtifact.type === 'Invoice' && <Receipt className="h-8 w-8 text-primary" />}
+   605→   605→                        {currentArtifact.type === 'Resume' && <UserCircle className="h-8 w-8 text-primary" />}
+   606→   606→                      </div>
+   607→   607→                      <div>
+   608→   608→                        <h3 className="font-semibold text-lg">{currentArtifact.title}</h3>
+   609→   609→                        <div className="mt-1 flex items-center gap-2">
+   610→   610→                          <Badge>{currentArtifact.type}</Badge>
+   611→   611→                          <Badge variant="outline">{currentArtifact.format}</Badge>
+   612→   612→                          <span className="text-sm text-muted-foreground">
+   613→   613→                            {currentArtifact.createdAt.toLocaleTimeString()}
+   614→   614→                          </span>
+   615→   615→                        </div>
+   616→   616→                      </div>
+   617→   617→                    </div>
+   618→   618→                  </div>
+   619→   619→                </CardContent>
+   620→   620→              </Card>
+   621→   621→
+   622→   622→              {/* Actions */}
+   623→   623→              <div className="flex flex-wrap gap-3">
+   624→   624→                <Button className="gap-2">
+   625→   625→                  <Download className="h-4 w-4" />
+   626→   626→                  Download {currentArtifact.format}
+   627→   627→                </Button>
+   628→   628→                <Button variant="outline" className="gap-2">
+   629→   629→                  <Eye className="h-4 w-4" />
+   630→   630→                  Preview
+   631→   631→                </Button>
+   632→   632→                <Button variant="outline" className="gap-2">
+   633→   633→                  <Edit3 className="h-4 w-4" />
+   634→   634→                  Edit
+   635→   635→                </Button>
+   636→   636→                <Button variant="outline" className="gap-2">
+   637→   637→                  <Copy className="h-4 w-4" />
+   638→   638→                  Duplicate
+   639→   639→                </Button>
+   640→   640→                <Button variant="outline" className="gap-2">
+   641→   641→                  <History className="h-4 w-4" />
+   642→   642→                  Version History
+   643→   643→                </Button>
+   644→   644→              </div>
+   645→   645→
+   646→   646→              {/* AI Edit suggestion */}
+   647→   647→              <div className="rounded-lg border bg-muted/50 p-4">
+   648→   648→                <p className="text-sm font-medium mb-2">Want to make changes?</p>
+   649→   649→                <p className="text-sm text-muted-foreground mb-3">
+   650→   650→                  Ask AI to modify your artifact using natural language:
+   651→   651→                </p>
+   652→   652→                <div className="flex gap-2">
+   653→   653→                  <input
+   654→   654→                    type="text"
+   655→   655→                    placeholder='E.g., "Make the cover more professional" or "Add a pricing section"'
+   656→   656→                    className="flex-1 rounded-md border bg-background px-3 py-2 text-sm"
+   657→   657→                  />
+   658→   658→                  <Button size="sm" variant="outline">
+   659→   659→                    Apply
+   660→   660→                  </Button>
+   661→   661→                </div>
+   662→   662→              </div>
+   663→   663→            </div>
+   664→   664→          )}
+   665→   665→        </DialogContent>
+   666→   666→      </Dialog>
+   667→   667→    </div>
+   668→   668→  )
+   669→   669→}
+   670→   670→
