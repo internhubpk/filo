@@ -63,7 +63,9 @@ import {
   ExternalLink,
   Sun,
   Moon,
-  Star
+  Star,
+  LogOut,
+  Shield
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import type { PlanConfig } from '@/config/plans'
@@ -179,6 +181,18 @@ export default function AdminPage() {
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message })
     setTimeout(() => setNotification(null), 3000)
+  }
+
+  // Handle admin logout
+  const handleLogout = async () => {
+    try {
+      await fetch('/api/auth/admin/logout', { method: 'DELETE' })
+      window.location.href = '/admin/login'
+    } catch (error) {
+      console.error('Logout error:', error)
+      // Force redirect even if API fails
+      window.location.href = '/admin/login'
+    }
   }
 
   // Open dialog for creating new plan
@@ -326,6 +340,12 @@ export default function AdminPage() {
           </div>
 
           <div className="flex items-center gap-3">
+            {/* Admin Badge */}
+            <Badge variant="secondary" className="gap-1.5 cursor-default bg-green-50 dark:bg-green-950 text-green-700 dark:text-green-300 border-green-200 dark:border-green-800">
+              <Shield className="h-3.5 w-3.5" />
+              Admin
+            </Badge>
+
             {/* Theme toggle */}
             <Button
               variant="ghost"
@@ -347,6 +367,17 @@ export default function AdminPage() {
                 <ExternalLink className="h-4 w-4" />
                 View Pricing
               </Link>
+            </Button>
+
+            {/* Logout Button */}
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={handleLogout}
+              className="gap-2 cursor-pointer text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950 border-red-200 dark:border-red-800"
+            >
+              <LogOut className="h-4 w-4" />
+              Logout
             </Button>
 
             <Button 
