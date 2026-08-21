@@ -1,0 +1,677 @@
+// Filo SaaS Platform - Complete Database Schema
+// AI Productivity & Artifact Generation Platform
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// ==================== USER MANAGEMENT ====================
+
+model User {
+  id                String           @id @default(cuid())
+  email             String           @unique
+  name              String?
+  passwordHash      String?
+  image             String?
+  emailVerified     DateTime?
+  role              UserRole         @default(USER)
+  planId            String?
+  status            UserStatus       @default(ACTIVE)
+  
+  // Usage tracking
+  creditsUsed       Int              @default(0)
+  creditsLimit      Int              @default(100) // Free tier limit
+  storageUsed       Int              @default(0)   // in bytes
+  storageLimit      Int              @default(104857600) // 100MB free
+  
+  // Branding
+  brand             Brand?
+  
+  // Relations
+  workspaceMembers  WorkspaceMember[]
+  artifacts         Artifact[]
+  files             File[]
+  usageRecords      UsageRecord[]
+  subscriptions     Subscription[]
+  payments          Payment[]
+  aiRequests        AiRequest[]
+  notifications     Notification[]
+  webhookEvents     WebhookEvent[]
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([email])
+  @@index([status])
+}
+
+enum UserRole {
+  USER
+  ADMIN
+  SUPER_ADMIN
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  PENDING_VERIFICATION
+}
+
+// ==================== WORKSPACES ====================
+
+model Workspace {
+  id                String               @id @default(cuid())
+  name               String
+  description        String?
+  slug               String               @unique
+  ownerId            String
+  settings           Json?                // Workspace-specific settings
+  
+  // Relations
+  members            WorkspaceMember[]
+  artifacts          Artifact[]
+  files              File[]
+  knowledgeSources   KnowledgeSource[]
+  brands             Brand[]
+  
+  createdAt          DateTime             @default(now())
+  updatedAt          DateTime             @updatedAt
+  
+  @@index([ownerId])
+  @@index([slug])
+}
+
+model WorkspaceMember {
+  id                String           @id @default(cuid())
+  workspaceId       String
+  userId            String
+  role              MemberRole       @default(MEMBER)
+  invitedBy         String?
+  joinedAt          DateTime         @default(now())
+  
+  workspace         Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  @@unique([workspaceId, userId])
+  @@index([userId])
+  @@index[workspaceId]
+}
+
+enum MemberRole {
+  OWNER
+  ADMIN
+  MEMBER
+  VIEWER
+}
+
+// ==================== BRANDING ====================
+
+model Brand {
+  id                String           @id @default(cuid())
+  userId            String?
+  workspaceId       String?
+  companyName       String?
+  logoUrl           String?
+  primaryColor      String           @default("#2563eb")
+  secondaryColor    String           @default("#64748b")
+  accentColor       String           @default("#0ea5e9")
+  fontFamily        String           @default("inter")
+  address           String?
+  website           String?
+  contactEmail      String?
+  contactPhone      String?
+  footerText        String?
+  instructions      String?          // AI branding instructions
+  
+  user              User?            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  workspace         Workspace?       @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+}
+
+// ==================== ARTIFACTS (CORE) ====================
+
+model Artifact {
+  id                String           @id @default(cuid())
+  workspaceId       String
+  ownerId           String
+  title             String
+  description       String?
+  type              ArtifactType
+  status            ArtifactStatus   @default(DRAFT)
+  
+  // Specification (the core artifact definition)
+  specification     Json?           // ArtifactSpecification
+  
+  // Output
+  outputFormat      OutputFormat
+  outputUrl         String?         // R2 URL or generated file location
+  outputFileSize    Int?            // in bytes
+  
+  // Versioning
+  currentVersion    Int             @default(1)
+  versions          ArtifactVersion[]
+  
+  // Generation metadata
+  jobId             String?         // Associated async job
+  aiModelUsed       String?
+  generationTimeMs  Int?            // Generation time in milliseconds
+  tokensUsed        Int?
+  
+  // Branding applied
+  brandId           String?
+  
+  // Relations
+  components        ArtifactComponent[]
+  jobs              ArtifactJob[]
+  
+  workspace         Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  owner             User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  brand             Brand?           @relation(fields: [brandId], references: [id])
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([workspaceId])
+  @@index([ownerId])
+  @@index([type])
+  @@index([status])
+}
+
+enum ArtifactType {
+  DOCUMENT
+  SPREADSHEET
+  PRESENTATION
+  PDF
+  REPORT
+  FORM
+  INVOICE
+  RESUME
+  PROPOSAL
+  BUSINESS_PLAN
+  LESSON_PLAN
+  RESEARCH_DOCUMENT
+  CHART
+  DIAGRAM
+  CUSTOM
+}
+
+enum ArtifactStatus {
+  DRAFT
+  PLANNING
+  GENERATING
+  VALIDATING
+  RENDERING
+  COMPLETED
+  FAILED
+  ARCHIVED
+}
+
+enum OutputFormat {
+  DOCX
+  PDF
+  XLSX
+  PPTX
+  CSV
+  HTML
+  MD
+  TXT
+}
+
+// ==================== ARTIFACT VERSIONS ====================
+
+model ArtifactVersion {
+  id                String           @id @default(cuid())
+  artifactId        String
+  versionNumber     Int
+  specification     Json?
+  outputUrl         String?
+  changeSummary     String?
+  fileSize          Int?
+  
+  artifact          Artifact         @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  
+  @@unique([artifactId, versionNumber])
+  @@index([artifactId])
+}
+
+// ==================== ARTIFACT COMPONENTS ====================
+
+model ArtifactComponent {
+  id                String           @id @default(cuid())
+  artifactId        String
+  type              ComponentType
+  order             Int
+  content           Json?           // Structured component data
+  style             Json?           // Component-specific styling
+  
+  artifact          Artifact         @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([artifactId])
+}
+
+enum ComponentType {
+  COVER_PAGE
+  HEADING
+  PARAGRAPH
+  TABLE
+  CHART
+  DIAGRAM
+  IMAGE
+  LIST
+  HEADER
+  FOOTER
+  PAGE_BREAK
+  SECTION
+  CALLOUT
+  TITLE_SLIDE
+  CONTENT_SLIDE
+  WORKSHEET
+  FORMULA_CELL
+  DATA_CELL
+}
+
+// ==================== ARTIFACT JOBS (ASYNC PROCESSING) ====================
+
+model ArtifactJob {
+  id                String           @id @default(cuid())
+  artifactId        String
+  type              JobType
+  status            JobStatus        @default(PENDING)
+  progress          Int              @default(0)
+  currentStage      String?
+  error             String?
+  result            Json?
+  
+  // Timing
+  startedAt         DateTime?
+  completedAt       DateTime?
+  
+  artifact          Artifact         @relation(fields: [artifactId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([artifactId])
+  @@index([status])
+  @@index([type])
+}
+
+enum JobType {
+  GENERATE
+  EDIT
+  EXPORT
+  VALIDATE
+  REPAIR
+  CONVERT
+}
+
+enum JobStatus {
+  PENDING
+  QUEUED
+  PROCESSING
+  COMPLETED
+  FAILED
+  CANCELLED
+  TIMEOUT
+}
+
+// ==================== FILES ====================
+
+model File {
+  id                String           @id @default(cuid())
+  workspaceId       String
+  ownerId           String
+  filename          String
+  originalName      String
+  mimeType          String
+  size              Int             // in bytes
+  r2Key             String          // R2 storage key
+  
+  // Security
+  isPublic          Boolean          @default(false)
+  signedUrlExpires  DateTime?        // For temporary access URLs
+  
+  // Processing
+  processed         Boolean          @default(false)
+  extractedText     String?          // TextDb from OCR/extraction
+  metadata          Json?           // File-specific metadata
+  
+  // Relations
+  workspace         Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  owner             User             @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([workspaceId])
+  @@index([ownerId])
+  @@index([r2Key])
+}
+
+// ==================== KNOWLEDGE SOURCES ====================
+
+model KnowledgeSource {
+  id                String           @id @default(cuid())
+  workspaceId       String
+  fileId            String?
+  title             String
+  type              KnowledgeType
+  content           String?         // Extracted/processed content
+  metadata          Json?
+  
+  workspace         Workspace        @relation(fields: [workspaceId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([workspaceId])
+}
+
+enum KnowledgeType {
+  DOCUMENT
+  POLICY
+  GUIDELINE
+  REFERENCE
+  PRODUCT_INFO
+  PRICING
+  CUSTOM
+}
+
+// ==================== SUBSCRIPTIONS & PAYMENTS ====================
+
+model Plan {
+  id                String           @id @default(cuid())
+  name              String
+  description       String?
+  priceMonthly     Int              // in cents
+  priceYearly       Int?             // in cents
+  currency          String           @default("USD")
+  
+  // Limits
+  aiRequestsLimit   Int?             // null = unlimited
+  storageLimitMb    Int?
+  artifactLimit     Int?
+  features          Json?           // Feature flags
+  
+  stripePriceId     String?
+  payfastToken      String?
+  isActive          Boolean          @default(true)
+  
+  subscriptions     Subscription[]
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+}
+
+model Subscription {
+  id                      String           @id @default(cuid())
+  userId                  String
+  planId                  String
+  status                  SubscriptionStatus
+  
+  // Provider info
+  provider                PaymentProvider  @default(PAYFAST)
+  providerSubscriptionId  String?
+  
+  // Billing period
+  currentPeriodStart      DateTime
+  currentPeriodEnd        DateTime
+  cancelAtPeriodEnd       Boolean          @default(false)
+  cancelledAt             DateTime?
+  
+  // Payment
+  payfastToken            String?
+  payfastMerchantId       String?
+  
+  user                    User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  plan                    Plan             @relation(fields: [planId], references: [id])
+  invoices                Invoice[]
+  
+  createdAt               DateTime         @default(now())
+  updatedAt               DateTime         @updatedAt
+  
+  @@unique([userId, status]) where status == ACTIVE
+  @@index([userId])
+  @@index[providerSubscriptionId]
+  @@index([status])
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  PAST_DUE
+  CANCELLED
+  EXPIRED
+  TRIALING
+  CANCEL_AT_PERIOD_END
+  INCOMPLETE
+}
+
+enum PaymentProvider {
+  PAYFAST
+  STRIPE
+  MANUAL
+}
+
+model Payment {
+  id                String           @id @default(cuid())
+  userId            String
+  subscriptionId    String?
+  invoiceId         String?
+  amount            Int              // in cents
+  currency          String           @default("USD")
+  status            PaymentStatus
+  provider          PaymentProvider  @default(PAYFAST)
+  providerPaymentId String?
+  
+  // PayFast specific
+  paymentToken      String?
+  merchantId        String?
+  
+  // Timestamps
+  paidAt            DateTime?
+  
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([userId])
+  @@index([subscriptionId])
+  @@index([status])
+  @@index([providerPaymentId])
+}
+
+enum PaymentStatus {
+  PENDING
+  PAID
+  FAILED
+  CANCELLED
+  REFUNDED
+  EXPIRED
+}
+
+model Invoice {
+  id                String           @id @default(cuid())
+  subscriptionId    String
+  paymentId         String?
+  invoiceNumber     String           @unique
+  amount            Int              // in cents
+  currency          String           @default("USD")
+  status            InvoiceStatus
+  dueDate           DateTime
+  paidAt            DateTime?
+  items             Json[]           // Line items
+  
+  url               String?          // Invoice PDF URL
+  
+  subscription      Subscription     @relation(fields: [subscriptionId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  updatedAt         DateTime         @updatedAt
+  
+  @@index([subscriptionId])
+  @@index([status])
+}
+
+enum InvoiceStatus {
+  DRAFT
+  OPEN
+  PAID
+  VOID
+  UNCOLLECTIBLE
+}
+
+// ==================== USAGE TRACKING ====================
+
+model UsageRecord {
+  id                String           @id @default(cuid())
+  userId            String
+  category          UsageCategory
+  quantity          Int              @default(1)
+  metadata          Json?
+  
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  recordedAt        DateTime         @default(now())
+  
+  @@index([userId])
+  @@index([category])
+  @@index([recordedAt])
+}
+
+enum UsageCategory {
+  AI_REQUEST_TEXT
+  AI_REQUEST_LONG_CONTEXT
+  AI_REQUEST_IMAGE
+  DOCUMENT_GENERATED
+  SPREADSHEET_GENERATED
+  PRESENTATION_GENERATED
+  PDF_GENERATED
+  FILE_UPLOAD
+  FILE_PROCESS
+  EXPORT_DOWNLOAD
+  TOKEN_INPUT
+  TOKEN_OUTPUT
+}
+
+// ==================== AI REQUEST LOGGING ====================
+
+model AiRequest {
+  id                String           @id @default(cuid())
+  userId            String
+  artifactId        String?
+  jobId             String?
+  
+  // Request details
+  provider          AiProvider       @default(OPENROUTER)
+  model             String
+  endpoint          String?
+  
+  // Token usage
+  promptTokens      Int?
+  completionTokens   Int?
+  totalTokens       Int?
+  
+  // Performance
+  latencyMs         Int?
+  success           Boolean
+  
+  error             String?
+  metadata          Json?
+  
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  
+  @@index([userId])
+  @@index([provider])
+  @@index([model])
+  @@index([success])
+  @@index([createdAt])
+}
+
+enum AiProvider {
+  OPENROUTER
+  OPENAI
+  ANTHROPIC
+  LOCAL
+}
+
+// ==================== WEBHOOK EVENTS ====================
+
+model WebhookEvent {
+  id                String           @id @default(cuid())
+  provider          WebhookProvider
+  eventType         String
+  payload           Json
+  processed         Boolean          @default(false)
+  processingError   String?
+  
+  // Idempotency
+  eventId           String           @unique // Provider's event ID
+  
+  // Security
+  signature         String?
+  signatureValid    Boolean?
+  
+  processedAt       DateTime?
+  
+  createdAt         DateTime         @default(now())
+  
+  @@index([provider])
+  @@index([eventType])
+  @@index([processed])
+  @@index([eventId])
+}
+
+enum WebhookProvider {
+  PAYFAST
+  STRIPE
+}
+
+// ==================== NOTIFICATIONS ====================
+
+model Notification {
+  id                String           @id @default(cuid())
+  userId            String
+  type              NotificationType
+  title             String
+  message           String
+  data              Json?
+  read              Boolean          @default(false)
+  
+  actionUrl         String?
+  actionLabel       String?
+  
+  user              User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  createdAt         DateTime         @default(now())
+  
+  @@index([userId])
+  @@index([read])
+  @@index([type])
+}
+
+enum NotificationType {
+  ARTIFACT_COMPLETE
+  ARTIFACT_FAILED
+  PAYMENT_SUCCESS
+  PAYMENT_FAILED
+  SUBSCRIPTION_EXPIRED
+  USAGE_WARNING
+  SYSTEM
+  INFO
+}
