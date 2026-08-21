@@ -149,12 +149,12 @@ const examplePrompts = [
 // ==================== OUTPUT FORMATS ====================
 
 const outputFormats = [
-  { value: 'auto', label: 'Auto-detect', description: 'Let Filo choose the best format' },
-  { value: 'DOCX', label: 'Word Document', description: '.docx - Best for text documents' },
-  { value: 'PDF', label: 'PDF', description: '.pdf - Universal format' },
-  { value: 'XLSX', label: 'Excel Spreadsheet', description: '.xlsx - For data and calculations' },
-  { value: 'PPTX', label: 'PowerPoint', description: '.pptx - For presentations' },
-  { value: 'CSV', label: 'CSV', description: '.csv - For data export' },
+  { value: 'auto', label: 'Auto', icon: Wand2, color: 'text-purple-500' },
+  { value: 'DOCX', label: 'DOCX', icon: FileText, color: 'text-blue-600' },
+  { value: 'PDF', label: 'PDF', icon: FileText, color: 'text-red-500' },
+  { value: 'XLSX', label: 'XLSX', icon: FileSpreadsheet, color: 'text-green-600' },
+  { value: 'PPTX', label: 'PPTX', icon: Presentation, color: 'text-orange-500' },
+  { value: 'CSV', label: 'CSV', icon: Table, color: 'text-teal-600' },
 ]
 
 // ==================== MAIN COMPONENT ====================
@@ -694,18 +694,21 @@ export function MainDashboard() {
                       <SelectValue placeholder="Output format" />
                     </SelectTrigger>
                     <SelectContent>
-                      {outputFormats.map(format => (
-                        <SelectItem 
-                          key={format.value} 
-                          value={format.value}
-                          className="cursor-pointer"
-                        >
-                          <div className="flex flex-col items-start py-1">
-                            <span className="font-medium">{format.label}</span>
-                            <span className="text-xs text-muted-foreground leading-tight mt-0.5">{format.description}</span>
-                          </div>
-                        </SelectItem>
-                      ))}
+                      {outputFormats.map(format => {
+                        const IconComponent = format.icon
+                        return (
+                          <SelectItem 
+                            key={format.value} 
+                            value={format.value}
+                            className="cursor-pointer gap-2 py-2.5"
+                          >
+                            <div className="flex items-center gap-2.5">
+                              <IconComponent className={`h-4.5 w-4.5 ${format.color}`} />
+                              <span className="font-medium text-sm">{format.label}</span>
+                            </div>
+                          </SelectItem>
+                        )
+                      })}
                     </SelectContent>
                   </Select>
 

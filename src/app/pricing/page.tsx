@@ -9,27 +9,30 @@ import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
 import {
   Check,
-  X,
   Crown,
-  Zap,
+  Users,
+  Building2,
+  ArrowLeft,
   ArrowRight,
   Star,
   Rocket,
   Shield,
   Sparkles,
   CreditCard,
-  ArrowLeft,
-  Menu,
+  Phone,
+  Mail,
   Sun,
-  Moon
+  Moon,
+  X
 } from 'lucide-react'
-import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans'
+import { getDefaultPlans, currencyConfig, contactSalesUrl, type PlanConfig } from '@/config/plans'
 import { useTheme } from 'next-themes'
 
-// Icon mapping
+// Icon mapping for plans
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
-  Zap,
   Crown,
+  Users,
+  Building2,
   Star,
   Rocket,
   Shield,
@@ -47,7 +50,12 @@ export default function PricingPage() {
     router.push(`/?signup=true&plan=${planId}`)
   }
 
+  const handleContactSales = () => {
+    window.open(contactSalesUrl, '_blank')
+  }
+
   const formatPrice = (amount: number): string => {
+    if (amount === 0) return ''
     return `${currencyConfig.symbol}${amount}`
   }
 
@@ -122,7 +130,7 @@ export default function PricingPage() {
           </h1>
 
           <p className="mx-auto mb-10 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-            Start free, upgrade when you're ready. No hidden fees, cancel anytime.
+            All plans include core features. No hidden fees, cancel anytime.
           </p>
 
           {/* Billing Toggle */}
@@ -144,7 +152,7 @@ export default function PricingPage() {
             </button>
             <span className={`text-sm font-medium ${isAnnual ? 'text-foreground' : 'text-muted-foreground'}`}>
               Annual
-              <Badge variant="secondary" className="ml-2 text-xs cursor-default">Save 20%</Badge>
+              <Badge variant="secondary" className="ml-2 text-xs cursor-default">Save ~17%</Badge>
             </span>
           </div>
         </div>
@@ -153,87 +161,76 @@ export default function PricingPage() {
       {/* Plans Grid */}
       <section className="py-16 lg:py-20">
         <div className="container mx-auto px-4">
-          <div className="grid gap-8 md:grid-cols-3 max-w-5xl mx-auto">
+          <div className="grid gap-8 md:grid-cols-3 max-w-6xl mx-auto">
             {plans.map((plan) => {
-              // Skip yearly plans when monthly is selected and vice versa
-              if (!isAnnual && plan.id.includes('yearly')) return null
-              if (isAnnual && !plan.id.includes('yearly') && plan.id !== 'free') return null
-              
-              // For yearly view, transform monthly plan to yearly
-              const displayPlan = isAnnual && plan.id.includes('monthly') 
-                ? plans.find(p => p.id.includes('yearly')) || plan 
-                : plan
-
-              const finalPlan = displayPlan || plan
-              const IconComponent = iconMap[finalPlan.icon] || Zap
-
-              // Calculate displayed price
-              let displayMonthly = finalPlan.price.monthly
-              let displayYearly = finalPlan.price.yearly
-              
-              if (isAnnual && plan.id === 'pro-monthly') {
-                // Show yearly version
-                const yearlyPlan = plans.find(p => p.id === 'pro-yearly')
-                if (yearlyPlan) {
-                  displayYearly = yearlyPlan.price.yearly
-                  displayMonthly = 0
-                }
-              }
+              const IconComponent = iconMap[plan.icon] || Crown
 
               return (
                 <Card 
-                  key={finalPlan.id}
+                  key={plan.id}
                   className={`relative flex flex-col cursor-pointer transition-all duration-300 hover:shadow-xl ${
-                    finalPlan.popular ? 'border-primary shadow-lg scale-105 z-10' : ''
-                  } ${finalPlan.id === 'free' ? 'border-dashed' : ''}`}
+                    plan.popular ? 'border-primary shadow-lg scale-105 z-10' : ''
+                  } ${plan.contactSales ? 'border-dashed border-primary/30' : ''}`}
                 >
-                  {finalPlan.popular && (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-20">
-                      <Badge className="px-3 py-1 gap-1 cursor-default bg-primary text-primary-foreground">
-                        <Star className="h-3 w-3" />
-                        Most Popular
-                      </Badge>
-                    </div>
-                  )}
-                  
-                  {finalPlan.id === 'free' && (
-                    <div className="absolute -top-3 left-1/2 -translate-x-1/2 z-20">
-                      <Badge variant="outline" className="px-3 py-1 cursor-default">
-                        Always Free
+                  {/* Badge */}
+                  {plan.badge && (
+                    <div className={`absolute -top-3 left-1/2 -translate-x-1/2 z-20 ${
+                      plan.contactSales 
+                        ? '' 
+                        : ''
+                    }`}>
+                      <Badge 
+                        className={`px-3 py-1 gap-1 cursor-default ${
+                          plan.popular 
+                            ? 'bg-primary text-primary-foreground' 
+                            : plan.contactSales
+                              ? 'bg-gradient-to-r from-primary/80 to-primary/60 text-primary-foreground'
+                              : 'bg-secondary text-secondary-foreground'
+                        }`}
+                      >
+                        {plan.badge === 'Enterprise' && <Building2 className="h-3 w-3 mr-1" />}
+                        {plan.badge === 'Most Popular' && <Star className="h-3 w-3 mr-1" />}
+                        {plan.badge}
                       </Badge>
                     </div>
                   )}
                   
                   <CardHeader className="text-center pb-4">
                     <div className={`mx-auto flex h-14 w-14 items-center justify-center rounded-xl transition-all duration-200 ${
-                      finalPlan.popular ? 'bg-primary/10' : 'bg-muted'
+                      plan.popular ? 'bg-primary/10' : plan.contactSales ? 'bg-gradient-to-br from-primary/10 to-primary/5' : 'bg-muted'
                     }`}>
                       <IconComponent className={`h-7 w-7 ${
-                        finalPlan.popular ? 'text-primary' : 'text-muted-foreground'
+                        plan.popular ? 'text-primary' : plan.contactSales ? 'text-primary/80' : 'text-muted-foreground'
                       }`} />
                     </div>
                     
-                    <CardTitle className="mt-4">{finalPlan.name}</CardTitle>
-                    <CardDescription>{finalPlan.description}</CardDescription>
+                    <CardTitle className="mt-4">{plan.name}</CardTitle>
+                    <CardDescription>{plan.description}</CardDescription>
                     
                     <div className="mt-4">
-                      {displayMonthly > 0 ? (
-                        <div className="flex items-baseline justify-center gap-1">
-                          <span className="text-4xl font-bold">{formatPrice(displayMonthly)}</span>
-                          <span className="text-muted-foreground">/month</span>
+                      {plan.contactSales ? (
+                        <div className="text-center space-y-1">
+                          <div className="text-3xl font-bold">Custom Pricing</div>
+                          <p className="text-sm text-muted-foreground">Tailored to your needs</p>
                         </div>
-                      ) : displayYearly > 0 ? (
+                      ) : isAnnual ? (
                         <div className="text-center">
                           <div className="flex items-baseline justify-center gap-1">
-                            <span className="text-4xl font-bold">{formatPrice(displayYearly)}</span>
+                            <span className="text-4xl font-bold">{formatPrice(plan.price.yearly)}</span>
                             <span className="text-muted-foreground">/year</span>
                           </div>
                           <p className="text-sm text-muted-foreground mt-1">
-                            ~{formatPrice(Math.round(displayYearly / 12))}/month
+                            ~{formatPrice(Math.round(plan.price.yearly / 12))}/month
                           </p>
+                          <Badge variant="secondary" className="mt-2 text-xs cursor-default">
+                            Save {formatPrice(plan.price.monthly * 12 - plan.price.yearly)}/yr
+                          </Badge>
                         </div>
                       ) : (
-                        <div className="text-4xl font-bold">Free</div>
+                        <div className="flex items-baseline justify-center gap-1">
+                          <span className="text-4xl font-bold">{formatPrice(plan.price.monthly)}</span>
+                          <span className="text-muted-foreground">/month</span>
+                        </div>
                       )}
                     </div>
                   </CardHeader>
@@ -241,17 +238,17 @@ export default function PricingPage() {
                   <CardContent className="flex-1 space-y-4">
                     {/* Features */}
                     <ul className="space-y-3">
-                      {finalPlan.features.slice(0, 6).map((feature, idx) => (
+                      {plan.features.slice(0, plan.contactSales ? 8 : 6).map((feature, idx) => (
                         <li key={idx} className="flex items-start gap-3">
                           <Check className="h-5 w-5 text-green-600 shrink-0 mt-0.5" />
                           <span className="text-sm">{feature}</span>
                         </li>
                       ))}
                       
-                      {finalPlan.limitations.length > 0 && (
+                      {plan.limitations && plan.limitations.length > 0 && (
                         <>
                           <Separator className="my-2" />
-                          {finalPlan.limitations.slice(0, 2).map((limitation, idx) => (
+                          {plan.limitations.map((limitation, idx) => (
                             <li key={idx} className="flex items-start gap-3">
                               <X className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
                               <span className="text-sm text-muted-foreground">{limitation}</span>
@@ -265,23 +262,23 @@ export default function PricingPage() {
                     <Button 
                       className="w-full mt-6 cursor-pointer hover:shadow-md transition-all min-h-[44px]"
                       variant={
-                        finalPlan.id === 'free' 
+                        plan.contactSales 
                           ? "outline" 
-                          : finalPlan.popular 
+                          : plan.popular 
                             ? "default" 
                             : "secondary"
                       }
-                      onClick={() => finalPlan.id !== 'free' && handleSubscribe(finalPlan.id)}
-                      asChild={finalPlan.id === 'free'}
+                      onClick={() => plan.contactSales ? handleContactSales() : handleSubscribe(plan.id)}
                     >
-                      {finalPlan.id === 'free' ? (
-                        <Link href="/" className="gap-2">
-                          Get Started Free
-                          <ArrowRight className="ml-2 h-4 w-4" />
-                        </Link>
+                      {plan.contactSales ? (
+                        <>
+                          <Phone className="mr-2 h-4 w-4" />
+                          {plan.cta}
+                          <Mail className="ml-2 h-4 w-4" />
+                        </>
                       ) : (
                         <>
-                          {finalPlan.cta}
+                          {plan.cta}
                           <ArrowRight className="ml-2 h-4 w-4" />
                         </>
                       )}
@@ -295,7 +292,7 @@ export default function PricingPage() {
       </section>
 
       {/* FAQ Section */}
-      <section className="border-t py-16 bg-muted/30">
+      <section id="faq" className="border-t py-16 bg-muted/30">
         <div className="container mx-auto px-4">
           <div className="mx-auto max-w-3xl text-center mb-12">
             <h2 className="text-3xl font-bold mb-4 flex items-center justify-center gap-2">
@@ -310,8 +307,8 @@ export default function PricingPage() {
           <div className="grid gap-6 md:grid-cols-2 max-w-4xl mx-auto">
             {[
               {
-                q: 'Can I try Filo for free?',
-                a: 'Yes! Our Free plan includes 50 AI generations per month so you can experience the full power of Filo before upgrading.',
+                q: 'Is there a free trial available?',
+                a: 'Yes! All paid plans come with a 7-day free trial so you can experience Filo\'s full capabilities before committing.',
                 icon: Sparkles
               },
               {
@@ -335,9 +332,9 @@ export default function PricingPage() {
                 icon: Rocket
               },
               {
-                q: 'Do you offer team or enterprise plans?',
-                a: 'Yes! Contact us for custom enterprise solutions with dedicated support, SSO, and advanced admin features.',
-                icon: Star
+                q: 'Do you offer custom enterprise solutions?',
+                a: 'Yes! Our Department plan includes custom pricing with dedicated support, SSO, advanced security, and tailored features.',
+                icon: Building2
               },
             ].map((faq, idx) => (
               <Card key={idx} className="cursor-default hover:shadow-md transition-shadow">
@@ -371,14 +368,13 @@ export default function PricingPage() {
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
                 <Button size="lg" asChild className="cursor-pointer gap-2 min-h-[48px]">
                   <Link href="/?signup=true">
-                    Start Free Trial
+                    Start Your Free Trial
                     <ArrowRight className="ml-2 h-5 w-5" />
                   </Link>
                 </Button>
-                <Button size="lg" variant="outline" asChild className="cursor-pointer gap-2 min-h-[48px]">
-                  <Link href="#faq">
-                    Learn More
-                  </Link>
+                <Button size="lg" variant="outline" onClick={handleContactSales} className="cursor-pointer gap-2 min-h-[48px]">
+                  <Phone className="mr-2 h-5 w-5" />
+                  Contact Sales
                 </Button>
               </div>
             </div>
