@@ -159,9 +159,9 @@ export default function PricingPage() {
       </section>
 
       {/* Plans Grid */}
-      <section className="py-16 lg:py-20">
+      <section className="py-12 md:py-16 lg:py-20">
         <div className="container mx-auto px-4">
-          <div className="grid gap-8 md:grid-cols-3 max-w-6xl mx-auto">
+          <div className="grid gap-6 md:gap-8 md:grid-cols-2 lg:grid-cols-3 max-w-6xl mx-auto items-start">
             {plans.map((plan) => {
               const IconComponent = iconMap[plan.icon] || Crown
 
@@ -169,7 +169,7 @@ export default function PricingPage() {
                 <Card 
                   key={plan.id}
                   className={`relative flex flex-col cursor-pointer transition-all duration-300 hover:shadow-xl ${
-                    plan.popular ? 'border-primary shadow-lg scale-105 z-10' : ''
+                    plan.popular ? 'border-primary shadow-lg md:scale-[1.02] z-10' : ''
                   } ${plan.contactSales ? 'border-dashed border-primary/30' : ''}`}
                 >
                   {/* Badge */}
@@ -180,7 +180,7 @@ export default function PricingPage() {
                         : ''
                     }`}>
                       <Badge 
-                        className={`px-3 py-1 gap-1 cursor-default ${
+                        className={`px-2 sm:px-3 py-1 gap-1 cursor-default text-xs ${
                           plan.popular 
                             ? 'bg-primary text-primary-foreground' 
                             : plan.contactSales
@@ -190,36 +190,37 @@ export default function PricingPage() {
                       >
                         {plan.badge === 'Enterprise' && <Building2 className="h-3 w-3 mr-1" />}
                         {plan.badge === 'Most Popular' && <Star className="h-3 w-3 mr-1" />}
-                        {plan.badge}
+                        <span className="hidden xs:inline">{plan.badge}</span>
+                        <span className="xs:hidden">{plan.badge === 'Enterprise' ? 'Ent.' : plan.badge === 'Most Popular' ? '★' : plan.badge}</span>
                       </Badge>
                     </div>
                   )}
                   
-                  <CardHeader className="text-center pb-4">
-                    <div className={`mx-auto flex h-14 w-14 items-center justify-center rounded-xl transition-all duration-200 ${
+                  <CardHeader className="text-center pb-4 px-4 sm:px-6">
+                    <div className={`mx-auto flex h-12 w-12 sm:h-14 sm:w-14 items-center justify-center rounded-xl transition-all duration-200 ${
                       plan.popular ? 'bg-primary/10' : plan.contactSales ? 'bg-gradient-to-br from-primary/10 to-primary/5' : 'bg-muted'
                     }`}>
-                      <IconComponent className={`h-7 w-7 ${
+                      <IconComponent className={`h-6 w-6 sm:h-7 sm:w-7 ${
                         plan.popular ? 'text-primary' : plan.contactSales ? 'text-primary/80' : 'text-muted-foreground'
                       }`} />
                     </div>
                     
-                    <CardTitle className="mt-4">{plan.name}</CardTitle>
-                    <CardDescription>{plan.description}</CardDescription>
+                    <CardTitle className="mt-3 sm:mt-4 text-lg sm:text-xl">{plan.name}</CardTitle>
+                    <CardDescription className="text-xs sm:text-sm">{plan.description}</CardDescription>
                     
-                    <div className="mt-4">
+                    <div className="mt-3 sm:mt-4">
                       {plan.contactSales ? (
                         <div className="text-center space-y-1">
-                          <div className="text-3xl font-bold">Custom Pricing</div>
-                          <p className="text-sm text-muted-foreground">Tailored to your needs</p>
+                          <div className="text-2xl sm:text-3xl font-bold">Custom Pricing</div>
+                          <p className="text-xs sm:text-sm text-muted-foreground">Tailored to your needs</p>
                         </div>
                       ) : isAnnual ? (
                         <div className="text-center">
                           <div className="flex items-baseline justify-center gap-1">
-                            <span className="text-4xl font-bold">{formatPrice(plan.price.yearly)}</span>
-                            <span className="text-muted-foreground">/year</span>
+                            <span className="text-3xl sm:text-4xl font-bold">{formatPrice(plan.price.yearly)}</span>
+                            <span className="text-xs sm:text-sm text-muted-foreground">/year</span>
                           </div>
-                          <p className="text-sm text-muted-foreground mt-1">
+                          <p className="text-xs sm:text-sm text-muted-foreground mt-1">
                             ~{formatPrice(Math.round(plan.price.yearly / 12))}/month
                           </p>
                           <Badge variant="secondary" className="mt-2 text-xs cursor-default">
@@ -228,8 +229,8 @@ export default function PricingPage() {
                         </div>
                       ) : (
                         <div className="flex items-baseline justify-center gap-1">
-                          <span className="text-4xl font-bold">{formatPrice(plan.price.monthly)}</span>
-                          <span className="text-muted-foreground">/month</span>
+                          <span className="text-3xl sm:text-4xl font-bold">{formatPrice(plan.price.monthly)}</span>
+                          <span className="text-xs sm:text-sm text-muted-foreground">/month</span>
                         </div>
                       )}
                     </div>
@@ -292,19 +293,19 @@ export default function PricingPage() {
       </section>
 
       {/* FAQ Section */}
-      <section id="faq" className="border-t py-16 bg-muted/30">
+      <section id="faq" className="border-t py-12 md:py-16 bg-muted/30">
         <div className="container mx-auto px-4">
-          <div className="mx-auto max-w-3xl text-center mb-12">
-            <h2 className="text-3xl font-bold mb-4 flex items-center justify-center gap-2">
-              <Shield className="h-8 w-8 text-primary" />
+          <div className="mx-auto max-w-3xl text-center mb-8 md:mb-12">
+            <h2 className="text-2xl sm:text-3xl font-bold mb-4 flex items-center justify-center gap-2">
+              <Shield className="h-7 w-7 sm:h-8 sm:w-8 text-primary" />
               Frequently Asked Questions
             </h2>
-            <p className="text-muted-foreground">
+            <p className="text-sm sm:text-base text-muted-foreground">
               Everything you need to know about Filo's pricing
             </p>
           </div>
 
-          <div className="grid gap-6 md:grid-cols-2 max-w-4xl mx-auto">
+          <div className="grid gap-4 sm:gap-6 md:grid-cols-2 max-w-4xl mx-auto">
             {[
               {
                 q: 'Is there a free trial available?',
@@ -338,14 +339,14 @@ export default function PricingPage() {
               },
             ].map((faq, idx) => (
               <Card key={idx} className="cursor-default hover:shadow-md transition-shadow">
-                <CardContent className="pt-6">
+                <CardContent className="pt-4 sm:pt-6 px-4 sm:px-6">
                   <div className="flex items-start gap-3">
-                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 shrink-0">
-                      <faq.icon className="h-5 w-5 text-primary" />
+                    <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg bg-primary/10 shrink-0">
+                      <faq.icon className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
                     </div>
                     <div>
-                      <h3 className="font-semibold mb-2">{faq.q}</h3>
-                      <p className="text-sm text-muted-foreground leading-relaxed">{faq.a}</p>
+                      <h3 className="font-semibold mb-1.5 sm:mb-2 text-sm sm:text-base">{faq.q}</h3>
+                      <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed">{faq.a}</p>
                     </div>
                   </div>
                 </CardContent>
@@ -356,13 +357,13 @@ export default function PricingPage() {
       </section>
 
       {/* CTA Section */}
-      <section className="py-16 lg:py-20">
+      <section className="py-12 md:py-16 lg:py-20">
         <div className="container mx-auto px-4 text-center">
           <Card className="max-w-2xl mx-auto overflow-hidden">
-            <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent p-8 lg:p-12">
-              <Sparkles className="mx-auto h-12 w-12 text-primary mb-4" />
-              <h2 className="text-3xl font-bold mb-4">Ready to get started?</h2>
-              <p className="text-muted-foreground mb-8 max-w-md mx-auto">
+            <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent p-6 sm:p-8 lg:p-12">
+              <Sparkles className="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-primary mb-3 sm:mb-4" />
+              <h2 className="text-2xl sm:text-3xl font-bold mb-3 sm:mb-4">Ready to get started?</h2>
+              <p className="text-sm sm:text-base text-muted-foreground mb-6 sm:mb-8 max-w-md mx-auto">
                 Join thousands of professionals creating amazing documents with AI.
               </p>
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
