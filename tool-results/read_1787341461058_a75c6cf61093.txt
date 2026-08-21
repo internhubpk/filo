@@ -1,0 +1,1135 @@
+     1→     1→'use client'
+     2→     2→
+     3→     3→import React, { useState, useCallback, useEffect } from 'react'
+     4→     4→import { Button } from '@/components/ui/button'
+     5→     5→import { Textarea } from '@/components/ui/textarea'
+     6→     6→import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
+     7→     7→import { Badge } from '@/components/ui/badge'
+     8→     8→import { Progress } from '@/components/ui/progress'
+     9→     9→import {
+    10→    10→  Dialog,
+    11→    11→  DialogContent,
+    12→    12→  DialogDescription,
+    13→    13→  DialogHeader,
+    14→    14→  DialogTitle,
+    15→    15→} from '@/components/ui/dialog'
+    16→    16→import {
+    17→    17→  Select,
+    18→    18→  SelectContent,
+    19→    19→  SelectItem,
+    20→    20→  SelectTrigger,
+    21→    21→  SelectValue,
+    22→    22→} from '@/components/ui/select'
+    23→    23→import { Input } from '@/components/ui/input'
+    24→    24→import { Label } from '@/components/ui/label'
+    25→    25→import { 
+    26→    26→  Sparkles,
+    27→    27→  Upload,
+    28→    28→  FileText,
+    29→    29→  Table,
+    30→    30→  Presentation,
+    31→    31→  BarChart3,
+    32→    32→  PenTool,
+    33→    33→  BookOpen,
+    34→    34→  Briefcase,
+    35→    35→  GraduationCap,
+    36→    36→  Receipt,
+    37→    37→  UserCircle,
+    38→    38→  ArrowRight,
+    39→    39→  Loader2,
+    40→    40→  Check,
+    41→    41→  AlertCircle,
+    42→    42→  X,
+    43→    43→  Download,
+    44→    44→  Copy,
+    45→    45→  Eye,
+    46→    46→  Edit3,
+    47→    47→  History,
+    48→    48→  LogIn,
+    49→    49→  UserPlus,
+    50→    50→  Mail,
+    51→    51→  Lock,
+    52→    52→  ArrowLeft
+    53→    53→} from 'lucide-react'
+    54→    54→
+    55→    55→// ==================== AUTH TYPES ====================
+    56→    56→
+    57→    57→interface User {
+    58→    58→  id: string
+    59→    59→  email: string
+    60→    60→  name: string
+    61→    61→  avatar?: string
+    62→    62→}
+    63→    63→
+    64→    64→// ==================== CREATION TYPES ====================
+    65→    65→
+    66→    66→interface CreationRequest {
+    67→    67→  prompt: string
+    68→    68→  files?: File[]
+    69→    69→  outputFormat?: string
+    70→    70→}
+    71→    71→
+    72→    72→interface GenerationStage {
+    73→    73→  id: string
+    74→    74→  label: string
+    75→    75→  status: 'pending' | 'active' | 'completed' | 'error'
+    76→    76→  detail?: string
+    77→    77→}
+    78→    78→
+    79→    79→interface ArtifactPreview {
+    80→    80→  id: string
+    81→    81→  title: string
+    82→    82→  type: string
+    83→    83→  format: string
+    84→    84→  status: 'completed' | 'generating' | 'failed'
+    85→    85→  createdAt: Date
+    86→    86→  thumbnail?: string
+    87→    87→}
+    88→    88→
+    89→    89→// ==================== EXAMPLE PROMPTS ====================
+    90→    90→
+    91→    91→const examplePrompts = [
+    92→    92→  {
+    93→    93→    icon: Briefcase,
+    94→    94→    title: 'Business Proposal',
+    95→    95→    prompt: 'Create a professional business proposal for a digital marketing agency targeting small businesses',
+    96→    96→    category: 'business',
+    97→    97→  },
+    98→    98→  {
+    99→    99→    icon: GraduationCap,
+   100→   100→    title: 'Lesson Plan',
+   101→   101→    prompt: 'Design a comprehensive 16-week lesson plan for an introductory Python programming course',
+   102→   102→    category: 'education',
+   103→   103→  },
+   104→   104→  {
+   105→   105→    icon: Receipt,
+   106→   106→    title: 'Invoice',
+   107→   107→    prompt: 'Generate a professional invoice for consulting services with hourly rates and itemized billing',
+   108→   108→    category: 'finance',
+   109→   109→  },
+   110→   110→  {
+   111→   111→    icon: PenTool,
+   112→   112→    title: 'Resume',
+   113→   113→    prompt: 'Create a modern, professional resume for a senior software engineer with 8 years of experience',
+   114→   114→    category: 'career',
+   115→   115→  },
+   116→   116→  {
+   117→   117→    icon: Presentation,
+   118→   118→    title: 'Presentation',
+   119→   119→    prompt: 'Turn this quarterly business report into an engaging 12-slide executive presentation',
+   120→   120→    category: 'presentation',
+   121→   121→  },
+   122→   122→  {
+   123→   123→    icon: BarChart3,
+   124→   124→    title: 'Financial Report',
+   125→   125→    prompt: 'Analyze this spreadsheet data and create a professional financial report with charts and insights',
+   126→   126→    category: 'analytics',
+   127→   127→  },
+   128→   128→]
+   129→   129→
+   130→   130→// ==================== OUTPUT FORMATS ====================
+   131→   131→
+   132→   132→const outputFormats = [
+   133→   133→  { value: 'auto', label: 'Auto-detect', description: 'Let Filo choose the best format' },
+   134→   134→  { value: 'DOCX', label: 'Word Document', description: '.docx - Best for text documents' },
+   135→   135→  { value: 'PDF', label: 'PDF', description: '.pdf - Universal format' },
+   136→   136→  { value: 'XLSX', label: 'Excel Spreadsheet', description: '.xlsx - For data and calculations' },
+   137→   137→  { value: 'PPTX', label: 'PowerPoint', description: '.pptx - For presentations' },
+   138→   138→  { value: 'CSV', label: 'CSV', description: '.csv - For data export' },
+   139→   139→]
+   140→   140→
+   141→   141→// ==================== MAIN COMPONENT ====================
+   142→   142→
+   143→   143→export function MainDashboard() {
+   144→   144→  // Auth State
+   145→   145→  const [user, setUser] = useState<User | null>(null)
+   146→   146→  const [showLoginModal, setShowLoginModal] = useState(false)
+   147→   147→  const [showSignupModal, setShowSignupModal] = useState(false)
+   148→   148→  
+   149→   149→  // Login Form State
+   150→   150→  const [loginEmail, setLoginEmail] = useState('')
+   151→   151→  const [loginPassword, setLoginPassword] = useState('')
+   152→   152→  const [isLoggingIn, setIsLoggingIn] = useState(false)
+   153→   153→  
+   154→   154→  // Signup Form State
+   155→   155→  const [signupName, setSignupName] = useState('')
+   156→   156→  const [signupEmail, setSignupEmail] = useState('')
+   157→   157→  const [signupPassword, setSignupPassword] = useState('')
+   158→   158→  const [isSigningUp, setIsSigningUp] = useState(false)
+   159→   159→
+   160→   160→  // Creation State
+   161→   161→  const [prompt, setPrompt] = useState('')
+   162→   162→  const [files, setFiles] = useState<File[]>([])
+   163→   163→  const [selectedFormat, setSelectedFormat] = useState('auto')
+   164→   164→  const [isGenerating, setIsGenerating] = useState(false)
+   165→   165→  const [showResultDialog, setShowResultDialog] = useState(false)
+   166→   166→  const [generationStages, setGenerationStages] = useState<GenerationStage[]>([])
+   167→   167→  const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview | null>(null)
+   168→   168→  const [dragActive, setDragActive] = useState(false)
+   169→   169→  const [error, setError] = useState<string | null>(null)
+   170→   170→
+   171→   171→  // Load saved prompt on mount
+   172→   172→  useEffect(() => {
+   173→   173→    const savedPrompt = localStorage.getItem('filo_draft_prompt')
+   174→   174→    if (savedPrompt) {
+   175→   175→      setPrompt(savedPrompt)
+   176→   176→    }
+   177→   177→    
+   178→   178→    // Check for existing session
+   179→   179→    const savedUser = localStorage.getItem('filo_user')
+   180→   180→    if (savedUser) {
+   181→   181→      try {
+   182→   182→        setUser(JSON.parse(savedUser))
+   183→   183→      } catch {
+   184→   184→        localStorage.removeItem('filo_user')
+   185→   185→      }
+   186→   186→    }
+   187→   187→  }, [])
+   188→   188→
+   189→   189→  // Save prompt to localStorage whenever it changes
+   190→   190→  useEffect(() => {
+   191→   191→    if (prompt.trim()) {
+   192→   192→      localStorage.setItem('filo_draft_prompt', prompt)
+   193→   193→    } else {
+   194→   194→      localStorage.removeItem('filo_draft_prompt')
+   195→   195→    }
+   196→   196→  }, [prompt])
+   197→   197→
+   198→   198→  // Handle file upload
+   199→   199→  const handleFiles = useCallback((newFiles: FileList | null) => {
+   200→   200→    if (!newFiles) return
+   201→   201→    
+   202→   202→    const fileArray = Array.from(newFiles)
+   203→   203→    setFiles(prev => [...prev, ...fileArray])
+   204→   204→  }, [])
+   205→   205→
+   206→   206→  const handleDrag = useCallback((e: React.DragEvent) => {
+   207→   207→    e.preventDefault()
+   208→   208→    e.stopPropagation()
+   209→   209→    if (e.type === 'dragenter' || e.type === 'dragover') {
+   210→   210→      setDragActive(true)
+   211→   211→    } else if (e.type === 'dragleave') {
+   212→   212→      setDragActive(false)
+   213→   213→    }
+   214→   214→  }, [])
+   215→   215→
+   216→   216→  const handleDrop = useCallback((e: React.DragEvent) => {
+   217→   217→    e.preventDefault()
+   218→   218→    e.stopPropagation()
+   219→   219→    setDragActive(false)
+   220→   220→    handleFiles(e.dataTransfer.files)
+   221→   221→  }, [handleFiles])
+   222→   222→
+   223→   223→  const removeFile = (index: number) => {
+   224→   224→    setFiles(prev => prev.filter((_, i) => i !== index))
+   225→   225→  }
+   226→   226→
+   227→   227→  // Auth Handlers
+   228→   228→  const handleLogin = async (e: React.FormEvent) => {
+   229→   229→    e.preventDefault()
+   230→   230→    setError(null)
+   231→   231→    
+   232→   232→    if (!loginEmail.trim() || !loginPassword.trim()) {
+   233→   233→      setError('Please fill in all fields')
+   234→   234→      return
+   235→   235→    }
+   236→   236→
+   237→   237→    setIsLoggingIn(true)
+   238→   238→    
+   239→   239→    try {
+   240→   240→      // Simulate API call - replace with real auth
+   241→   241→      await new Promise(resolve => setTimeout(resolve, 1000))
+   242→   242→      
+   243→   243→      const newUser: User = {
+   244→   244→        id: crypto.randomUUID(),
+   245→   245→        email: loginEmail,
+   246→   246→        name: loginEmail.split('@')[0],
+   247→   247→      }
+   248→   248→      
+   249→   249→      setUser(newUser)
+   250→   250→      localStorage.setItem('filo_user', JSON.stringify(newUser))
+   251→   251→      setShowLoginModal(false)
+   252→   252→      setLoginEmail('')
+   253→   253→      setLoginPassword('')
+   254→   254→    } catch (err) {
+   255→   255→      setError('Invalid credentials. Please try again.')
+   256→   256→    } finally {
+   257→   257→      setIsLoggingIn(false)
+   258→   258→    }
+   259→   259→  }
+   260→   260→
+   261→   261→  const handleSignup = async (e: React.FormEvent) => {
+   262→   262→    e.preventDefault()
+   263→   263→    setError(null)
+   264→   264→    
+   265→   265→    if (!signupName.trim() || !signupEmail.trim() || !signupPassword.trim()) {
+   266→   266→      setError('Please fill in all fields')
+   267→   267→      return
+   268→   268→    }
+   269→   269→
+   270→   270→    if (signupPassword.length < 6) {
+   271→   271→      setError('Password must be at least 6 characters')
+   272→   272→      return
+   273→   273→    }
+   274→   274→
+   275→   275→    setIsSigningUp(true)
+   276→   276→    
+   277→   277→    try {
+   278→   278→      // Simulate API call - replace with real auth
+   279→   279→      await new Promise(resolve => setTimeout(resolve, 1200))
+   280→   280→      
+   281→   281→      const newUser: User = {
+   282→   282→        id: crypto.randomUUID(),
+   283→   283→        email: signupEmail,
+   284→   284→        name: signupName,
+   285→   285→      }
+   286→   286→      
+   287→   287→      setUser(newUser)
+   288→   288→      localStorage.setItem('filo_user', JSON.stringify(newUser))
+   289→   289→      setShowSignupModal(false)
+   290→   290→      setSignupName('')
+   291→   291→      setSignupEmail('')
+   292→   292→      setSignupPassword('')
+   293→   293→    } catch (err) {
+   294→   294→      setError('Account creation failed. Please try again.')
+   295→   295→    } finally {
+   296→   296→      setIsSigningUp(false)
+   297→   297→    }
+   298→   298→  }
+   299→   299→
+   300→   300→  const handleLogout = () => {
+   301→   301→    setUser(null)
+   302→   302→    localStorage.removeItem('filo_user')
+   303→   303→  }
+   304→   304→
+   305→   305→  // Handle generation
+   306→   306→  const handleGenerate = async () => {
+   307→   307→    if (!prompt.trim()) return
+   308→   308→    
+   309→   309→    // Require login for generation
+   310→   310→    if (!user) {
+   311→   311→      setShowLoginModal(true)
+   312→   312→      return
+   313→   313→    }
+   314→   314→
+   315→   315→    setIsGenerating(true)
+   316→   316→    setError(null)
+   317→   317→    
+   318→   318→    // Initialize generation stages
+   319→   319→    const stages: GenerationStage[] = [
+   320→   320→      { id: '1', label: 'Understanding request', status: 'pending' },
+   321→   321→      { id: '2', label: 'Reading files', status: 'pending' },
+   322→   322→      { id: '3', label: 'Planning artifact', status: 'pending' },
+   323→   323→      { id: '4', label: 'Generating content', status: 'pending' },
+   324→   324→      { id: '5', label: 'Creating visuals', status: 'pending' },
+   325→   325→      { id: '6', label: 'Formatting document', status: 'pending' },
+   326→   326→      { id: '7', label: 'Checking quality', status: 'pending' },
+   327→   327→      { id: '8', label: 'Finalizing', status: 'pending' },
+   328→   328→    ]
+   329→   329→    setGenerationStages(stages)
+   330→   330→
+   331→   331→    try {
+   332→   332→      // Call actual API endpoint
+   333→   333→      const response = await fetch('/api/artifacts/generate', {
+   334→   334→        method: 'POST',
+   335→   335→        headers: { 'Content-Type': 'application/json' },
+   336→   336→        body: JSON.stringify({
+   337→   337→          prompt,
+   338→   338→          artifactType: detectArtifactType(prompt),
+   339→   339→          outputFormat: selectedFormat === 'auto' ? undefined : selectedFormat,
+   340→   340→          files: files.map(f => ({ name: f.name, size: f.size, type: f.type })),
+   341→   341→          workspaceId: user.id, // Use user's default workspace
+   342→   342→          brandConfig: null,
+   343→   343→          knowledgeContext: null,
+   344→   344→        }),
+   345→   345→      })
+   346→   346→
+   347→   347→      if (!response.ok) {
+   348→   348→        const errorData = await response.json()
+   349→   349→        throw new Error(errorData.message || 'Generation failed')
+   350→   350→      }
+   351→   351→
+   352→   352→      const data = await response.json()
+   353→   353→
+   354→   354→      // Simulate progress stages based on actual processing
+   355→   355→      for (let i = 0; i < stages.length; i++) {
+   356→   356→        await new Promise(resolve => setTimeout(resolve, 600 + Math.random() * 800))
+   357→   357→        
+   358→   358→        setGenerationStages(prev => 
+   359→   359→          prev.map(stage => 
+   360→   360→            stage.id === String(i + 1) 
+   361→   361→              ? { ...stage, status: 'completed' as const }
+   362→   362→              : stage
+   363→   363→          )
+   364→   364→        )
+   365→   365→        
+   366→   366→        if (i < stages.length - 1) {
+   367→   367→          setGenerationStages(prev =>
+   368→   368→            prev.map(stage =>
+   369→   369→              stage.id === String(i + 2)
+   370→   370→                ? { ...stage, status: 'active' as const }
+   371→   371→                : stage
+   372→   372→            )
+   373→   373→          )
+   374→   374→        }
+   375→   375→      }
+   376→   376→
+   377→   377→      // Create artifact preview from response or fallback
+   378→   378→      const artifact: ArtifactPreview = data.artifact || {
+   379→   379→        id: crypto.randomUUID(),
+   380→   380→        title: extractTitle(prompt),
+   381→   381→        type: detectArtifactType(prompt),
+   382→   382→        format: selectedFormat === 'auto' ? 'DOCX' : selectedFormat,
+   383→   383→        status: 'completed' as const,
+   384→   384→        createdAt: new Date(),
+   385→   385→      }
+   386→   386→
+   387→   387→      setCurrentArtifact(artifact)
+   388→   388→      setShowResultDialog(true)
+   389→   389→      
+   390→   390→      // Clear draft after successful generation
+   391→   391→      localStorage.removeItem('filo_draft_prompt')
+   392→   392→      
+   393→   393→    } catch (err) {
+   394→   394→      console.error('Generation failed:', err)
+   395→   395→      const errorMessage = err instanceof Error ? err.message : 'Generation failed'
+   396→   396→      setError(errorMessage)
+   397→   397→      
+   398→   398→      // Mark current stage as error
+   399→   399→      setGenerationStages(prev =>
+   400→   400→        prev.map(stage =>
+   401→   401→          stage.status === 'active'
+   402→   402→            ? { ...stage, status: 'error' as const, detail: errorMessage }
+   403→   403→            : stage
+   404→   404→        )
+   405→   405→      )
+   406→   406→    } finally {
+   407→   407→      setIsGenerating(false)
+   408→   408→    }
+   409→   409→  }
+   410→   410→
+   411→   411→  // Helper functions
+   412→   412→  const extractTitle = (text: string): string => {
+   413→   413→    const words = text.split(' ').slice(0, 8).join(' ')
+   414→   414→    return words.length > 50 ? words + '...' : words
+   415→   415→  }
+   416→   416→
+   417→   417→  const detectArtifactType = (text: string): string => {
+   418→   418→    const lower = text.toLowerCase()
+   419→   419→    if (lower.includes('proposal') || lower.includes('business')) return 'Proposal'
+   420→   420→    if (lower.includes('lesson') || lower.includes('course')) return 'Lesson Plan'
+   421→   421→    if (lower.includes('invoice')) return 'Invoice'
+   422→   422→    if (lower.includes('resume') || lower.includes('cv')) return 'Resume'
+   423→   423→    if (lower.includes('presentation') || lower.includes('slide')) return 'Presentation'
+   424→   424→    if (lower.includes('spreadsheet') || lower.includes('excel') || lower.includes('budget')) return 'Spreadsheet'
+   425→   425→    if (lower.includes('report')) return 'Report'
+   426→   426→    return 'Document'
+   427→   427→  }
+   428→   428→
+   429→   429→  const handleExampleClick = (examplePrompt: string) => {
+   430→   430→    setPrompt(examplePrompt)
+   431→   431→  }
+   432→   432→
+   433→   433→  const switchToSignup = () => {
+   434→   434→    setShowLoginModal(false)
+   435→   435→    setShowSignupModal(true)
+   436→   436→    setError(null)
+   437→   437→  }
+   438→   438→
+   439→   439→  const switchToLogin = () => {
+   440→   440→    setShowSignupModal(false)
+   441→   441→    setShowLoginModal(true)
+   442→   442→    setError(null)
+   443→   443→  }
+   444→   444→
+   445→   445→  return (
+   446→   446→    <div className="min-h-screen bg-background">
+   447→   447→      {/* Header with Auth */}
+   448→   448→      <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
+   449→   449→        <div className="container mx-auto flex h-16 items-center justify-between px-4">
+   450→   450→          {/* Logo */}
+   451→   451→          <div className="flex items-center gap-3">
+   452→   452→            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary shadow-sm">
+   453→   453→              <Sparkles className="h-5 w-5 text-primary-foreground" />
+   454→   454→            </div>
+   455→   455→            <span className="text-xl font-bold tracking-tight">Filo</span>
+   456→   456→          </div>
+   457→   457→
+   458→   458→          {/* Auth Section */}
+   459→   459→          <div className="flex items-center gap-3">
+   460→   460→            {user ? (
+   461→   461→              <div className="flex items-center gap-3">
+   462→   462→                <span className="hidden sm:block text-sm text-muted-foreground">
+   463→   463→                  Welcome, <span className="font-medium text-foreground">{user.name}</span>
+   464→   464→                </span>
+   465→   465→                <Button variant="outline" size="sm" onClick={handleLogout} className="gap-2 cursor-pointer">
+   466→   466→                  <LogIn className="h-4 w-4" />
+   467→   467→                  <span className="hidden sm:inline">Logout</span>
+   468→   468→                </Button>
+   469→   469→              </div>
+   470→   470→            ) : (
+   471→   471→              <div className="flex items-center gap-2">
+   472→   472→                <Button 
+   473→   473→                  variant="ghost" 
+   474→   474→                  size="sm" 
+   475→   475→                  onClick={() => setShowLoginModal(true)}
+   476→   476→                  className="gap-2 cursor-pointer"
+   477→   477→                >
+   478→   478→                  <LogIn className="h-4 w-4" />
+   479→   479→                  <span className="hidden sm:inline">Log in</span>
+   480→   480→                </Button>
+   481→   481→                <Button 
+   482→   482→                  size="sm" 
+   483→   483→                  onClick={() => setShowSignupModal(true)}
+   484→   484→                  className="gap-2 cursor-pointer"
+   485→   485→                >
+   486→   486→                  <UserPlus className="h-4 w-4" />
+   487→   487→                  Sign up
+   488→   488→                </Button>
+   489→   489→              </div>
+   490→   490→            )}
+   491→   491→          </div>
+   492→   492→        </div>
+   493→   493→      </header>
+   494→   494→
+   495→   495→      {/* Hero Section */}
+   496→   496→      <section className="relative overflow-hidden border-b bg-gradient-to-br from-background via-background to-muted/30">
+   497→   497→        <div className="absolute inset-0 bg-[linear-gradient(to_right,#8882_1px,transparent_1px),linear-gradient(to_bottom,#8882_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]" />
+   498→   498→        
+   499→   499→        <div className="container relative mx-auto px-4 py-12 lg:py-20">
+   500→   500→          <div className="mx-auto max-w-4xl text-center">
+   501→   501→            {/* Badge */}
+   502→   502→            <Badge 
+   503→   503→              variant="secondary" 
+   504→   504→              className="mb-6 px-4 py-1.5 text-sm cursor-default select-none"
+   505→   505→            >
+   506→   506→              <Sparkles className="mr-2 h-3.5 w-3.5" />
+   507→   507→              AI-Powered Artifact Generation
+   508→   508→            </Badge>
+   509→   509→
+   510→   510→            {/* Headline */}
+   511→   511→            <h1 className="mb-6 text-4xl font-bold tracking-tight sm:text-5xl lg:text-6xl leading-tight">
+   512→   512→              Describe what you need.
+   513→   513→              <br />
+   514→   514→              <span className="bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent">
+   515→   515→                Filo creates it.
+   516→   516→              </span>
+   517→   517→            </h1>
+   518→   518→
+   519→   519→            {/* Subheadline */}
+   520→   520→            <p className="mx-auto mb-10 max-w-2xl text-lg text-muted-foreground leading-relaxed">
+   521→   521→              Transform your ideas into professional documents, spreadsheets, presentations, and more.
+   522→   522→            </p>
+   523→   523→
+   524→   524→            {/* Error Message */}
+   525→   525→            {error && (
+   526→   526→              <div className="mx-auto mb-6 max-w-3xl flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950">
+   527→   527→                <AlertCircle className="h-5 w-5 text-red-600 shrink-0 cursor-default" />
+   528→   528→                <span className="text-sm text-red-800 dark:text-red-200">{error}</span>
+   529→   529→                <button 
+   530→   530→                  onClick={() => setError(null)}
+   531→   531→                  className="ml-auto p-1 hover:bg-red-100 dark:hover:bg-red-900 rounded transition-colors cursor-pointer"
+   532→   532→                >
+   533→   533→                  <X className="h-4 w-4" />
+   534→   534→                </button>
+   535→   535→              </div>
+   536→   536→            )}
+   537→   537→
+   538→   538→            {/* Main Input */}
+   539→   539→            <div className="mx-auto max-w-3xl">
+   540→   540→              <div className="rounded-xl border bg-card p-2 shadow-lg">
+   541→   541→                <Textarea
+   542→   542→                  placeholder="What do you want to create? Be specific about what you need..."
+   543→   543→                  value={prompt}
+   544→   544→                  onChange={(e) => setPrompt(e.target.value)}
+   545→   545→                  className="min-h-[120px] resize-none border-0 bg-transparent text-base focus-visible:ring-0 focus-visible:ring-offset-0 px-3 py-3 cursor-text"
+   546→   546→                  disabled={isGenerating}
+   547→   547→                />
+   548→   548→
+   549→   549→                {/* Files area */}
+   550→   550→                {(files.length > 0 || dragActive) && (
+   551→   551→                  <div
+   552→   552→                    className={`mx-2 mb-2 rounded-lg border-2 border-dashed p-4 transition-all duration-200 ${
+   553→   553→                      dragActive ? 'border-primary bg-primary/5 scale-[1.01]' : 'border-muted-foreground/25'
+   554→   554→                    }`}
+   555→   555→                    onDragEnter={handleDrag}
+   556→   556→                    onDragLeave={handleDrag}
+   557→   557→                    onDragOver={handleDrag}
+   558→   558→                    onDrop={handleDrop}
+   559→   559→                  >
+   560→   560→                    {files.length > 0 ? (
+   561→   561→                      <div className="space-y-2">
+   562→   562→                        {files.map((file, index) => (
+   563→   563→                          <div key={`${file.name}-${index}`} className="flex items-center gap-2 rounded-md bg-muted/50 p-2.5 transition-colors hover:bg-muted">
+   564→   564→                            <FileText className="h-4 w-4 text-muted-foreground shrink-0" />
+   565→   565→                            <span className="flex-1 truncate text-sm font-medium cursor-default">{file.name}</span>
+   566→   566→                            <span className="text-xs text-muted-foreground cursor-default">
+   567→   567→                              {(file.size / 1024).toFixed(1)} KB
+   568→   568→                            </span>
+   569→   569→                            <Button
+   570→   570→                              variant="ghost"
+   571→   571→                              size="icon"
+   572→   572→                              className="h-7 w-7 shrink-0 cursor-pointer hover:bg-destructive/10 hover:text-destructive transition-colors"
+   573→   573→                              onClick={() => removeFile(index)}
+   574→   574→                              disabled={isGenerating}
+   575→   575→                            >
+   576→   576→                              <X className="h-3.5 w-3.5" />
+   577→   577→                            </Button>
+   578→   578→                          </div>
+   579→   579→                        ))}
+   580→   580→                        <label>
+   581→   581→                          <span className="cursor-pointer text-sm text-muted-foreground hover:text-foreground transition-colors inline-flex items-center gap-1">
+   582→   582→                            + Add more files
+   583→   583→                          </span>
+   584→   584→                          <input
+   585→   585→                            type="file"
+   586→   586→                            multiple
+   587→   587→                            className="hidden"
+   588→   588→                            onChange={(e) => handleFiles(e.target.files)}
+   589→   589→                            disabled={isGenerating}
+   590→   590→                          />
+   591→   591→                        </label>
+   592→   592→                      </div>
+   593→   593→                    ) : (
+   594→   594→                      <div className="flex flex-col items-center justify-center py-8 text-sm text-muted-foreground">
+   595→   595→                        <Upload className="mb-3 h-10 w-10 opacity-50" />
+   596→   596→                        <p className="font-medium mb-1">Drop files here</p>
+   597→   597→                        <p className="text-xs mb-3">or click to browse</p>
+   598→   598→                        <input
+   599→   599→                          type="file"
+   600→   600→                          multiple
+   601→   601→                          className="hidden"
+   602→   602→                          onChange={(e) => handleFiles(e.target.files)}
+   603→   603→                          disabled={isGenerating}
+   604→   604→                          id="file-upload-input"
+   605→   605→                        />
+   606→   606→                        <label 
+   607→   607→                          htmlFor="file-upload-input"
+   608→   608→                          className="cursor-pointer text-xs text-primary hover:underline font-medium transition-colors"
+   609→   609→                        >
+   610→   610→                          Browse files
+   611→   611→                        </label>
+   612→   612→                      </div>
+   613→   613→                    )}
+   614→   614→                  </div>
+   615→   615→                )}
+   616→   616→
+   617→   617→                {/* Actions */}
+   618→   618→                <div className="flex flex-wrap items-center gap-3 border-t pt-3 mt-2">
+   619→   619→                  {!files.length && (
+   620→   620→                    <label className="cursor-pointer">
+   621→   621→                      <Button 
+   622→   622→                        variant="outline" 
+   623→   623→                        size="sm" 
+   624→   624→                        className="gap-2 cursor-pointer hover:bg-accent transition-colors"
+   625→   625→                        asChild
+   626→   626→                      >
+   627→   627→                        <span className="inline-flex items-center gap-2">
+   628→   628→                          <Upload className="h-4 w-4" />
+   629→   629→                          Add files
+   630→   630→                        </span>
+   631→   631→                      </Button>
+   632→   632→                      <input
+   633→   633→                        type="file"
+   634→   634→                        multiple
+   635→   635→                        className="hidden"
+   636→   636→                        onChange={(e) => handleFiles(e.target.files)}
+   637→   637→                        disabled={isGenerating}
+   638→   638→                      />
+   639→   639→                    </label>
+   640→   640→                  )}
+   641→   641→
+   642→   642→                  <Select value={selectedFormat} onValueChange={setSelectedFormat}>
+   643→   643→                    <SelectTrigger 
+   644→   644→                      className="w-[180px] cursor-pointer hover:bg-accent transition-colors" 
+   645→   645→                      disabled={isGenerating}
+   646→   646→                    >
+   647→   647→                      <SelectValue placeholder="Output format" />
+   648→   648→                    </SelectTrigger>
+   649→   649→                    <SelectContent>
+   650→   650→                      {outputFormats.map(format => (
+   651→   651→                        <SelectItem 
+   652→   652→                          key={format.value} 
+   653→   653→                          value={format.value}
+   654→   654→                          className="cursor-pointer"
+   655→   655→                        >
+   656→   656→                          <div className="flex flex-col items-start py-1">
+   657→   657→                            <span className="font-medium">{format.label}</span>
+   658→   658→                            <span className="text-xs text-muted-foreground leading-tight mt-0.5">{format.description}</span>
+   659→   659→                          </div>
+   660→   660→                        </SelectItem>
+   661→   661→                      ))}
+   662→   662→                    </SelectContent>
+   663→   663→                  </Select>
+   664→   664→
+   665→   665→                  <div className="ml-auto flex gap-2">
+   666→   666→                    <Button 
+   667→   667→                      variant="ghost" 
+   668→   668→                      onClick={() => { setPrompt(''); setFiles([]); }} 
+   669→   669→                      disabled={isGenerating}
+   670→   670→                      className="cursor-pointer hover:bg-accent transition-colors"
+   671→   671→                    >
+   672→   672→                      Clear
+   673→   673→                    </Button>
+   674→   674→                    <Button
+   675→   675→                      onClick={handleGenerate}
+   676→   676→                      disabled={!prompt.trim() || isGenerating}
+   677→   677→                      className="gap-2 min-w-[120px] cursor-pointer transition-all hover:shadow-md active:scale-[0.98]"
+   678→   678→                    >
+   679→   679→                      {isGenerating ? (
+   680→   680→                        <>
+   681→   681→                          <Loader2 className="h-4 w-4 animate-spin" />
+   682→   682→                          Creating...
+   683→   683→                        </>
+   684→   684→                      ) : (
+   685→   685→                        <>
+   686→   686→                          <Sparkles className="h-4 w-4" />
+   687→   687→                          Create
+   688→   688→                        </>
+   689→   689→                      )}
+   690→   690→                    </Button>
+   691→   691→                  </div>
+   692→   692→                </div>
+   693→   693→              </div>
+   694→   694→            </div>
+   695→   695→          </div>
+   696→   696→        </div>
+   697→   697→      </section>
+   698→   698→
+   699→   699→      {/* Progress Section */}
+   700→   700→      {isGenerating && (
+   701→   701→        <section className="border-b bg-muted/30 animate-in slide-in-from-top-2 duration-300">
+   702→   702→          <div className="container mx-auto px-4 py-8">
+   703→   703→            <div className="mx-auto max-w-2xl">
+   704→   704→              <div className="mb-4 flex items-center justify-between">
+   705→   705→                <h3 className="font-semibold text-lg">Generating your artifact</h3>
+   706→   706→                <Badge variant="secondary" className="cursor-default">
+   707→   707→                  {generationStages.filter(s => s.status === 'completed').length}/{generationStages.length}
+   708→   708→                </Badge>
+   709→   709→              </div>
+   710→   710→              
+   711→   711→              <Progress 
+   712→   712→                value={(generationStages.filter(s => s.status === 'completed').length / generationStages.length) * 100} 
+   713→   713→                className="mb-6 h-2 cursor-default"
+   714→   714→              />
+   715→   715→
+   716→   716→              <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
+   717→   717→                {generationStages.map(stage => (
+   718→   718→                  <div
+   719→   719→                    key={stage.id}
+   720→   720→                    className={`flex items-center gap-2 rounded-lg border p-3 transition-all duration-300 cursor-default ${
+   721→   721→                      stage.status === 'active' ? 'border-primary bg-primary/5 shadow-sm scale-[1.02]' :
+   722→   722→                      stage.status === 'completed' ? 'border-green-200 bg-green-50 dark:border-green-900 dark:bg-green-950' :
+   723→   723→                      stage.status === 'error' ? 'border-red-200 bg-red-50 dark:border-red-900 dark:bg-red-950' :
+   724→   724→                      'border-transparent opacity-60'
+   725→   725→                    }`}
+   726→   726→                  >
+   727→   727→                    {stage.status === 'active' && <Loader2 className="h-4 w-4 animate-spin text-primary shrink-0" />}
+   728→   728→                    {stage.status === 'completed' && <Check className="h-4 w-4 text-green-600 shrink-0" />}
+   729→   729→                    {stage.status === 'error' && <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />}
+   730→   730→                    {stage.status === 'pending' && <div className="h-4 w-4 rounded-full border-2 border-muted-foreground/20 shrink-0" />}
+   731→   731→                    
+   732→   732→                    <span className={`text-sm font-medium truncate ${
+   733→   733→                      stage.status === 'active' ? 'text-primary' :
+   734→   734→                      stage.status === 'completed' ? 'text-green-700 dark:text-green-400' :
+   735→   735→                      stage.status === 'error' ? 'text-red-700 dark:text-red-400' :
+   736→   736→                      'text-muted-foreground'
+   737→   737→                    }`}>
+   738→   738→                      {stage.label}
+   739→   739→                    </span>
+   740→   740→                  </div>
+   741→   741→                ))}
+   742→   742→              </div>
+   743→   743→            </div>
+   744→   744→          </div>
+   745→   745→        </section>
+   746→   746→      )}
+   747→   747→
+   748→   748→      {/* Example Prompts */}
+   749→   749→      <section className="py-12 lg:py-16">
+   750→   750→        <div className="container mx-auto px-4">
+   751→   751→          <div className="mb-8 text-center">
+   752→   752→            <h2 className="text-2xl font-bold tracking-tight mb-2">What can you create?</h2>
+   753→   753→            <p className="text-muted-foreground">
+   754→   754→              Click any example to get started, or describe your own needs above
+   755→   755→            </p>
+   756→   756→          </div>
+   757→   757→
+   758→   758→          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 max-w-5xl mx-auto">
+   759→   759→            {examplePrompts.map((example, index) => (
+   760→   760→              <Card
+   761→   761→                key={index}
+   762→   762→                className="group cursor-pointer transition-all duration-200 hover:border-primary/50 hover:shadow-lg hover:-translate-y-0.5"
+   763→   763→                onClick={() => handleExampleClick(example.prompt)}
+   764→   764→              >
+   765→   765→                <CardHeader className="pb-3">
+   766→   766→                  <div className="flex items-center gap-3">
+   767→   767→                    <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10 transition-all duration-200 group-hover:bg-primary/20 group-hover:scale-110">
+   768→   768→                      <example.icon className="h-5 w-5 text-primary" />
+   769→   769→                    </div>
+   770→   770→                    <div>
+   771→   771→                      <CardTitle className="text-base group-hover:text-primary transition-colors">{example.title}</CardTitle>
+   772→   772→                      <Badge variant="secondary" className="mt-1 text-xs capitalize cursor-default">
+   773→   773→                        {example.category}
+   774→   774→                      </Badge>
+   775→   775→                    </div>
+   776→   776→                  </div>
+   777→   777→                </CardHeader>
+   778→   778→                <CardContent>
+   779→   779→                  <CardDescription className="line-clamp-2 text-sm leading-relaxed">
+   780→   780→                    {example.prompt}
+   781→   781→                  </CardDescription>
+   782→   782→                  <div className="mt-3 flex items-center text-sm font-medium text-primary opacity-0 translate-x-[-8px] transition-all duration-200 group-hover:opacity-100 group-hover:translate-x-0">
+   783→   783→                    Use this example
+   784→   784→                    <ArrowRight className="ml-1 h-4 w-4" />
+   785→   785→                  </div>
+   786→   786→                </CardContent>
+   787→   787→              </Card>
+   788→   788→            ))}
+   789→   789→          </div>
+   790→   790→        </div>
+   791→   791→      </section>
+   792→   792→
+   793→   793→      {/* Capabilities */}
+   794→   794→      <section className="border-t bg-muted/30 py-12 lg:py-16">
+   795→   795→        <div className="container mx-auto px-4">
+   796→   796→          <div className="mb-10 text-center">
+   797→   797→            <h2 className="text-2xl font-bold tracking-tight mb-2">Professional outputs</h2>
+   798→   798→            <p className="text-muted-foreground">
+   799→   799→              Every artifact is formatted, designed, and ready to use
+   800→   800→            </p>
+   801→   801→          </div>
+   802→   802→
+   803→   803→          <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4 max-w-5xl mx-auto">
+   804→   804→            {[
+   805→   805→              {
+   806→   806→                icon: FileText,
+   807→   807→                title: 'Documents',
+   808→   808→                formats: ['DOCX', 'PDF'],
+   809→   809→                description: 'Reports, proposals, plans, research papers with proper formatting',
+   810→   810→              },
+   811→   811→              {
+   812→   812→                icon: Table,
+   813→   813→                title: 'Spreadsheets',
+   814→   814→                formats: ['XLSX', 'CSV'],
+   815→   815→                description: 'Budgets, trackers, schedules with formulas and calculations',
+   816→   816→              },
+   817→   817→              {
+   818→   818→                icon: Presentation,
+   819→   819→                title: 'Presentations',
+   820→   820→                formats: ['PPTX'],
+   821→   821→                description: 'Engaging slides with consistent design and visuals',
+   822→   822→              },
+   823→   823→              {
+   824→   824→                icon: BarChart3,
+   825→   825→                title: 'Charts & Diagrams',
+   826→   826→                formats: ['Embedded'],
+   827→   827→                description: 'Data visualizations, flowcharts, org charts, and more',
+   828→   828→              },
+   829→   829→            ].map((capability, index) => (
+   830→   830→              <Card 
+   831→   831→                key={index} 
+   832→   832→                className="text-center transition-all duration-200 hover:shadow-lg hover:-translate-y-1 cursor-default group"
+   833→   833→              >
+   834→   834→                <CardContent className="pt-6 pb-6">
+   835→   835→                  <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary/10 transition-transform duration-200 group-hover:scale-110 group-hover:bg-primary/15">
+   836→   836→                    <capability.icon className="h-7 w-7 text-primary" />
+   837→   837→                  </div>
+   838→   838→                  <h3 className="mb-2 font-semibold text-lg">{capability.title}</h3>
+   839→   839→                  <div className="mb-3 flex justify-center gap-1.5 flex-wrap">
+   840→   840→                    {capability.formats.map(format => (
+   841→   841→                      <Badge 
+   842→   842→                        key={format} 
+   843→   843→                        variant="secondary" 
+   844→   844→                        className="text-xs font-mono cursor-default"
+   845→   845→                      >
+   846→   846→                        {format}
+   847→   847→                      </Badge>
+   848→   848→                    ))}
+   849→   849→                  </div>
+   850→   850→                  <p className="text-sm text-muted-foreground leading-relaxed">{capability.description}</p>
+   851→   851→                </CardContent>
+   852→   852→              </Card>
+   853→   853→            ))}
+   854→   854→          </div>
+   855→   855→        </div>
+   856→   856→      </section>
+   857→   857→
+   858→   858→      {/* Result Dialog */}
+   859→   859→      <Dialog open={showResultDialog} onOpenChange={setShowResultDialog}>
+   860→   860→        <DialogContent className="max-w-3xl sm:max-w-[90vw]">
+   861→   861→          <DialogHeader>
+   862→   862→            <DialogTitle className="flex items-center gap-2 text-xl">
+   863→   863→              <Check className="h-6 w-6 text-green-600" />
+   864→   864→              Artifact Ready!
+   865→   865→            </DialogTitle>
+   866→   866→            <DialogDescription className="text-base">
+   867→   867→              Your artifact has been generated and is ready to download or edit.
+   868→   868→            </DialogDescription>
+   869→   869→          </DialogHeader>
+   870→   870→
+   871→   871→          {currentArtifact && (
+   872→   872→            <div className="space-y-6 mt-4">
+   873→   873→              {/* Preview card */}
+   874→   874→              <Card className="overflow-hidden">
+   875→   875→                <CardContent className="pt-6">
+   876→   876→                  <div className="flex items-start justify-between gap-4">
+   877→   877→                    <div className="flex items-start gap-4 flex-1 min-w-0">
+   878→   878→                      <div className="flex h-16 w-16 items-center justify-center rounded-xl bg-primary/10 shrink-0">
+   879→   879→                        {currentArtifact.type === 'Document' && <FileText className="h-8 w-8 text-primary" />}
+   880→   880→                        {currentArtifact.type === 'Spreadsheet' && <Table className="h-8 w-8 text-primary" />}
+   881→   881→                        {currentArtifact.type === 'Presentation' && <Presentation className="h-8 w-8 text-primary" />}
+   882→   882→                        {currentArtifact.type === 'Proposal' && <Briefcase className="h-8 w-8 text-primary" />}
+   883→   883→                        {currentArtifact.type === 'Lesson Plan' && <GraduationCap className="h-8 w-8 text-primary" />}
+   884→   884→                        {currentArtifact.type === 'Invoice' && <Receipt className="h-8 w-8 text-primary" />}
+   885→   885→                        {currentArtifact.type === 'Resume' && <UserCircle className="h-8 w-8 text-primary" />}
+   886→   886→                        {!['Document', 'Spreadsheet', 'Presentation', 'Proposal', 'Lesson Plan', 'Invoice', 'Resume'].includes(currentArtifact.type) && <FileText className="h-8 w-8 text-primary" />}
+   887→   887→                      </div>
+   888→   888→                      <div className="min-w-0 flex-1">
+   889→   889→                        <h3 className="font-semibold text-lg truncate">{currentArtifact.title}</h3>
+   890→   890→                        <div className="mt-2 flex items-center gap-2 flex-wrap">
+   891→   891→                          <Badge className="cursor-default">{currentArtifact.type}</Badge>
+   892→   892→                          <Badge variant="outline" className="cursor-default font-mono">{currentArtifact.format}</Badge>
+   893→   893→                          <span className="text-sm text-muted-foreground cursor-default">
+   894→   894→                            {currentArtifact.createdAt.toLocaleTimeString()}
+   895→   895→                          </span>
+   896→   896→                        </div>
+   897→   897→                      </div>
+   898→   898→                    </div>
+   899→   899→                  </div>
+   900→   900→                </CardContent>
+   901→   901→              </Card>
+   902→   902→
+   903→   903→              {/* Actions */}
+   904→   904→              <div className="flex flex-wrap gap-3">
+   905→   905→                <Button className="gap-2 cursor-pointer hover:shadow-md transition-all min-h-[44px]">
+   906→   906→                  <Download className="h-4 w-4" />
+   907→   907→                  Download {currentArtifact.format}
+   908→   908→                </Button>
+   909→   909→                <Button variant="outline" className="gap-2 cursor-pointer hover:bg-accent transition-colors min-h-[44px]">
+   910→   910→                  <Eye className="h-4 w-4" />
+   911→   911→                  Preview
+   912→   912→                </Button>
+   913→   913→                <Button variant="outline" className="gap-2 cursor-pointer hover:bg-accent transition-colors min-h-[44px]">
+   914→   914→                  <Edit3 className="h-4 w-4" />
+   915→   915→                  Edit
+   916→   916→                </Button>
+   917→   917→                <Button variant="outline" className="gap-2 cursor-pointer hover:bg-accent transition-colors min-h-[44px]">
+   918→   918→                  <Copy className="h-4 w-4" />
+   919→   919→                  Duplicate
+   920→   920→                </Button>
+   921→   921→                <Button variant="outline" className="gap-2 cursor-pointer hover:bg-accent transition-colors min-h-[44px]">
+   922→   922→                  <History className="h-4 w-4" />
+   923→   923→                  Version History
+   924→   924→                </Button>
+   925→   925→              </div>
+   926→   926→
+   927→   927→              {/* AI Edit suggestion */}
+   928→   928→              <div className="rounded-lg border bg-muted/50 p-5">
+   929→   929→                <p className="text-sm font-semibold mb-2">Want to make changes?</p>
+   930→   930→                <p className="text-sm text-muted-foreground mb-4">
+   931→   931→                  Ask AI to modify your artifact using natural language:
+   932→   932→                </p>
+   933→   933→                <div className="flex gap-2">
+   934→   934→                  <input
+   935→   935→                    type="text"
+   936→   936→                    placeholder='E.g., "Make the cover more professional" or "Add a pricing section"'
+   937→   937→                    className="flex-1 rounded-md border bg-background px-4 py-2.5 text-sm focus:ring-2 focus:ring-primary focus:border-transparent outline-none transition-all cursor-text"
+   938→   938→                  />
+   939→   939→                  <Button 
+   940→   940→                    size="sm" 
+   941→   941→                    variant="outline"
+   942→   942→                    className="cursor-pointer hover:bg-accent transition-colors shrink-0"
+   943→   943→                  >
+   944→   944→                    Apply
+   945→   945→                  </Button>
+   946→   946→                </div>
+   947→   947→              </div>
+   948→   948→            </div>
+   949→   949→          )}
+   950→   950→        </DialogContent>
+   951→   951→      </Dialog>
+   952→   952→
+   953→   953→      {/* Login Modal */}
+   954→   954→      <Dialog open={showLoginModal} onOpenChange={(open) => { setShowLoginModal(open); setError(null); }}>
+   955→   955→        <DialogContent className="sm:max-w-md">
+   956→   956→          <DialogHeader>
+   957→   957→            <DialogTitle className="text-xl flex items-center gap-2">
+   958→   958→              <LogIn className="h-5 w-5" />
+   959→   959→              Welcome back
+   960→   960→            </DialogTitle>
+   961→   961→            <DialogDescription>
+   962→   962→              Sign in to your Filo account to continue creating artifacts
+   963→   963→            </DialogDescription>
+   964→   964→          </DialogHeader>
+   965→   965→          
+   966→   966→          <form onSubmit={handleLogin} className="space-y-4 mt-4">
+   967→   967→            {error && (
+   968→   968→              <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950">
+   969→   969→                <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+   970→   970→                <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
+   971→   971→              </div>
+   972→   972→            )}
+   973→   973→
+   974→   974→            <div className="space-y-2">
+   975→   975→              <Label htmlFor="login-email" className="cursor-pointer">Email</Label>
+   976→   976→              <Input
+   977→   977→                id="login-email"
+   978→   978→                type="email"
+   979→   979→                placeholder="you@example.com"
+   980→   980→                value={loginEmail}
+   981→   981→                onChange={(e) => setLoginEmail(e.target.value)}
+   982→   982→                required
+   983→   983→                className="cursor-text"
+   984→   984→                autoComplete="email"
+   985→   985→              />
+   986→   986→            </div>
+   987→   987→
+   988→   988→            <div className="space-y-2">
+   989→   989→              <Label htmlFor="login-password" className="cursor-pointer">Password</Label>
+   990→   990→              <Input
+   991→   991→                id="login-password"
+   992→   992→                type="password"
+   993→   993→                placeholder="••••••••"
+   994→   994→                value={loginPassword}
+   995→   995→                onChange={(e) => setLoginPassword(e.target.value)}
+   996→   996→                required
+   997→   997→                minLength={6}
+   998→   998→                className="cursor-text"
+   999→   999→                autoComplete="current-password"
+  1000→  1000→              />
+  1001→  1001→            </div>
+  1002→  1002→
+  1003→  1003→            <Button 
+  1004→  1004→              type="submit" 
+  1005→  1005→              className="w-full cursor-pointer hover:shadow-md transition-all min-h-[44px]" 
+  1006→  1006→              disabled={isLoggingIn}
+  1007→  1007→            >
+  1008→  1008→              {isLoggingIn ? (
+  1009→  1009→                <>
+  1010→  1010→                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+  1011→  1011→                  Signing in...
+  1012→  1012→                </>
+  1013→  1013→              ) : (
+  1014→  1014→                <>
+  1015→  1015→                  <LogIn className="mr-2 h-4 w-4" />
+  1016→  1016→                  Sign In
+  1017→  1017→                </>
+  1018→  1018→              )}
+  1019→  1019→            </Button>
+  1020→  1020→          </form>
+  1021→  1021→
+  1022→  1022→          <div className="mt-6 text-center">
+  1023→  1023→            <p className="text-sm text-muted-foreground">
+  1024→  1024→              Don't have an account?{' '}
+  1025→  1025→              <button
+  1026→  1026→                onClick={switchToSignup}
+  1027→  1027→                className="text-primary hover:underline font-medium cursor-pointer transition-colors"
+  1028→  1028→              >
+  1029→  1029→                Sign up
+  1030→  1030→              </button>
+  1031→  1031→            </p>
+  1032→  1032→          </div>
+  1033→  1033→        </DialogContent>
+  1034→  1034→      </Dialog>
+  1035→  1035→
+  1036→  1036→      {/* Signup Modal */}
+  1037→  1037→      <Dialog open={showSignupModal} onOpenChange={(open) => { setShowSignupModal(open); setError(null); }}>
+  1038→  1038→        <DialogContent className="sm:max-w-md">
+  1039→  1039→          <DialogHeader>
+  1040→  1040→            <DialogTitle className="text-xl flex items-center gap-2">
+  1041→  1041→              <UserPlus className="h-5 w-5" />
+  1042→  1042→              Create your account
+  1043→  1043→            </DialogTitle>
+  1044→  1044→            <DialogDescription>
+  1045→  1045→              Join Filo and start creating professional artifacts in seconds
+  1046→  1046→            </DialogDescription>
+  1047→  1047→          </DialogHeader>
+  1048→  1048→          
+  1049→  1049→          <form onSubmit={handleSignup} className="space-y-4 mt-4">
+  1050→  1050→            {error && (
+  1051→  1051→              <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950">
+  1052→  1052→                <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
+  1053→  1053→                <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
+  1054→  1054→              </div>
+  1055→  1055→            )}
+  1056→  1056→
+  1057→  1057→            <div className="space-y-2">
+  1058→  1058→              <Label htmlFor="signup-name" className="cursor-pointer">Full Name</Label>
+  1059→  1059→              <Input
+  1060→  1060→                id="signup-name"
+  1061→  1061→                type="text"
+  1062→  1062→                placeholder="John Doe"
+  1063→  1063→                value={signupName}
+  1064→  1064→                onChange={(e) => setSignupName(e.target.value)}
+  1065→  1065→                required
+  1066→  1066→                className="cursor-text"
+  1067→  1067→                autoComplete="name"
+  1068→  1068→              />
+  1069→  1069→            </div>
+  1070→  1070→
+  1071→  1071→            <div className="space-y-2">
+  1072→  1072→              <Label htmlFor="signup-email" className="cursor-pointer">Email</Label>
+  1073→  1073→              <Input
+  1074→  1074→                id="signup-email"
+  1075→  1075→                type="email"
+  1076→  1076→                placeholder="you@example.com"
+  1077→  1077→                value={signupEmail}
+  1078→  1078→                onChange={(e) => setSignupEmail(e.target.value)}
+  1079→  1079→                required
+  1080→  1080→                className="cursor-text"
+  1081→  1081→                autoComplete="email"
+  1082→  1082→              />
+  1083→  1083→            </div>
+  1084→  1084→
+  1085→  1085→            <div className="space-y-2">
+  1086→  1086→              <Label htmlFor="signup-password" className="cursor-pointer">Password</Label>
+  1087→  1087→              <Input
+  1088→  1088→                id="signup-password"
+  1089→  1089→                type="password"
+  1090→  1090→                placeholder="Min. 6 characters"
+  1091→  1091→                value={signupPassword}
+  1092→  1092→                onChange={(e) => setSignupPassword(e.target.value)}
+  1093→  1093→                required
+  1094→  1094→                minLength={6}
+  1095→  1095→                className="cursor-text"
+  1096→  1096→                autoComplete="new-password"
+  1097→  1097→              />
+  1098→  1098→            </div>
+  1099→  1099→
+  1100→  1100→            <Button 
+  1101→  1101→              type="submit" 
+  1102→  1102→              className="w-full cursor-pointer hover:shadow-md transition-all min-h-[44px]" 
+  1103→  1103→              disabled={isSigningUp}
+  1104→  1104→            >
+  1105→  1105→              {isSigningUp ? (
+  1106→  1106→                <>
+  1107→  1107→                  <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+  1108→  1108→                  Creating account...
+  1109→  1109→                </>
+  1110→  1110→              ) : (
+  1111→  1111→                <>
+  1112→  1112→                  <UserPlus className="mr-2 h-4 w-4" />
+  1113→  1113→                  Create Account
+  1114→  1114→                </>
+  1115→  1115→              )}
+  1116→  1116→            </Button>
+  1117→  1117→          </form>
+  1118→  1118→
+  1119→  1119→          <div className="mt-6 text-center">
+  1120→  1120→            <p className="text-sm text-muted-foreground">
+  1121→  1121→              Already have an account?{' '}
+  1122→  1122→              <button
+  1123→  1123→                onClick={switchToLogin}
+  1124→  1124→                className="text-primary hover:underline font-medium cursor-pointer transition-colors"
+  1125→  1125→              >
+  1126→  1126→                Sign in
+  1127→  1127→              </button>
+  1128→  1128→            </p>
+  1129→  1129→          </div>
+  1130→  1130→        </DialogContent>
+  1131→  1131→      </Dialog>
+  1132→  1132→    </div>
+  1133→  1133→  )
+  1134→  1134→}
+  1135→  1135→

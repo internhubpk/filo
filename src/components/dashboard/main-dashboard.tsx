@@ -1,6 +1,7 @@
 'use client'
 
 import React, { useState, useCallback, useEffect } from 'react'
+import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -43,14 +44,32 @@ import {
   Download,
   Copy,
   Eye,
+  EyeOff,
   Edit3,
   History,
   LogIn,
   UserPlus,
   Mail,
   Lock,
-  ArrowLeft
+  ArrowLeft,
+  Wand2,
+  FileSpreadsheet,
+  Image as ImageIcon,
+  Code2,
+  Type,
+  LayoutGrid,
+  Settings2,
+  CreditCard,
+  Star,
+  Rocket,
+  Target,
+  Lightbulb,
+  ChevronRight,
+  CircleDollarSign,
+  Moon,
+  Sun
 } from 'lucide-react'
+import { useTheme } from 'next-themes'
 
 // ==================== AUTH TYPES ====================
 
@@ -141,6 +160,8 @@ const outputFormats = [
 // ==================== MAIN COMPONENT ====================
 
 export function MainDashboard() {
+  const { theme, setTheme } = useTheme()
+  
   // Auth State
   const [user, setUser] = useState<User | null>(null)
   const [showLoginModal, setShowLoginModal] = useState(false)
@@ -149,12 +170,14 @@ export function MainDashboard() {
   // Login Form State
   const [loginEmail, setLoginEmail] = useState('')
   const [loginPassword, setLoginPassword] = useState('')
+  const [showLoginPassword, setShowLoginPassword] = useState(false)
   const [isLoggingIn, setIsLoggingIn] = useState(false)
   
   // Signup Form State
   const [signupName, setSignupName] = useState('')
   const [signupEmail, setSignupEmail] = useState('')
   const [signupPassword, setSignupPassword] = useState('')
+  const [showSignupPassword, setShowSignupPassword] = useState(false)
   const [isSigningUp, setIsSigningUp] = useState(false)
 
   // Creation State
@@ -457,6 +480,30 @@ export function MainDashboard() {
 
           {/* Auth Section */}
           <div className="flex items-center gap-3">
+            {/* Theme Toggle */}
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
+              className="cursor-pointer"
+            >
+              <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
+              <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
+              <span className="sr-only">Toggle theme</span>
+            </Button>
+
+            {/* Pricing Link */}
+            <Link href="/pricing" className="hidden sm:flex">
+              <Button 
+                variant="ghost" 
+                size="sm" 
+                className="gap-2 cursor-pointer text-muted-foreground hover:text-foreground"
+              >
+                <CreditCard className="h-4 w-4" />
+                <span>Pricing</span>
+              </Button>
+            </Link>
+
             {user ? (
               <div className="flex items-center gap-3">
                 <span className="hidden sm:block text-sm text-muted-foreground">
@@ -621,7 +668,7 @@ export function MainDashboard() {
                       <Button 
                         variant="outline" 
                         size="sm" 
-                        className="gap-2 cursor-pointer hover:bg-accent transition-colors"
+                        className="gap-2 cursor-pointer hover:bg-accent transition-colors h-9 min-w-[100px] justify-center"
                         asChild
                       >
                         <span className="inline-flex items-center gap-2">
@@ -641,7 +688,7 @@ export function MainDashboard() {
 
                   <Select value={selectedFormat} onValueChange={setSelectedFormat}>
                     <SelectTrigger 
-                      className="w-[180px] cursor-pointer hover:bg-accent transition-colors" 
+                      className="w-[180px] cursor-pointer hover:bg-accent transition-colors h-9 min-w-[100px] justify-center" 
                       disabled={isGenerating}
                     >
                       <SelectValue placeholder="Output format" />
@@ -987,17 +1034,27 @@ export function MainDashboard() {
 
             <div className="space-y-2">
               <Label htmlFor="login-password" className="cursor-pointer">Password</Label>
-              <Input
-                id="login-password"
-                type="password"
-                placeholder="••••••••"
-                value={loginPassword}
-                onChange={(e) => setLoginPassword(e.target.value)}
-                required
-                minLength={6}
-                className="cursor-text"
-                autoComplete="current-password"
-              />
+              <div className="relative">
+                <Input
+                  id="login-password"
+                  type={showLoginPassword ? 'text' : 'password'}
+                  placeholder="••••••••"
+                  value={loginPassword}
+                  onChange={(e) => setLoginPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  className="cursor-text pr-10"
+                  autoComplete="current-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowLoginPassword(!showLoginPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                  tabIndex={-1}
+                >
+                  {showLoginPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </div>
 
             <Button 
@@ -1084,17 +1141,27 @@ export function MainDashboard() {
 
             <div className="space-y-2">
               <Label htmlFor="signup-password" className="cursor-pointer">Password</Label>
-              <Input
-                id="signup-password"
-                type="password"
-                placeholder="Min. 6 characters"
-                value={signupPassword}
-                onChange={(e) => setSignupPassword(e.target.value)}
-                required
-                minLength={6}
-                className="cursor-text"
-                autoComplete="new-password"
-              />
+              <div className="relative">
+                <Input
+                  id="signup-password"
+                  type={showSignupPassword ? 'text' : 'password'}
+                  placeholder="Min. 6 characters"
+                  value={signupPassword}
+                  onChange={(e) => setSignupPassword(e.target.value)}
+                  required
+                  minLength={6}
+                  className="cursor-text pr-10"
+                  autoComplete="new-password"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowSignupPassword(!showSignupPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground transition-colors cursor-pointer"
+                  tabIndex={-1}
+                >
+                  {showSignupPassword ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+                </button>
+              </div>
             </div>
 
             <Button 
