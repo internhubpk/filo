@@ -282,7 +282,7 @@ async function handlePaymentSuccess(data: SafePayWebhookEvent['data']) {
   const planId = data.metadata?.planId || data.plan_id
   const subscriptionId = data.subscription_id
 
-  console.log('✅ Payment succeeded:', {
+  console.log('[SAFEPAY] Payment succeeded:', {
     paymentId: data.id,
     userId,
     planId,
@@ -309,7 +309,7 @@ async function handlePaymentSuccess(data: SafePayWebhookEvent['data']) {
 }
 
 async function handlePaymentCreated(data: SafePayWebhookEvent['data']) {
-  console.log('📝 Payment created:', { paymentId: data.id })
+  console.log('[SAFEPAY] Payment created:', { paymentId: data.id })
   
   return {
     status: 'acknowledged',
@@ -319,7 +319,7 @@ async function handlePaymentCreated(data: SafePayWebhookEvent['data']) {
 }
 
 async function handlePaymentFailure(data: SafePayWebhookEvent['data'], eventType: string) {
-  console.log('❌ Payment failed:', {
+  console.log('[SAFEPAY] Payment failed:', {
     paymentId: data.id,
     reason: eventType,
     userId: data.customer?.id,
@@ -340,7 +340,7 @@ async function handlePaymentFailure(data: SafePayWebhookEvent['data'], eventType
 }
 
 async function handlePaymentPending(data: SafePayWebhookEvent['data']) {
-  console.log('⏳ Payment pending:', { paymentId: data.id })
+  console.log('[SAFEPAY] Payment pending:', { paymentId: data.id })
 
   return {
     status: 'pending',
@@ -350,7 +350,7 @@ async function handlePaymentPending(data: SafePayWebhookEvent['data']) {
 }
 
 async function handlePaymentExpired(data: SafePayWebhookEvent['data']) {
-  console.log('⏰ Payment expired:', { paymentId: data.id })
+  console.log('[SAFEPAY] Payment expired:', { paymentId: data.id })
 
   return {
     status: 'expired',
@@ -360,7 +360,7 @@ async function handlePaymentExpired(data: SafePayWebhookEvent['data']) {
 }
 
 async function handlePaymentRefund(data: SafePayWebhookEvent['data']) {
-  console.log('💰 Payment refunded:', { paymentId: data.id })
+  console.log('[SAFEPAY] Payment refunded:', { paymentId: data.id })
 
   // Production actions:
   // 1. Process refund in system
@@ -376,7 +376,7 @@ async function handlePaymentRefund(data: SafePayWebhookEvent['data']) {
 }
 
 async function handlePaymentDispute(data: SafePayWebhookEvent['data']) {
-  console.log('⚠️ Payment disputed:', { paymentId: data.id })
+  console.log('[SAFEPAY] Payment disputed:', { paymentId: data.id })
 
   // Production actions:
   // 1. Flag account for review
@@ -398,7 +398,7 @@ async function handleSubscriptionActivated(data: SafePayWebhookEvent['data']) {
   const userId = data.metadata?.userId || data.customer?.id
   const planId = data.metadata?.planId || data.plan_id
 
-  console.log('🔄 Subscription activated:', {
+  console.log('[SAFEPAY] Subscription activated:', {
     subscriptionId: data.id,
     userId,
     planId,
@@ -421,7 +421,7 @@ async function handleSubscriptionActivated(data: SafePayWebhookEvent['data']) {
 }
 
 async function handleSubscriptionCancelled(data: SafePayWebhookEvent['data']) {
-  console.log('🚫 Subscription cancelled:', { subscriptionId: data.id })
+  console.log('[SAFEPAY] Subscription cancelled:', { subscriptionId: data.id })
 
   // Production actions:
   // 1. Mark subscription as cancelled
@@ -439,7 +439,7 @@ async function handleSubscriptionCancelled(data: SafePayWebhookEvent['data']) {
 }
 
 async function handleSubscriptionRenewed(data: SafePayWebhookEvent['data']) {
-  console.log('🔁 Subscription renewed:', { subscriptionId: data.id })
+  console.log('[SAFEPAY] Subscription renewed:', { subscriptionId: data.id })
 
   // Production actions:
   // 1. Extend subscription end date
@@ -459,7 +459,7 @@ async function handleSubscriptionRenewed(data: SafePayWebhookEvent['data']) {
 // ==================== INVOICE HANDLERS ====================
 
 async function handleInvoicePaid(data: SafePayWebhookEvent['data']) {
-  console.log('🧾 Invoice paid:', { invoiceId: data.id })
+  console.log('[SAFEPAY] Invoice paid:', { invoiceId: data.id })
 
   return {
     status: 'paid',
@@ -469,7 +469,7 @@ async function handleInvoicePaid(data: SafePayWebhookEvent['data']) {
 }
 
 async function handleInvoiceFailed(data: SafePayWebhookEvent['data']) {
-  console.log('❌ Invoice payment failed:', { invoiceId: data.id })
+  console.log('[SAFEPAY] Invoice payment failed:', { invoiceId: data.id })
 
   // Production actions:
   // 1. Mark invoice as unpaid
@@ -488,7 +488,7 @@ async function handleInvoiceFailed(data: SafePayWebhookEvent['data']) {
 // ==================== UNKNOWN EVENT ====================
 
 async function handleUnknownEvent(eventType: string, data: SafePayWebhookEvent['data']) {
-  console.warn('⚠️ Unknown SafePay event type:', { eventType, dataId: data.id })
+  console.warn('[SAFEPAY] Unknown event type:', { eventType, dataId: data.id })
 
   // Log for investigation but don't fail
   return {

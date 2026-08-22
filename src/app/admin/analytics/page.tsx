@@ -914,7 +914,7 @@ export default function AdminAnalyticsPage() {
                           <TableCell>
                             <div className="flex items-start gap-1">
                               <Badge variant={log.success ? 'default' : 'destructive'} className="text-[10px] shrink-0">
-                                {log.success ? '✓' : '✗'}
+                                {log.success ? 'OK' : 'FAIL'}
                               </Badge>
                               <div className="text-xs text-muted-foreground max-w-[150px] truncate" title={log.outputPreview}>
                                 {log.outputPreview}

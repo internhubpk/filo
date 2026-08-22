@@ -42,7 +42,8 @@ export enum ErrorCode {
   FILE_DOWNLOAD_FAILED = 'FILE_3005',
   FILE_QUOTA_EXCEEDED = 'FILE_3006',
   
-  // Payment errors (4xxx)
+  // Subscription errors (4xxx)
+  SUBSCRIPTION_REQUIRED = 'SUB_4000',
   PAYMENT_FAILED = 'PAYMENT_4001',
   PAYMENT_CANCELLED = 'PAYMENT_4002',
   PAYMENT_WEBHOOK_ERROR = 'PAYMENT_4003',
@@ -231,6 +232,14 @@ const ErrorMessages: Record<ErrorCode, { title: string; message: string; suggest
     title: 'Storage Full',
     message: 'You\'ve reached your storage limit.',
     suggestion: 'Upgrade your plan for more storage, or delete some files.',
+    retryable: false,
+  },
+
+  // Subscription Errors
+  [ErrorCode.SUBSCRIPTION_REQUIRED]: {
+    title: 'Pro Subscription Required',
+    message: 'AI generation requires an active Pro subscription.',
+    suggestion: 'Upgrade to Pro to unlock unlimited AI generation and premium features.',
     retryable: false,
   },
 

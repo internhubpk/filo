@@ -67,10 +67,13 @@ import {
   ChevronRight,
   CircleDollarSign,
   Moon,
-  Sun
+  Sun,
+  Crown,
+  Shield,
+  HardDrive
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
-import { useMutation, useAction } from 'convex/react'
+import { useMutation, useAction, useQuery } from 'convex/react'
 import { api } from '../../../convex/_generated/api'
 import { 
   ErrorCode, 
@@ -217,6 +220,16 @@ export function MainDashboard() {
   const loginAction = useAction(api.auth.login)
   const signupAction = useAction(api.auth.signup)
   const logoutAction = useAction(api.auth.logout)
+  
+  // Subscription/Pro status check
+  const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+  
+  // Query subscription status when user is logged in
+  const userIdForSub = user?.id as any
+  const subscriptionStatus = useQuery(
+    api.subscriptions.hasActiveSubscription, 
+    userIdForSub ? { userId: userIdForSub } : 'skip'
+  )
 
   // Load saved session on mount (REAL session, not fake user)
   useEffect(() => {
@@ -412,6 +425,13 @@ export function MainDashboard() {
     if (!user) {
       setShowLoginModal(true)
       setError(ErrorCode.AUTH_UNAUTHORIZED)
+      return
+    }
+    
+    // REQUIRE PRO SUBSCRIPTION for AI generation
+    if (!subscriptionStatus?.hasActive) {
+      setShowUpgradeModal(true)
+      setError(ErrorCode.SUBSCRIPTION_REQUIRED)
       return
     }
 
@@ -1308,6 +1328,94 @@ export function MainDashboard() {
               >
                 Sign in
               </button>
+            </p>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Upgrade to Pro Modal */}
+      <Dialog open={showUpgradeModal} onOpenChange={(open) => { setShowUpgradeModal(open); setError(null); }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-2xl flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-gradient-to-br from-primary/20 to-primary/5">
+                <Crown className="h-6 w-6 text-primary" />
+              </div>
+              Upgrade to Pro
+            </DialogTitle>
+            <DialogDescription className="text-base">
+              Unlock unlimited AI generation and premium features
+            </DialogDescription>
+          </DialogHeader>
+
+          {appError?.code === 'SUBSCRIPTION_REQUIRED' && (
+            <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 mb-4">
+              <div className="flex items-start gap-3">
+                <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
+                <div>
+                  <h4 className="font-medium text-sm">Pro Required</h4>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    AI generation is exclusive to Pro subscribers. Upgrade to continue.
+                  </p>
+                </div>
+              </div>
+            </div>
+          )}
+
+          <div className="space-y-4 py-4">
+            {/* Pro Benefits */}
+            <div className="grid grid-cols-2 gap-3">
+              {[
+                { icon: Sparkles, text: 'Unlimited AI Generation' },
+                { icon: Rocket, text: 'Priority Processing' },
+                { icon: FileSpreadsheet, text: 'All Export Formats' },
+                { icon: Shield, text: 'No Watermarks' },
+                { icon: HardDrive, text: '5GB Cloud Storage' },
+                { icon: Mail, text: 'Priority Support' },
+              ].map((benefit, idx) => (
+                <div key={idx} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50">
+                  <benefit.icon className="h-4 w-4 text-primary shrink-0" />
+                  <span className="text-xs font-medium">{benefit.text}</span>
+                </div>
+              ))}
+            </div>
+
+            {/* Pricing */}
+            <div className="border rounded-xl p-4 bg-gradient-to-br from-primary/5 to-transparent">
+              <div className="text-center space-y-2">
+                <div className="flex items-baseline justify-center gap-1">
+                  <span className="text-3xl font-bold">Rs. 190</span>
+                  <span className="text-muted-foreground">/month</span>
+                </div>
+                <p className="text-xs text-muted-foreground">
+                  or Rs. 1,900/year (save 2 months)
+                </p>
+              </div>
+            </div>
+
+            {/* CTA Buttons */}
+            <div className="space-y-2">
+              <Button 
+                className="w-full cursor-pointer hover:shadow-md transition-all min-h-[48px] text-base font-semibold"
+                onClick={() => {
+                  window.location.href = '/pricing?upgrade=true'
+                }}
+              >
+                <CreditCard className="mr-2 h-5 w-5" />
+                View Plans & Subscribe
+              </Button>
+              
+              <Button 
+                variant="outline" 
+                className="w-full cursor-pointer"
+                onClick={() => setShowUpgradeModal(false)}
+              >
+                Maybe Later
+              </Button>
+            </div>
+
+            <p className="text-xs text-center text-muted-foreground">
+              Cancel anytime. 7-day free trial on all plans.
             </p>
           </div>
         </DialogContent>

@@ -852,15 +852,15 @@ export default function AdminPage() {
                       <div className="flex flex-wrap gap-1.5 mb-3">
                         {plan.popular && (
                           <Badge className="text-xs bg-gradient-to-r from-yellow-400 to-yellow-500 text-black border-0">
-                            ⭐ Popular
+                            Popular
                           </Badge>
                         )}
                         <Badge variant={plan.active ? "default" : "outline"} className="text-xs">
-                          {plan.active ? '✓ Active' : '○ Inactive'}
+                          {plan.active ? 'Active' : 'Inactive'}
                         </Badge>
                         {plan.maxAiGenerations === -1 && (
                           <Badge variant="secondary" className="text-xs">
-                            ∞ Unlimited AI
+                            Unlimited AI
                           </Badge>
                         )}
                       </div>
@@ -950,7 +950,7 @@ export default function AdminPage() {
                           >
                             {plan.popular ? (
                               <Badge className="bg-gradient-to-r from-yellow-400 to-yellow-500 text-black border-0 cursor-default">
-                                ⭐ Popular
+                                Popular
                               </Badge>
                             ) : (
                               <Badge variant="secondary" className="cursor-default">

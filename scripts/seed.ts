@@ -13,7 +13,7 @@ if (!CONVEX_URL) {
 const convex = new ConvexHttpClient(CONVEX_URL);
 
 async function seed() {
-  console.log("🌱 Seeding Convex database with initial data...");
+  console.log("[SEED] Seeding Convex database with initial data...");
 
   // Clear existing plans (optional - comment out if you want to keep existing)
   // const existingPlans = await convex.query(api.plans.getActivePlans);
@@ -103,13 +103,13 @@ async function seed() {
   for (const plan of plans) {
     try {
       const planId = await convex.mutation(api.admin.createPlan, plan);
-      console.log(`✅ Created plan: ${plan.name} (${planId})`);
+      console.log(`[OK] Created plan: ${plan.name} (${planId})`);
     } catch (error) {
-      console.error(`❌ Failed to create plan ${plan.name}:`, error);
+      console.error(`[FAIL] Failed to create plan ${plan.name}:`, error);
     }
   }
 
-  console.log("\n🎉 Seeding complete!");
+  console.log("\n[DONE] Seeding complete!");
 }
 
 seed().catch(console.error);

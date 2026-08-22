@@ -90,7 +90,7 @@ function DefaultErrorFallback({ error, resetErrorBoundary }: ErrorBoundaryFallba
             {display.suggestion && (
               <div className="bg-muted/50 rounded-lg p-3 w-full">
                 <p className="text-xs text-muted-foreground">
-                  💡 {display.suggestion}
+                  TIP: {display.suggestion}
                 </p>
               </div>
             )}
@@ -219,7 +219,7 @@ export function ErrorDisplay({
         )}
         {onDismiss && (
           <Button variant="ghost" size="sm" onClick={onDismiss}>
-            ✕
+            X
           </Button>
         )}
       </div>
@@ -236,7 +236,7 @@ export function ErrorDisplay({
           
           {display.suggestion && (
             <p className="text-xs text-muted-foreground mt-2 italic">
-              💡 {display.suggestion}
+              TIP: {display.suggestion}
             </p>
           )}
         </div>

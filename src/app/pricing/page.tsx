@@ -191,7 +191,7 @@ export default function PricingPage() {
                         {plan.badge === 'Enterprise' && <Building2 className="h-3 w-3 mr-1" />}
                         {plan.badge === 'Most Popular' && <Star className="h-3 w-3 mr-1" />}
                         <span className="hidden xs:inline">{plan.badge}</span>
-                        <span className="xs:hidden">{plan.badge === 'Enterprise' ? 'Ent.' : plan.badge === 'Most Popular' ? '★' : plan.badge}</span>
+                        <span className="xs:hidden">{plan.badge === 'Enterprise' ? 'Ent.' : plan.badge}</span>
                       </Badge>
                     </div>
                   )}
