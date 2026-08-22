@@ -1,14 +1,11 @@
 // =============================================================================
-// FILO Authentication - COMPLETE Implementation
+// FILO Authentication System - CLEAN VERSION
 // =============================================================================
-// All auth functions in ONE file to avoid resolution issues
-// - Password hashing (SHA-256 for MVP)
-// - Session tokens stored in database
-// - Email validation
+// No self-references! All session operations in separate sessions.ts file
 // =============================================================================
 
 import { v } from "convex/values";
-import { action, mutation, query } from "./_generated/server";
+import { action, query } from "./_generated/server";
 import { api } from "./_generated/api";
 
 // ==================== TYPES ====================
@@ -25,7 +22,7 @@ interface AuthResult {
   code?: string;
 }
 
-// ==================== PASSWORD HASHING ====================
+// ==================== PASSWORD HASHING (SHA-256 for MVP) ====================
 
 async function hashPassword(password: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -49,14 +46,11 @@ function generateSessionToken(): string {
     .join("");
 }
 
-// ==================== SESSION MUTATIONS ====================
-// Moved to sessions.ts to avoid circular resolution errors!
-// Use api.sessions.createSession and api.sessions.deleteSession
-
-// ==================== AUTH ACTIONS ====================
+// ==================== AUTH FUNCTIONS ====================
 
 /**
- * Login - Validates email/password against database
+ * Login - Validates email/password and creates session
+ * Uses sessions.ts for session creation (no circular refs!)
  */
 export const login = action({
   args: {
@@ -67,22 +61,16 @@ export const login = action({
     try {
       // Validate input
       if (!args.email.trim() || !args.password.trim()) {
-        return {
-          success: false,
-          error: "Email and password are required",
-          code: "MISSING_FIELDS",
-        };
+        return { success: false, error: "Email and password are required", code: "MISSING_FIELDS" };
       }
 
       // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(args.email)) {
-        return {
-          success: false,
-          error: "Invalid email format",
-          code: "INVALID_EMAIL",
-        };
+        return { success: false, error: "Invalid email format", code: "INVALID_EMAIL" };
       }
+
+      console.log('[AUTH] Login attempt for:', args.email.toLowerCase().trim());
 
       // Look up user in database
       const user = await ctx.runQuery(api.users.getUserByEmail, {
@@ -90,33 +78,31 @@ export const login = action({
       });
 
       if (!user) {
-        return {
-          success: false,
-          error: "No account found with this email",
-          code: "USER_NOT_FOUND",
-        };
+        console.log('[AUTH] User not found:', args.email.toLowerCase().trim());
+        return { success: false, error: "No account found with this email", code: "USER_NOT_FOUND" };
       }
 
       // Verify password
       const isValid = await verifyPassword(args.password, user.passwordHash || "");
       
       if (!isValid) {
-        return {
-          success: false,
-          error: "Incorrect password",
-          code: "INVALID_PASSWORD",
-        };
+        console.log('[AUTH] Invalid password for:', args.email.toLowerCase().trim());
+        return { success: false, error: "Incorrect password", code: "INVALID_PASSWORD" };
       }
+
+      console.log('[AUTH] Password valid, creating session for user:', user._id);
 
       // Create session token
       const sessionToken = generateSessionToken();
       
-      // Store session in database (from sessions.ts - no circular refs!)
+      // Store session using sessions.ts (SEPARATE FILE - NO CIRCULAR REFS!)
       await ctx.runMutation(api.sessions.createSession, {
         userId: user._id,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
       });
+
+      console.log('[AUTH] Login successful for:', user.email);
 
       return {
         success: true,
@@ -129,18 +115,15 @@ export const login = action({
       };
 
     } catch (error) {
-      console.error("Login error:", error);
-      return {
-        success: false,
-        error: "Login failed. Please try again.",
-        code: "LOGIN_ERROR",
-      };
+      console.error("[AUTH] Login error:", error);
+      return { success: false, error: "Login failed. Please try again.", code: "LOGIN_ERROR" };
     }
   },
 });
 
 /**
- * Signup - Creates actual user in database
+ * Signup - Creates new user account and auto-login
+ * Uses sessions.ts for session creation (no circular refs!)
  */
 export const signup = action({
   args: {
@@ -152,49 +135,38 @@ export const signup = action({
     try {
       // Validate inputs
       if (!args.name.trim() || !args.email.trim() || !args.password.trim()) {
-        return {
-          success: false,
-          error: "All fields are required",
-          code: "MISSING_FIELDS",
-        };
+        return { success: false, error: "All fields are required", code: "MISSING_FIELDS" };
       }
 
       if (args.password.length < 6) {
-        return {
-          success: false,
-          error: "Password must be at least 6 characters",
-          code: "PASSWORD_TOO_SHORT",
-        };
+        return { success: false, error: "Password must be at least 6 characters", code: "PASSWORD_TOO_SHORT" };
       }
 
       // Validate email format
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       if (!emailRegex.test(args.email)) {
-        return {
-          success: false,
-          error: "Invalid email format",
-          code: "INVALID_EMAIL",
-        };
+        return { success: false, error: "Invalid email format", code: "INVALID_EMAIL" };
       }
 
       const normalizedEmail = args.email.toLowerCase().trim();
+      
+      console.log('[AUTH] Signup attempt for:', normalizedEmail);
 
       // Check if user already exists
       const existingUser = await ctx.runQuery(api.users.getUserByEmail, {
         email: normalizedEmail,
       });
 
-      // DEBUG: Log when user exists (remove in production)
       if (existingUser) {
-        console.log(`[SIGNUP DEBUG] Email already registered: ${normalizedEmail}, User ID: ${existingUser._id}, Name: ${existingUser.name}`);
+        console.log('[AUTH] Email already exists:', normalizedEmail, 'User ID:', existingUser._id);
         return {
           success: false,
           error: "An account with this email already exists",
           code: "EMAIL_EXISTS",
         };
       }
-      
-      console.log(`[SIGNUP DEBUG] Creating new user: ${normalizedEmail}`);
+
+      console.log('[AUTH] Creating new user:', normalizedEmail);
 
       // Hash the password
       const passwordHash = await hashPassword(args.password);
@@ -206,13 +178,17 @@ export const signup = action({
         passwordHash,
       });
 
-      // Auto-login after signup (using sessions.ts - no circular refs!)
+      console.log('[AUTH] User created with ID:', userId);
+
+      // Auto-login after signup using sessions.ts (NO CIRCULAR REFS!)
       const sessionToken = generateSessionToken();
       await ctx.runMutation(api.sessions.createSession, {
         userId,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
       });
+
+      console.log('[AUTH] Signup successful for:', normalizedEmail);
 
       return {
         success: true,
@@ -225,7 +201,7 @@ export const signup = action({
       };
 
     } catch (error) {
-      console.error("Signup error:", error);
+      console.error("[AUTH] Signup error:", error);
       return {
         success: false,
         error: "Account creation failed. Please try again.",
@@ -236,7 +212,7 @@ export const signup = action({
 });
 
 /**
- * Validate session token
+ * Validate session token - returns user data if valid
  */
 export const validateSession = query({
   args: {
@@ -273,18 +249,26 @@ export const validateSession = query({
 });
 
 /**
- * Logout - Invalidate session
+ * Logout - Invalidate session token
+ * Uses sessions.ts for deletion (no circular refs!)
  */
 export const logout = action({
   args: {
     token: v.string(),
   },
   handler: async (ctx, args) => {
-    // Use the deleteSession mutation from sessions.ts (no circular refs!)
-    await ctx.runMutation(api.sessions.deleteSession, {
-      token: args.token,
-    });
+    try {
+      // Delete session using sessions.ts (NO CIRCULAR REFS!)
+      await ctx.runMutation(api.sessions.deleteSession, {
+        token: args.token,
+      });
 
-    return { success: true };
+      console.log('[AUTH] Session invalidated');
+      return { success: true };
+    } catch (error) {
+      console.error("[AUTH] Logout error:", error);
+      // Still return success - client should clear local storage anyway
+      return { success: true };
+    }
   },
 });

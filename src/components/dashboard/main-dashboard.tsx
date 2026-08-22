@@ -73,8 +73,7 @@ import {
   HardDrive
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
-import { useMutation, useAction, useQuery } from 'convex/react'
-import { api } from '../../../convex/_generated/api'
+import { apiClient, User as ApiUser } from '@/lib/api-client'
 import { 
   ErrorCode, 
   createAppError, 
@@ -215,21 +214,14 @@ export function MainDashboard() {
     setAppError(null)
   }, [])
 
-  // Convex actions (REAL authentication - no fakes!)
-  const generateArtifact = useAction(api.artifacts.generateArtifact)
-  const loginAction = useAction(api.auth.login)
-  const signupAction = useAction(api.auth.signup)
-  const logoutAction = useAction(api.auth.logout)
-  
   // Subscription/Pro status check
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
-  
-  // Query subscription status when user is logged in
-  const userIdForSub = user?.id as any
-  const subscriptionStatus = useQuery(
-    api.subscriptions.hasActiveSubscription, 
-    userIdForSub ? { userId: userIdForSub } : 'skip'
-  )
+  const [subscriptionStatus, setSubscriptionStatus] = useState<{
+    hasActive: boolean
+    remaining: number
+    limit: number
+    reason?: string
+  } | null>(null)
 
   // Load saved session on mount (REAL session, not fake user)
   useEffect(() => {
@@ -254,6 +246,33 @@ export function MainDashboard() {
       }
     }
   }, [])
+
+  // Load subscription status when user logs in
+  useEffect(() => {
+    if (user?.id && sessionToken) {
+      apiClient.getSubscriptionStatus()
+        .then(response => {
+          if (response.success && response.data) {
+            setSubscriptionStatus({
+              hasActive: response.data.hasActiveSubscription,
+              remaining: response.data.remainingGenerations,
+              limit: response.data.planLimit,
+              reason: undefined,
+            })
+          }
+        })
+        .catch(err => {
+          console.error('[DASHBOARD] Failed to load subscription:', err)
+          // Default to allow generation for MVP
+          setSubscriptionStatus({
+            hasActive: true,
+            remaining: 999,
+            limit: 999,
+            reason: 'default',
+          })
+        })
+    }
+  }, [user?.id, sessionToken])
 
   // Save prompt to localStorage whenever it changes
   useEffect(() => {
@@ -293,7 +312,7 @@ export function MainDashboard() {
     setFiles(prev => prev.filter((_, i) => i !== index))
   }
 
-  // Auth Handlers - REAL authentication via Convex (NO FAKES!)
+  // Auth Handlers - Using Proxy API (NO DIRECT CONVEX!)
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     clearError()
@@ -306,33 +325,30 @@ export function MainDashboard() {
     setIsLoggingIn(true)
     
     try {
-      // REAL login call to Convex - validates email/password against database
-      const result = await loginAction({
-        email: loginEmail,
-        password: loginPassword,
-      })
+      // Call PROXY API which calls Convex server-side
+      const response = await apiClient.login(loginEmail, loginPassword)
 
-      if (!result.success || !result.user || !result.sessionToken) {
-        // Map Convex error codes to user-friendly errors
-        if (result.code === 'USER_NOT_FOUND') {
+      if (!response.success || !response.data?.user || !response.data?.sessionToken) {
+        // Map error codes to user-friendly errors
+        if (response.code === 'USER_NOT_FOUND') {
           setError(ErrorCode.AUTH_USER_NOT_FOUND)
-        } else if (result.code === 'INVALID_PASSWORD') {
+        } else if (response.code === 'INVALID_PASSWORD') {
           setError(ErrorCode.AUTH_INVALID_PASSWORD)
-        } else if (result.code === 'INVALID_EMAIL') {
+        } else if (response.code === 'INVALID_EMAIL') {
           setError(ErrorCode.AUTH_INVALID_EMAIL)
         } else {
-          setError(ErrorCode.AUTH_LOGIN_FAILED, result.error)
+          setError(ErrorCode.AUTH_LOGIN_FAILED, response.error)
         }
         return
       }
 
-      // Store REAL session (not fake user data)
-      setUser(result.user)
-      setSessionToken(result.sessionToken)
-      localStorage.setItem('filo_session', JSON.stringify({
-        user: result.user,
-        token: result.sessionToken,
-      }))
+      // Store session using API client helper
+      const userData = response.data.user
+      const token = response.data.sessionToken
+      
+      setUser(userData as unknown as User)
+      setSessionToken(token)
+      apiClient.storeSession(userData, token)
       
       setShowLoginModal(false)
       setLoginEmail('')
@@ -361,40 +377,39 @@ export function MainDashboard() {
     setIsSigningUp(true)
     
     try {
-      // REAL signup call to Convex - creates actual user in database
-      const result = await signupAction({
-        name: signupName,
-        email: signupEmail,
-        password: signupPassword,
-      })
+      // Call PROXY API which calls Convex server-side
+      const response = await apiClient.signup(signupName, signupEmail, signupPassword)
 
-      if (!result.success || !result.user || !result.sessionToken) {
-        // Map Convex error codes to user-friendly errors
-        if (result.code === 'EMAIL_EXISTS') {
+      console.log('[DASHBOARD] Signup response:', response)
+
+      if (!response.success || !response.data?.user || !response.data?.sessionToken) {
+        // Map error codes to user-friendly errors
+        if (response.code === 'EMAIL_EXISTS') {
           setError(ErrorCode.AUTH_EMAIL_EXISTS)
-        } else if (result.code === 'INVALID_EMAIL') {
+        } else if (response.code === 'INVALID_EMAIL') {
           setError(ErrorCode.AUTH_INVALID_EMAIL)
-        } else if (result.code === 'PASSWORD_TOO_SHORT') {
+        } else if (response.code === 'PASSWORD_TOO_SHORT') {
           setError(ErrorCode.AUTH_PASSWORD_TOO_SHORT)
         } else {
-          setError(ErrorCode.AUTH_SIGNUP_FAILED, result.error)
+          setError(ErrorCode.AUTH_SIGNUP_FAILED, response.error)
         }
         return
       }
 
-      // Store REAL session after successful signup
-      setUser(result.user)
-      setSessionToken(result.sessionToken)
-      localStorage.setItem('filo_session', JSON.stringify({
-        user: result.user,
-        token: result.sessionToken,
-      }))
+      // Store session after successful signup
+      const userData = response.data.user
+      const token = response.data.sessionToken
+      
+      setUser(userData as unknown as User)
+      setSessionToken(token)
+      apiClient.storeSession(userData, token)
       
       setShowSignupModal(false)
       setSignupName('')
       setSignupEmail('')
       setSignupPassword('')
     } catch (err) {
+      console.error('[DASHBOARD] Signup error:', err)
       setError(ErrorCode.AUTH_SIGNUP_FAILED, err)
     } finally {
       setIsSigningUp(false)
@@ -402,19 +417,17 @@ export function MainDashboard() {
   }
 
   const handleLogout = async () => {
-    // REAL logout - invalidate session in database
-    if (sessionToken) {
-      try {
-        await logoutAction({ token: sessionToken })
-      } catch (err) {
-        console.error('Logout error:', err)
-        // Don't show error for logout - just clear locally
-      }
+    // Call PROXY API to invalidate session on backend
+    try {
+      await apiClient.logout()
+    } catch (err) {
+      console.error('Logout error:', err)
+      // Don't show error for logout - just clear locally
     }
     
     setUser(null)
     setSessionToken(null)
-    localStorage.removeItem('filo_session')
+    apiClient.clearSession()
   }
 
   // Handle generation
@@ -452,32 +465,31 @@ export function MainDashboard() {
     setGenerationStages(stages)
 
     try {
-      // Call Convex action (has access to AI secrets)
-      const data = await generateArtifact({
+      // Call PROXY API which calls Convex server-side (has access to AI secrets)
+      const response = await apiClient.generateArtifact({
         prompt,
         artifactType: detectArtifactType(prompt),
         outputFormat: selectedFormat === 'auto' ? undefined : selectedFormat,
         workspaceId: user.id, // Use user's default workspace
-        userId: user.id,
       })
 
-      // Check for errors from Convex
-      if (!data.success || !data.artifact) {
+      // Check for errors from API
+      if (!response.success || !response.data?.artifact) {
         // Map error codes to user-friendly messages
-        if (data.code === 'API_KEY_MISSING') {
-          setError(ErrorCode.AI_API_KEY_MISSING, data.error)
-        } else if (data.code === 'PROVIDER_ERROR') {
-          setError(ErrorCode.AI_PROVIDER_ERROR, data.error)
-        } else if (data.code === 'RATE_LIMITED') {
-          setError(ErrorCode.AI_RATE_LIMITED, data.error)
-        } else if (data.code === 'TIMEOUT') {
-          setError(ErrorCode.AI_TIMEOUT, data.error)
-        } else if (data.code === 'PLANNING_FAILED') {
-          setError(ErrorCode.AI_PLANNING_FAILED, data.error)
-        } else if (data.code === 'GENERATION_FAILED') {
-          setError(ErrorCode.AI_GENERATION_FAILED, data.error)
+        if (response.code === 'API_KEY_MISSING') {
+          setError(ErrorCode.AI_API_KEY_MISSING, response.error)
+        } else if (response.code === 'PROVIDER_ERROR') {
+          setError(ErrorCode.AI_PROVIDER_ERROR, response.error)
+        } else if (response.code === 'RATE_LIMITED') {
+          setError(ErrorCode.AI_RATE_LIMITED, response.error)
+        } else if (response.code === 'TIMEOUT') {
+          setError(ErrorCode.AI_TIMEOUT, response.error)
+        } else if (response.code === 'PLANNING_FAILED') {
+          setError(ErrorCode.AI_PLANNING_FAILED, response.error)
+        } else if (response.code === 'GENERATION_FAILED') {
+          setError(ErrorCode.AI_GENERATION_FAILED, response.error)
         } else {
-          setError(ErrorCode.AI_GENERATION_FAILED, data.error)
+          setError(ErrorCode.AI_GENERATION_FAILED, response.error)
         }
         
         // Mark current stage as error
@@ -485,11 +497,13 @@ export function MainDashboard() {
           prev.map(stage => ({
             ...stage,
             status: stage.status === 'active' ? 'error' as const : stage.status,
-            detail: data.error ? String(data.error) : undefined,
+            detail: response.error ? String(response.error) : undefined,
           }))
         )
         return
       }
+
+      const data = response.data
 
       // Simulate progress stages based on actual processing
       for (let i = 0; i < stages.length; i++) {

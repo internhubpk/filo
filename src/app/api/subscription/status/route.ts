@@ -1,7 +1,7 @@
 // =============================================================================
-// GET /api/artifacts
+// GET /api/subscription/status
 // =============================================================================
-// List user's artifacts with optional filtering
+// Get current user's subscription and usage status
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -31,52 +31,23 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Get query parameters
-    const { searchParams } = new URL(request.url)
-    const search = searchParams.get('search') || ''
-    const type = searchParams.get('type') || ''
-    const limit = parseInt(searchParams.get('limit') || '20')
-    const offset = parseInt(searchParams.get('offset') || '0')
-
-    // Query artifacts from Convex
-    // Note: You may need to add a proper query function in convex/artifacts.ts
-    // For now, we'll use a basic approach
-    
-    let artifacts: any[] = []
-    
-    try {
-      // Try to call a list function if it exists
-      artifacts = await convex.query('artifacts:listUserArtifacts', {
-        userId: session.user.id,
-        search,
-        type,
-        limit,
-        offset,
-      }) as any[]
-    } catch {
-      // Fallback: If no list function exists, return empty array
-      // In production, implement proper pagination/filtering in Convex
-      console.warn('[API /artifacts] No listUserArtifacts query found, returning empty')
-      artifacts = []
-    }
+    // Get subscription status
+    const status = await convex.query('subscriptions:hasActiveSubscription', {
+      userId: session.user.id,
+    })
 
     return NextResponse.json({
       success: true,
-      data: {
-        artifacts,
-        total: artifacts.length,
-        limit,
-        offset,
-      }
+      data: status
     })
 
   } catch (error) {
-    console.error('[API /artifacts] Error:', error)
+    console.error('[API /subscription/status] Error:', error)
     
     return NextResponse.json(
       { 
         success: false, 
-        error: 'Failed to fetch artifacts',
+        error: 'Failed to get subscription status',
         code: 'FETCH_ERROR' 
       },
       { status: 500 }
