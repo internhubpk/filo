@@ -515,12 +515,13 @@ export function MainDashboard() {
       }
 
       // Create artifact preview from response or fallback
-      const artifact: ArtifactPreview = data.artifact
+      // Add comprehensive null/undefined checks to prevent runtime errors
+      const artifact: ArtifactPreview = (data && data.artifact && data.artifact.title)
         ? {
-            id: data.artifact.id,
-            title: data.artifact.title,
-            type: data.artifact.type,
-            format: data.artifact.format,
+            id: data.artifact.id || crypto.randomUUID(),
+            title: data.artifact.title || extractTitle(prompt),
+            type: data.artifact.type || detectArtifactType(prompt),
+            format: data.artifact.format || (selectedFormat === 'auto' ? 'DOCX' : selectedFormat),
             status: 'completed' as const,
             createdAt: new Date(),
           }
@@ -1049,7 +1050,7 @@ export function MainDashboard() {
             </DialogDescription>
           </DialogHeader>
 
-          {currentArtifact && (
+          {currentArtifact && currentArtifact.title ? (
             <div className="space-y-6 mt-4">
               {/* Preview card */}
               <Card className="overflow-hidden">
@@ -1057,7 +1058,7 @@ export function MainDashboard() {
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex items-start gap-4 flex-1 min-w-0">
                       <div className="flex h-16 w-16 items-center justify-center rounded-xl bg-primary/10 shrink-0">
-                        {currentArtifact.type === 'Document' && <FileText className="h-8 w-8 text-primary" />}
+                        {(currentArtifact.type === 'Document' || !currentArtifact.type) && <FileText className="h-8 w-8 text-primary" />}
                         {currentArtifact.type === 'Spreadsheet' && <Table className="h-8 w-8 text-primary" />}
                         {currentArtifact.type === 'Presentation' && <Presentation className="h-8 w-8 text-primary" />}
                         {currentArtifact.type === 'Proposal' && <Briefcase className="h-8 w-8 text-primary" />}
@@ -1067,12 +1068,12 @@ export function MainDashboard() {
                         {!['Document', 'Spreadsheet', 'Presentation', 'Proposal', 'Lesson Plan', 'Invoice', 'Resume'].includes(currentArtifact.type) && <FileText className="h-8 w-8 text-primary" />}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <h3 className="font-semibold text-lg truncate">{currentArtifact.title}</h3>
+                        <h3 className="font-semibold text-lg truncate">{currentArtifact.title || 'Generated Artifact'}</h3>
                         <div className="mt-2 flex items-center gap-2 flex-wrap">
-                          <Badge className="cursor-default">{currentArtifact.type}</Badge>
-                          <Badge variant="outline" className="cursor-default font-mono">{currentArtifact.format}</Badge>
+                          <Badge className="cursor-default">{currentArtifact.type || 'Document'}</Badge>
+                          <Badge variant="outline" className="cursor-default font-mono">{currentArtifact.format || 'DOCX'}</Badge>
                           <span className="text-sm text-muted-foreground cursor-default">
-                            {currentArtifact.createdAt.toLocaleTimeString()}
+                            {(currentArtifact.createdAt instanceof Date ? currentArtifact.createdAt : new Date()).toLocaleTimeString()}
                           </span>
                         </div>
                       </div>
@@ -1085,7 +1086,7 @@ export function MainDashboard() {
               <div className="flex flex-wrap gap-3">
                 <Button className="gap-2 cursor-pointer hover:shadow-md transition-all min-h-[44px]">
                   <Download className="h-4 w-4" />
-                  Download {currentArtifact.format}
+                  Download {currentArtifact.format || 'DOCX'}
                 </Button>
                 <Button variant="outline" className="gap-2 cursor-pointer hover:bg-accent transition-colors min-h-[44px]">
                   <Eye className="h-4 w-4" />
@@ -1126,6 +1127,24 @@ export function MainDashboard() {
                   </Button>
                 </div>
               </div>
+            </div>
+          ) : (
+            <div className="text-center py-8">
+              <AlertCircle className="h-12 w-12 mx-auto text-muted-foreground mb-4" />
+              <h3 className="text-lg font-semibold mb-2">Unable to Display Artifact</h3>
+              <p className="text-muted-foreground">
+                The artifact data is incomplete or corrupted. Please try generating again.
+              </p>
+              <Button 
+                variant="outline" 
+                className="mt-4"
+                onClick={() => {
+                  setShowResultDialog(false)
+                  setCurrentArtifact(null)
+                }}
+              >
+                Close
+              </Button>
             </div>
           )}
         </DialogContent>

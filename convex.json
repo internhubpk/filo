@@ -1,0 +1,1 @@
+{"functions": "convex/*", "node": {"externalPackages": ["docx", "pdfkit", "pptxgenjs", "xlsx"]}}
