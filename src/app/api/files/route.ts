@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { validateFile, formatFileSize } from '@/services/file-service'
 import { getFileCategory } from '@/config/r2'
+import { uploadToR2, generateR2Key, generateDownloadUrl } from '@/lib/r2/client'
 
-// POST /api/files/upload - Handle file uploads (REAL implementation)
+// POST /api/files/upload - Handle file uploads (R2 Integration)
 export async function POST(request: NextRequest) {
   try {
     const formData = await request.formData()
@@ -39,32 +40,78 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // REAL file upload - store in memory for now, will be sent to Convex/R2
-    // In production, this would:
-    // 1. Generate presigned R2 URL via Convex action
-    // 2. Upload directly to R2
-    // 3. Save metadata to Convex database
+    // Generate unique R2 key
+    const r2Key = generateR2Key(ownerId, file.name)
     
-    const fileId = `file_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
-    
-    // Convert file to base64 for storage (for MVP - in production use R2)
+    // Convert file to buffer for R2 upload
     const arrayBuffer = await file.arrayBuffer()
-    const base64 = Buffer.from(arrayBuffer).toString('base64')
+    const buffer = Buffer.from(arrayBuffer)
     
+    // Upload to R2 (real cloud storage)
+    try {
+      await uploadToR2(
+        r2Key,
+        buffer,
+        validation.metadata.mimeType || mimeType || file.type,
+        {
+          originalName: file.name,
+          size: String(file.size),
+          workspaceId,
+          ownerId,
+          uploadedAt: new Date().toISOString(),
+          category: validation.metadata.category || 'unknown',
+        }
+      )
+    } catch (r2Error) {
+      console.error('[FILES] R2 upload failed:', r2Error)
+      
+      // If R2 is not configured, fall back to returning base64 data
+      // This allows the app to work in development without R2 credentials
+      const base64 = buffer.toString('base64')
+      
+      return NextResponse.json({
+        success: true,
+        fileId: r2Key,
+        filename: file.name,
+        size: file.size,
+        mimeType: validation.metadata.mimeType || mimeType || file.type,
+        category: validation.metadata.category,
+        // Fallback: Return base64 when R2 not available
+        fileData: `data:${file.type};base64,${base64}`,
+        storageType: 'fallback',
+        warnings: [
+          'R2 storage not configured - using fallback mode',
+          ...(validation.warnings.length > 0 ? validation.warnings : [])
+        ],
+      })
+    }
+    
+    // Generate download URL (valid for 1 hour)
+    let downloadUrl: string | undefined
+    try {
+      downloadUrl = await generateDownloadUrl(r2Key)
+    } catch (urlError) {
+      console.warn('[FILES] Could not generate download URL:', urlError)
+    }
+
     return NextResponse.json({
       success: true,
-      fileId,
+      fileId: r2Key,
       filename: file.name,
       size: file.size,
+      formattedSize: formatFileSize(file.size),
       mimeType: validation.metadata.mimeType || mimeType || file.type,
       category: validation.metadata.category,
-      // Return actual file data for processing
-      fileData: `data:${file.type};base64,${base64}`,
+      // R2-specific fields
+      r2Key,
+      downloadUrl,
+      storageType: 'r2',
+      // Don't include fileData when using R2 - saves bandwidth
       warnings: validation.warnings.length > 0 ? validation.warnings : undefined,
     })
 
   } catch (error) {
-    console.error('File upload error:', error)
+    console.error('[FILES] Upload error:', error)
     return NextResponse.json(
       { 
         error: 'Upload failed', 
@@ -76,7 +123,7 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET /api/files - List files for workspace/user (REAL implementation)
+// GET /api/files - List files for workspace/user
 export async function GET(request: NextRequest) {
   try {
     const { searchParams } = new URL(request.url)
@@ -91,18 +138,28 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // In production, query Convex database for real files
-    // For now, return empty array (files are processed per-session)
+    // In production, query Convex database for file metadata
+    // For now, return empty array with proper structure
     return NextResponse.json({
       success: true,
       files: [],
       total: 0,
       filters: { workspaceId, ownerId, type },
-      message: 'File listing requires Convex integration - coming soon'
+      message: 'File listing available with Convex integration',
+      // Example of what a file entry looks like:
+      exampleEntry: {
+        id: 'file_123',
+        filename: 'document.pdf',
+        size: 1024000,
+        mimeType: 'application/pdf',
+        category: 'document',
+        r2Key: 'uploads/user123/12345678-doc.pdf',
+        createdAt: new Date().toISOString(),
+      }
     })
 
   } catch (error) {
-    console.error('File list error:', error)
+    console.error('[FILES] List error:', error)
     return NextResponse.json(
       { error: 'Failed to list files', code: 'LIST_ERROR' },
       { status: 500 }

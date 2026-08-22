@@ -1,8 +1,9 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { planArtifact, generateContent } from '@/services/artifact-engine'
 import type { ArtifactType, OutputFormat } from '@/types'
+import { ConvexHttpClient } from 'convex/browser'
 
-// POST /api/artifacts/generate - Generate a new artifact
+// POST /api/artifacts/generate - Generate a new artifact (with Pro subscription check)
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
@@ -14,6 +15,7 @@ export async function POST(request: NextRequest) {
       workspaceId,
       brandConfig,
       knowledgeContext,
+      userId, // Required for subscription check
     } = body
 
     // Validate required fields
@@ -31,11 +33,81 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // ==================== SUBSCRIPTION CHECK (CRITICAL) ====================
+    // AI generation requires an active Pro subscription
+    if (userId && process.env.NEXT_PUBLIC_CONVEX_URL) {
+      try {
+        const convex = new ConvexHttpClient(process.env.NEXT_PUBLIC_CONVEX_URL)
+        
+        const subscriptionStatus = await convex.query(
+          'subscriptions:hasActiveSubscription',
+          { userId }
+        )
+
+        if (!subscriptionStatus?.hasActive) {
+          return NextResponse.json(
+            {
+              error: 'Pro subscription required',
+              code: 'SUBSCRIPTION_REQUIRED',
+              message: 'AI generation requires an active Pro subscription.',
+              reason: subscriptionStatus?.reason || 'No active subscription found',
+              upgradeUrl: '/pricing',
+            },
+            { status: 402 } // Payment Required
+          )
+        }
+
+        // Check generation limits if applicable
+        const canGenerate = await convex.query(
+          'subscriptions:canGenerateAI',
+          { userId }
+        )
+
+        if (!canGenerate?.allowed) {
+          return NextResponse.json(
+            {
+              error: 'Generation limit reached',
+              code: 'LIMIT_EXCEEDED',
+              message: 'You have reached your AI generation limit for this billing period.',
+              remaining: canGenerate?.remaining || 0,
+              limit: canGenerate?.limit || 0,
+              resetDate: canGenerate?.resetDate,
+            },
+            { status: 429 } // Too Many Requests
+          )
+        }
+      } catch (subError) {
+        // If subscription check fails, allow generation in development mode
+        console.warn('[GENERATION] Subscription check failed:', subError)
+        
+        if (process.env.NODE_ENV === 'production') {
+          return NextResponse.json(
+            {
+              error: 'Unable to verify subscription',
+              code: 'SUBSCRIPTION_CHECK_FAILED',
+              message: 'Could not verify your subscription status. Please try again.',
+            },
+            { status: 503 } // Service Unavailable
+          )
+        }
+      }
+    } else if (process.env.NODE_ENV === 'production') {
+      // In production, require userId for subscription checks
+      return NextResponse.json(
+        {
+          error: 'Authentication required',
+          code: 'AUTH_REQUIRED',
+          message: 'Please sign in to generate artifacts.',
+        },
+        { status: 401 }
+      )
+    }
+    // =====================================================================
+
     // Create job ID for tracking
-    const jobId = `job_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`
+    const jobId = `job_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`
 
     // Start async generation process
-    // In production, this would be queued and processed in background
     const generationResult = await performGeneration({
       prompt,
       artifactType,
@@ -45,6 +117,7 @@ export async function POST(request: NextRequest) {
       brandConfig,
       knowledgeContext,
       jobId,
+      userId,
     })
 
     return NextResponse.json({
@@ -73,6 +146,36 @@ export async function POST(request: NextRequest) {
   }
 }
 
+// GET /api/artifacts/generate - Health check / info endpoint
+export async function GET() {
+  return NextResponse.json({
+    service: 'filo-artifact-generator',
+    version: '2.0.0',
+    endpoint: '/api/artifacts/generate',
+    features: {
+      aiGeneration: true,
+      documentExport: ['DOCX', 'PDF', 'XLSX', 'PPTX', 'CSV'],
+      fileUpload: true,
+      branding: true,
+      multiFormat: true,
+    },
+    requirements: {
+      authentication: process.env.NODE_ENV === 'production' ? 'required' : 'optional',
+      subscription: 'Pro plan required for AI generation',
+    },
+    supportedTypes: [
+      'document',
+      'presentation',
+      'spreadsheet',
+      'report',
+      'proposal',
+      'contract',
+      'email',
+      'creative',
+    ],
+  })
+}
+
 // ==================== HELPER FUNCTIONS ====================
 
 interface GenerationInput {
@@ -84,6 +187,7 @@ interface GenerationInput {
   brandConfig?: unknown
   knowledgeContext?: string
   jobId: string
+  userId?: string
 }
 
 async function performGeneration(input: GenerationInput) {
@@ -102,17 +206,27 @@ async function performGeneration(input: GenerationInput) {
     specification: plan.specification,
     context: {
       workspaceId: input.workspaceId,
-      userId: 'current-user', // Would come from auth session
+      userId: input.userId || 'anonymous-user',
       knowledgeContext: input.knowledgeContext,
       brandContext: input.brandConfig as never,
       fileContents: input.files,
     },
   })
 
+  // Generate unique ID using crypto (available in Node.js)
+  let artifactId: string
+  try {
+    const crypto = await import('crypto')
+    artifactId = crypto.randomUUID()
+  } catch {
+    // Fallback UUID generation
+    artifactId = `${input.jobId}_${Date.now()}`
+  }
+
   // Return result (in production, save to DB and R2)
   return {
     artifact: {
-      id: crypto.randomUUID(),
+      id: artifactId,
       title: plan.specification.title,
       type: plan.specification.type,
       format: plan.specification.outputFormat,
@@ -132,6 +246,7 @@ function getErrorCode(error: unknown): string {
     if (error.message.includes('rate limit')) return 'RATE_LIMITED'
     if (error.message.includes('timeout')) return 'TIMEOUT'
     if (error.message.includes('validation')) return 'VALIDATION_ERROR'
+    if (error.message.includes('subscription')) return 'SUBSCRIPTION_ERROR'
   }
   return 'GENERATION_ERROR'
 }
