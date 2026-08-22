@@ -70,7 +70,7 @@ import {
   Sun
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
-import { useAction } from 'convex/react'
+import { useMutation, useAction } from 'convex/react'
 import { api } from '../../../convex/_generated/api'
 
 // ==================== AUTH TYPES ====================
@@ -192,24 +192,34 @@ export function MainDashboard() {
   const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [sessionToken, setSessionToken] = useState<string | null>(null)
 
-  // Convex mutations (has access to server-side secrets)
+  // Convex actions (REAL authentication - no fakes!)
   const generateArtifact = useAction(api.artifacts.generateArtifact)
+  const loginAction = useAction(api.auth.login)
+  const signupAction = useAction(api.auth.signup)
+  const logoutAction = useAction(api.auth.logout)
 
-  // Load saved prompt on mount
+  // Load saved session on mount (REAL session, not fake user)
   useEffect(() => {
     const savedPrompt = localStorage.getItem('filo_draft_prompt')
     if (savedPrompt) {
       setPrompt(savedPrompt)
     }
     
-    // Check for existing session
-    const savedUser = localStorage.getItem('filo_user')
-    if (savedUser) {
+    // Check for existing REAL session
+    const savedSession = localStorage.getItem('filo_session')
+    if (savedSession) {
       try {
-        setUser(JSON.parse(savedUser))
+        const sessionData = JSON.parse(savedSession)
+        if (sessionData.user && sessionData.token) {
+          setUser(sessionData.user)
+          setSessionToken(sessionData.token)
+        } else {
+          localStorage.removeItem('filo_session')
+        }
       } catch {
-        localStorage.removeItem('filo_user')
+        localStorage.removeItem('filo_session')
       }
     }
   }, [])
@@ -252,7 +262,7 @@ export function MainDashboard() {
     setFiles(prev => prev.filter((_, i) => i !== index))
   }
 
-  // Auth Handlers
+  // Auth Handlers - REAL authentication via Convex (NO FAKES!)
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
     setError(null)
@@ -265,22 +275,30 @@ export function MainDashboard() {
     setIsLoggingIn(true)
     
     try {
-      // Simulate API call - replace with real auth
-      await new Promise(resolve => setTimeout(resolve, 1000))
-      
-      const newUser: User = {
-        id: crypto.randomUUID(),
+      // REAL login call to Convex - validates email/password against database
+      const result = await loginAction({
         email: loginEmail,
-        name: loginEmail.split('@')[0],
+        password: loginPassword,
+      })
+
+      if (!result.success || !result.user || !result.sessionToken) {
+        setError(result.error || 'Login failed. Please check your credentials.')
+        return
       }
+
+      // Store REAL session (not fake user data)
+      setUser(result.user)
+      setSessionToken(result.sessionToken)
+      localStorage.setItem('filo_session', JSON.stringify({
+        user: result.user,
+        token: result.sessionToken,
+      }))
       
-      setUser(newUser)
-      localStorage.setItem('filo_user', JSON.stringify(newUser))
       setShowLoginModal(false)
       setLoginEmail('')
       setLoginPassword('')
     } catch (err) {
-      setError('Invalid credentials. Please try again.')
+      setError('Login failed. Please try again.')
     } finally {
       setIsLoggingIn(false)
     }
@@ -303,17 +321,26 @@ export function MainDashboard() {
     setIsSigningUp(true)
     
     try {
-      // Simulate API call - replace with real auth
-      await new Promise(resolve => setTimeout(resolve, 1200))
-      
-      const newUser: User = {
-        id: crypto.randomUUID(),
-        email: signupEmail,
+      // REAL signup call to Convex - creates actual user in database
+      const result = await signupAction({
         name: signupName,
+        email: signupEmail,
+        password: signupPassword,
+      })
+
+      if (!result.success || !result.user || !result.sessionToken) {
+        setError(result.error || 'Account creation failed.')
+        return
       }
+
+      // Store REAL session after successful signup
+      setUser(result.user)
+      setSessionToken(result.sessionToken)
+      localStorage.setItem('filo_session', JSON.stringify({
+        user: result.user,
+        token: result.sessionToken,
+      }))
       
-      setUser(newUser)
-      localStorage.setItem('filo_user', JSON.stringify(newUser))
       setShowSignupModal(false)
       setSignupName('')
       setSignupEmail('')
@@ -325,9 +352,19 @@ export function MainDashboard() {
     }
   }
 
-  const handleLogout = () => {
+  const handleLogout = async () => {
+    // REAL logout - invalidate session in database
+    if (sessionToken) {
+      try {
+        await logoutAction({ token: sessionToken })
+      } catch (err) {
+        console.error('Logout error:', err)
+      }
+    }
+    
     setUser(null)
-    localStorage.removeItem('filo_user')
+    setSessionToken(null)
+    localStorage.removeItem('filo_session')
   }
 
   // Handle generation
