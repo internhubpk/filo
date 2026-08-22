@@ -4,13 +4,13 @@
 // Clean, beautiful toasts with proper backgrounds
 // =============================================================================
 
-import toast, { ToastOptions } from 'react-hot-toast'
+import hotToast from 'react-hot-toast'
 
 // ==================== CLEAN TOAST API ====================
 
-export const filoToast = {
+export const toast = {
   success(message: string, description?: string) {
-    return toast.success(
+    return hotToast.success(
       <div className="flex flex-col">
         <span className="font-semibold text-sm">{message}</span>
         {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
@@ -36,7 +36,7 @@ export const filoToast = {
   },
 
   error(message: string, description?: string) {
-    return toast.error(
+    return hotToast.error(
       <div className="flex flex-col">
         <span className="font-semibold text-sm">{message}</span>
         {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
@@ -62,7 +62,7 @@ export const filoToast = {
   },
 
   warning(message: string, description?: string) {
-    return toast(
+    return hotToast(
       <div className="flex flex-col">
         <span className="font-semibold text-sm">{message}</span>
         {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
@@ -88,7 +88,7 @@ export const filoToast = {
   },
 
   info(message: string, description?: string) {
-    return toast(
+    return hotToast(
       <div className="flex flex-col">
         <span className="font-semibold text-sm">{message}</span>
         {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
@@ -114,7 +114,7 @@ export const filoToast = {
   },
 
   loading(message: string) {
-    return toast.loading(message, {
+    return hotToast.loading(message, {
       style: {
         background: 'hsl(var(--popover))',
         border: '1px solid hsl(var(--border))',
@@ -125,9 +125,9 @@ export const filoToast = {
 
   dismiss(id?: string) {
     if (id) {
-      toast.dismiss(id)
+      hotToast.dismiss(id)
     } else {
-      toast.dismiss()
+      hotToast.dismiss()
     }
   },
 
@@ -179,6 +179,4 @@ export const filoToast = {
   },
 }
 
-// Export original toast for advanced usage
-export { toast }
-export default filoToast
+export default toast

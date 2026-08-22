@@ -1152,7 +1152,7 @@ export function MainDashboard() {
             </DialogDescription>
           </DialogHeader>
 
-          {currentArtifact && currentArtifact.title ? (
+          {currentArtifact ? (
             <div className="space-y-6 mt-4">
               {/* Preview card */}
               <Card className="overflow-hidden">
@@ -1167,7 +1167,7 @@ export function MainDashboard() {
                         {currentArtifact.type === 'Lesson Plan' && <GraduationCap className="h-8 w-8 text-primary" />}
                         {currentArtifact.type === 'Invoice' && <Receipt className="h-8 w-8 text-primary" />}
                         {currentArtifact.type === 'Resume' && <UserCircle className="h-8 w-8 text-primary" />}
-                        {!['Document', 'Spreadsheet', 'Presentation', 'Proposal', 'Lesson Plan', 'Invoice', 'Resume'].includes(currentArtifact.type) && <FileText className="h-8 w-8 text-primary" />}
+                        {!['Document', 'Spreadsheet', 'Presentation', 'Proposal', 'Lesson Plan', 'Invoice', 'Resume'].includes(currentArtifact?.type || '') && <FileText className="h-8 w-8 text-primary" />}
                       </div>
                       <div className="min-w-0 flex-1">
                         <h3 className="font-semibold text-lg truncate">{currentArtifact.title || 'Generated Artifact'}</h3>
