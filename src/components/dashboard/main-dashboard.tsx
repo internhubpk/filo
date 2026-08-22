@@ -70,6 +70,8 @@ import {
   Sun
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
+import { useMutation } from 'convex/react'
+import { api } from '@/convex/_generated/api'
 
 // ==================== AUTH TYPES ====================
 
@@ -190,6 +192,9 @@ export function MainDashboard() {
   const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview | null>(null)
   const [dragActive, setDragActive] = useState(false)
   const [error, setError] = useState<string | null>(null)
+
+  // Convex mutations (has access to server-side secrets)
+  const generateArtifact = useMutation(api.artifacts.generateArtifact)
 
   // Load saved prompt on mount
   useEffect(() => {
@@ -352,27 +357,14 @@ export function MainDashboard() {
     setGenerationStages(stages)
 
     try {
-      // Call actual API endpoint
-      const response = await fetch('/api/artifacts/generate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          prompt,
-          artifactType: detectArtifactType(prompt),
-          outputFormat: selectedFormat === 'auto' ? undefined : selectedFormat,
-          files: files.map(f => ({ name: f.name, size: f.size, type: f.type })),
-          workspaceId: user.id, // Use user's default workspace
-          brandConfig: null,
-          knowledgeContext: null,
-        }),
+      // Call Convex action (has access to AI secrets)
+      const data = await generateArtifact({
+        prompt,
+        artifactType: detectArtifactType(prompt),
+        outputFormat: selectedFormat === 'auto' ? undefined : selectedFormat,
+        workspaceId: user.id, // Use user's default workspace
+        userId: user.id,
       })
-
-      if (!response.ok) {
-        const errorData = await response.json()
-        throw new Error(errorData.message || 'Generation failed')
-      }
-
-      const data = await response.json()
 
       // Simulate progress stages based on actual processing
       for (let i = 0; i < stages.length; i++) {
