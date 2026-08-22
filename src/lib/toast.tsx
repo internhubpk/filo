@@ -165,6 +165,13 @@ export const toast = {
     } as ExternalToast)
   },
 
+  /**
+   * Dismiss a specific toast by ID or all toasts
+   */
+  dismiss(id?: string | number) {
+    return sonnerToast.dismiss(id)
+  },
+
   // ==================== SPECIFIC ACTION TOASTS ====================
 
   /**
