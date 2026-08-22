@@ -72,6 +72,13 @@ import {
 import { useTheme } from 'next-themes'
 import { useMutation, useAction } from 'convex/react'
 import { api } from '../../../convex/_generated/api'
+import { 
+  ErrorCode, 
+  createAppError, 
+  getErrorDisplay,
+  parseError 
+} from '@/lib/error-handler'
+import { ErrorDisplay, useErrorHandler } from '@/components/ui/error-boundary'
 
 // ==================== AUTH TYPES ====================
 
@@ -191,8 +198,19 @@ export function MainDashboard() {
   const [generationStages, setGenerationStages] = useState<GenerationStage[]>([])
   const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview | null>(null)
   const [dragActive, setDragActive] = useState(false)
-  const [error, setError] = useState<string | null>(null)
+  
+  // Error handling with proper types (using our error system)
+  const [appError, setAppError] = useState<import('@/lib/error-handler').AppError | null>(null)
   const [sessionToken, setSessionToken] = useState<string | null>(null)
+
+  // Helper to set user-friendly errors
+  const setError = useCallback((code: ErrorCode, originalError?: unknown) => {
+    setAppError(createAppError(code, originalError))
+  }, [])
+  
+  const clearError = useCallback(() => {
+    setAppError(null)
+  }, [])
 
   // Convex actions (REAL authentication - no fakes!)
   const generateArtifact = useAction(api.artifacts.generateArtifact)
@@ -265,10 +283,10 @@ export function MainDashboard() {
   // Auth Handlers - REAL authentication via Convex (NO FAKES!)
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault()
-    setError(null)
+    clearError()
     
     if (!loginEmail.trim() || !loginPassword.trim()) {
-      setError('Please fill in all fields')
+      setError(ErrorCode.AUTH_MISSING_FIELDS)
       return
     }
 
@@ -282,7 +300,16 @@ export function MainDashboard() {
       })
 
       if (!result.success || !result.user || !result.sessionToken) {
-        setError(result.error || 'Login failed. Please check your credentials.')
+        // Map Convex error codes to user-friendly errors
+        if (result.code === 'USER_NOT_FOUND') {
+          setError(ErrorCode.AUTH_USER_NOT_FOUND)
+        } else if (result.code === 'INVALID_PASSWORD') {
+          setError(ErrorCode.AUTH_INVALID_PASSWORD)
+        } else if (result.code === 'INVALID_EMAIL') {
+          setError(ErrorCode.AUTH_INVALID_EMAIL)
+        } else {
+          setError(ErrorCode.AUTH_LOGIN_FAILED, result.error)
+        }
         return
       }
 
@@ -298,7 +325,7 @@ export function MainDashboard() {
       setLoginEmail('')
       setLoginPassword('')
     } catch (err) {
-      setError('Login failed. Please try again.')
+      setError(ErrorCode.AUTH_LOGIN_FAILED, err)
     } finally {
       setIsLoggingIn(false)
     }
@@ -306,15 +333,15 @@ export function MainDashboard() {
 
   const handleSignup = async (e: React.FormEvent) => {
     e.preventDefault()
-    setError(null)
+    clearError()
     
     if (!signupName.trim() || !signupEmail.trim() || !signupPassword.trim()) {
-      setError('Please fill in all fields')
+      setError(ErrorCode.AUTH_MISSING_FIELDS)
       return
     }
 
     if (signupPassword.length < 6) {
-      setError('Password must be at least 6 characters')
+      setError(ErrorCode.AUTH_PASSWORD_TOO_SHORT)
       return
     }
 
@@ -329,7 +356,16 @@ export function MainDashboard() {
       })
 
       if (!result.success || !result.user || !result.sessionToken) {
-        setError(result.error || 'Account creation failed.')
+        // Map Convex error codes to user-friendly errors
+        if (result.code === 'EMAIL_EXISTS') {
+          setError(ErrorCode.AUTH_EMAIL_EXISTS)
+        } else if (result.code === 'INVALID_EMAIL') {
+          setError(ErrorCode.AUTH_INVALID_EMAIL)
+        } else if (result.code === 'PASSWORD_TOO_SHORT') {
+          setError(ErrorCode.AUTH_PASSWORD_TOO_SHORT)
+        } else {
+          setError(ErrorCode.AUTH_SIGNUP_FAILED, result.error)
+        }
         return
       }
 
@@ -346,7 +382,7 @@ export function MainDashboard() {
       setSignupEmail('')
       setSignupPassword('')
     } catch (err) {
-      setError('Account creation failed. Please try again.')
+      setError(ErrorCode.AUTH_SIGNUP_FAILED, err)
     } finally {
       setIsSigningUp(false)
     }
@@ -359,6 +395,7 @@ export function MainDashboard() {
         await logoutAction({ token: sessionToken })
       } catch (err) {
         console.error('Logout error:', err)
+        // Don't show error for logout - just clear locally
       }
     }
     
@@ -374,11 +411,12 @@ export function MainDashboard() {
     // Require login for generation
     if (!user) {
       setShowLoginModal(true)
+      setError(ErrorCode.AUTH_UNAUTHORIZED)
       return
     }
 
     setIsGenerating(true)
-    setError(null)
+    clearError()
     
     // Initialize generation stages
     const stages: GenerationStage[] = [
@@ -402,6 +440,36 @@ export function MainDashboard() {
         workspaceId: user.id, // Use user's default workspace
         userId: user.id,
       })
+
+      // Check for errors from Convex
+      if (!data.success || !data.artifact) {
+        // Map error codes to user-friendly messages
+        if (data.code === 'API_KEY_MISSING') {
+          setError(ErrorCode.AI_API_KEY_MISSING, data.error)
+        } else if (data.code === 'PROVIDER_ERROR') {
+          setError(ErrorCode.AI_PROVIDER_ERROR, data.error)
+        } else if (data.code === 'RATE_LIMITED') {
+          setError(ErrorCode.AI_RATE_LIMITED, data.error)
+        } else if (data.code === 'TIMEOUT') {
+          setError(ErrorCode.AI_TIMEOUT, data.error)
+        } else if (data.code === 'PLANNING_FAILED') {
+          setError(ErrorCode.AI_PLANNING_FAILED, data.error)
+        } else if (data.code === 'GENERATION_FAILED') {
+          setError(ErrorCode.AI_GENERATION_FAILED, data.error)
+        } else {
+          setError(ErrorCode.AI_GENERATION_FAILED, data.error)
+        }
+        
+        // Mark current stage as error
+        setGenerationStages(prev =>
+          prev.map(stage => ({
+            ...stage,
+            status: stage.status === 'active' ? 'error' as const : stage.status,
+            detail: data.error ? String(data.error) : undefined,
+          }))
+        )
+        return
+      }
 
       // Simulate progress stages based on actual processing
       for (let i = 0; i < stages.length; i++) {
@@ -453,20 +521,28 @@ export function MainDashboard() {
       
     } catch (err) {
       console.error('Generation failed:', err)
-      const errorMessage = err instanceof Error ? err.message : 'Generation failed'
-      setError(errorMessage)
+      
+      // Parse error and set user-friendly message
+      const parsedError = parseError(err)
+      setAppError(parsedError)
       
       // Mark current stage as error
       setGenerationStages(prev =>
         prev.map(stage =>
           stage.status === 'active'
-            ? { ...stage, status: 'error' as const, detail: errorMessage }
+            ? { ...stage, status: 'error' as const, detail: parsedError.message }
             : stage
         )
       )
     } finally {
       setIsGenerating(false)
     }
+  }
+
+  // Retry generation (for error recovery)
+  const handleRetryGeneration = () => {
+    clearError()
+    handleGenerate()
   }
 
   // Helper functions
@@ -606,17 +682,14 @@ export function MainDashboard() {
               Transform your ideas into professional documents, spreadsheets, presentations, and more.
             </p>
 
-            {/* Error Message */}
-            {error && (
-              <div className="mx-auto mb-6 max-w-3xl flex items-center gap-3 rounded-lg border border-red-200 bg-red-50 p-4 dark:border-red-800 dark:bg-red-950">
-                <AlertCircle className="h-5 w-5 text-red-600 shrink-0 cursor-default" />
-                <span className="text-sm text-red-800 dark:text-red-200">{error}</span>
-                <button 
-                  onClick={() => setError(null)}
-                  className="ml-auto p-1 hover:bg-red-100 dark:hover:bg-red-900 rounded transition-colors cursor-pointer"
-                >
-                  <X className="h-4 w-4" />
-                </button>
+            {/* Error Message - User-friendly with retry option */}
+            {appError && (
+              <div className="mx-auto mb-6 max-w-3xl">
+                <ErrorDisplay 
+                  error={appError} 
+                  onRetry={appError.retryable ? handleRetryGeneration : undefined}
+                  onDismiss={clearError}
+                />
               </div>
             )}
 
@@ -1052,11 +1125,12 @@ export function MainDashboard() {
           </DialogHeader>
           
           <form onSubmit={handleLogin} className="space-y-4 mt-4">
-            {error && (
-              <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950">
-                <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
-                <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
-              </div>
+            {appError && (
+              <ErrorDisplay 
+                error={appError} 
+                compact 
+                onDismiss={clearError}
+              />
             )}
 
             <div className="space-y-2">
@@ -1145,11 +1219,12 @@ export function MainDashboard() {
           </DialogHeader>
           
           <form onSubmit={handleSignup} className="space-y-4 mt-4">
-            {error && (
-              <div className="flex items-center gap-2 rounded-md border border-red-200 bg-red-50 p-3 dark:border-red-800 dark:bg-red-950">
-                <AlertCircle className="h-4 w-4 text-red-600 shrink-0" />
-                <span className="text-sm text-red-700 dark:text-red-300">{error}</span>
-              </div>
+            {appError && (
+              <ErrorDisplay 
+                error={appError} 
+                compact 
+                onDismiss={clearError}
+              />
             )}
 
             <div className="space-y-2">
