@@ -222,13 +222,17 @@ export const signup = action({
         email: normalizedEmail,
       });
 
+      // DEBUG: Log when user exists (remove in production)
       if (existingUser) {
+        console.log(`[SIGNUP DEBUG] Email already registered: ${normalizedEmail}, User ID: ${existingUser._id}, Name: ${existingUser.name}`);
         return {
           success: false,
           error: "An account with this email already exists",
           code: "EMAIL_EXISTS",
         };
       }
+      
+      console.log(`[SIGNUP DEBUG] Creating new user: ${normalizedEmail}`);
 
       // Hash the password
       const passwordHash = await hashPassword(args.password);
