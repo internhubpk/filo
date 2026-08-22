@@ -1,19 +1,34 @@
-// Cloudflare R2 Configuration
-// All credentials are server-side only
+// =============================================================================
+// FILO Cloudflare R2 Configuration
+// =============================================================================
+// ARCHITECTURE: R2 credentials are server-side only (Convex secrets / env vars)
+//
+// SINGLE SOURCE OF TRUTH: Uses R2_* environment variables (no duplicates)
+// - R2_ACCOUNT_ID
+// - R2_ACCESS_KEY_ID
+// - R2_SECRET_ACCESS_KEY
+// - R2_BUCKET_NAME
+//
+// NOTE: This config is used by server-side code only (API routes, Convex actions)
+// The actual S3 client lives in src/lib/r2/client.ts
+// =============================================================================
 
 import { env } from './env'
 
 export const R2_CONFIG = {
-  // Account & Authentication
-  accountId: env.CLOUDFLARE_R2_ACCOUNT_ID,
-  accessKeyId: env.CLOUDFLARE_R2_ACCESS_KEY_ID,
-  secretAccessKey: env.CLOUDFLARE_R2_SECRET_ACCESS_KEY,
+  // Account & Authentication (from R2_* env vars)
+  accountId: process.env.R2_ACCOUNT_ID || '',
+  accessKeyId: process.env.R2_ACCESS_KEY_ID || '',
+  secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || '',
   
   // Bucket
-  bucket: env.CLOUDFLARE_R2_BUCKET,
+  bucket: process.env.R2_BUCKET_NAME || 'filo-uploads',
   
-  // URLs
-  publicUrl: env.CLOUDFLARE_R2_PUBLIC_URL,
+  // Endpoint (derived from account ID)
+  endpoint: process.env.R2_ENDPOINT || `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  
+  // Public URL for assets (if any are public)
+  publicUrl: process.env.R2_PUBLIC_URL,
   
   // Signed URL settings
   signedUrlExpiry: {
@@ -22,8 +37,8 @@ export const R2_CONFIG = {
     preview: 300,        // 5 minutes for previews
   },
   
-  // File size limits
-  maxFileSizeBytes: env.MAX_FILE_SIZE_MB * 1024 * 1024, // Convert MB to bytes
+  // File size limits (from app config)
+  maxFileSizeBytes: env.MAX_FILE_SIZE_MB * 1024 * 1024,
   
   // Allowed MIME types
   allowedMimeTypes: [
@@ -89,7 +104,7 @@ export function generateR2Key(
       return `${R2_CONFIG.paths.artifacts(params.artifactId)}/${timestamp}_${randomString}_${sanitizedFilename}`
     
     case 'version':
-      return `${R2_CONFIG.paths.versions(params.artifactId, params.version)}/${timestamp}_${randomString}_${sanitizedFilename}`
+      return `${R2_CONFIG.paths.versions(params.artifactId, parseInt(params.version))}/${timestamp}_${randomString}_${sanitizedFilename}`
     
     case 'temp':
       return `${R2_CONFIG.paths.temp()}/${timestamp}_${randomString}_${sanitizedFilename}`
@@ -107,7 +122,7 @@ export function generateR2Key(
 
 // Validate file type is allowed
 export function isMimeTypeAllowed(mimeType: string): boolean {
-  return R2_CONFIG.allowedMimeTypes.includes(mimeType)
+  return R2_CONFIG.allowedMimeTypes.includes(mimeType as typeof R2_CONFIG.allowedMimeTypes[number])
 }
 
 // Get category from MIME type

@@ -1,161 +1,64 @@
-// PayFast Payment Configuration
-// All credentials are server-side only
+// =============================================================================
+// FILO Payment Configuration - Safepay (Beta)
+// =============================================================================
+// ARCHITECTURE: Safepay is the ONLY payment gateway for beta
+//
+// IMPORTANT:
+// - All Safepay credentials are server-side only (Convex secrets / env vars)
+// - Never expose payment credentials to the client
+// - Payment state is confirmed through server-side webhooks ONLY
+// - Currency: PKR (Pakistani Rupee)
+//
+// REMOVED: PayFast integration (no longer used)
+// =============================================================================
 
-import { env } from './env'
-import type { PayFastConfig } from '@/types'
+import type { SafepayConfig } from '@/types'
 
-export const PAYFAST_CONFIG: PayFastConfig = {
-  merchantId: env.PAYFAST_MERCHANT_ID || '',
-  merchantKey: env.PAYFAST_MERCHANT_KEY || '',
-  passphrase: env.PAYFAST_PASSPHRASE || '',
-  isSandbox: env.PAYFAST_IS_SANDBOX,
-  baseUrl: env.PAYFAST_BASE_URL,
+// Safepay configuration (server-side only)
+export const SAFEPAY_CONFIG: SafepayConfig = {
+  publicKey: process.env.SAFEPAY_PUBLIC_KEY || '',
+  secretKey: process.env.SAFEPAY_SECRET_KEY || '',
+  webhookSecret: process.env.SAFEPAY_WEBHOOK_SECRET || '',
+  isSandbox: process.env.SAFEPAY_SANDBOX === 'true' || process.env.NODE_ENV !== 'production',
   
-  // Return URLs (should be absolute)
-  returnUrl: `${env.APP_URL}/billing/confirmation`,
-  cancelUrl: `${env.APP_URL}/billing/cancelled`,
-  notifyUrl: `${env.APP_URL}/api/webhooks/payfast`,
+  // Return URLs
+  returnUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/billing?payment=success`,
+  cancelUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/billing?payment=cancelled`,
+  
+  // Webhook URL (where Safepay sends events)
+  webhookUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/api/webhooks/safepay`,
 }
 
-// Subscription Plans
-export const SUBSCRIPTION_PLANS = [
-  {
-    id: 'free',
-    name: 'Free / Beta',
-    description: 'Perfect for trying out Filo',
-    priceMonthly: 0,
-    priceYearly: 0,
-    currency: 'USD',
-    
-    // Limits
-    aiRequestsLimit: 50,
-    storageLimitMb: 100,
-    artifactLimit: 20,
-    
-    // Features
-    features: [
-      '50 AI generations per month',
-      '100MB storage',
-      'Basic document types',
-      'Standard exports',
-      'Community support',
-    ],
-    
-    payfastToken: null,
-    isActive: true,
-  },
-  {
-    id: 'pro-monthly',
-    name: 'Pro (Monthly)',
-    description: 'For professionals and power users',
-    priceMonthly: 1900, // R190/month (~$10 USD)
-    priceYearly: null,
-    currency: 'ZAR',
-    
-    // Limits
-    aiRequestsLimit: 500,
-    storageLimitMb: 5000,
-    artifactLimit: null, // unlimited
-    
-    // Features
-    features: [
-      '500 AI generations per month',
-      '5GB cloud storage',
-      'All document types',
-      'Priority processing',
-      'Brand profiles',
-      'Advanced exports',
-      'Email support',
-    ],
-    
-    payfastToken: null, // Set in production
-    isActive: true,
-  },
-  {
-    id: 'pro-yearly',
-    name: 'Pro (Yearly)',
-    description: 'Best value - save 2 months',
-    priceMonthly: null,
-    priceYearly: 19000, // R1900/year (~$100 USD)
-    currency: 'ZAR',
-    
-    // Limits
-    aiRequestsLimit: 600, // 50 extra per year
-    storageLimitMb: 5000,
-    artifactLimit: null,
-    
-    // Features
-    features: [
-      '600 AI generations per month',
-      '5GB cloud storage',
-      'All document types',
-      'Priority processing',
-      'Brand profiles',
-      'Advanced exports',
-      'Priority email support',
-      'Save ~R380 vs monthly',
-    ],
-    
-    payfastToken: null,
-    isActive: true,
-  },
-  {
-    id: 'team',
-    name: 'Team',
-    description: 'For teams and organizations',
-    priceMonthly: 4900, // R490/month (~$25 USD)
-    priceYearly: null,
-    currency: 'ZAR',
-    
-    // Limits
-    aiRequestsLimit: 2000,
-    storageLimitMb: 25000,
-    artifactLimit: null,
-    
-    // Features
-    features: [
-      '2000 AI generations per month',
-      '25GB shared storage',
-      'All document types',
-      'Team workspaces',
-      'Collaboration tools',
-      'Admin dashboard',
-      'Priority support',
-      'Custom branding',
-      'API access (coming soon)',
-    ],
-    
-    payfastToken: null,
-    isActive: false, // Coming soon
-  },
-]
-
-// Payment status mapping
+// Payment status mapping (Safepay → Internal)
 export const PAYMENT_STATUS_MAP = {
-  // PayFast statuses to our internal statuses
-  COMPLETE: 'PAID' as const,
-  PENDING: 'PENDING' as const,
+  // Safepay statuses to our internal statuses
+  CAPTURED: 'COMPLETED' as const,
+  AUTHORIZED: 'PENDING' as const,
   FAILED: 'FAILED' as const,
-  DENIED: 'FAILED' as const,
   CANCELLED: 'CANCELLED' as const,
+  REFUNDED: 'REFUNDED' as const,
 }
 
-// Webhook event types we handle
-export const PAYFAST_EVENT_TYPES = [
-  'PAYMENT_NOTIFICATION',
-  'SUBSCRIPTION_UPDATE',
-  'TOKENIZATION',
+// Webhook event types we handle from Safepay
+export const SAFEPAY_EVENT_TYPES = [
+  'payment.captured',
+  'payment.authorized',
+  'payment.failed',
+  'payment.cancelled',
+  'payment.refunded',
+  'subscription.created',
+  'subscription.updated',
+  'subscription.cancelled',
 ] as const
 
-// Security: Fields to validate in webhook
-export const PAYFAST_REQUIRED_FIELDS = [
-  'm_payment_id',
-  'pf_payment_id',
-  'payment_status',
-  'payment_amount',
-  'payment_currency',
-  'merchant_id',
-  'signature',
+// Security: Fields to validate in Safepay webhook
+export const SAFEPAY_REQUIRED_FIELDS = [
+  'id',
+  'type',
+  'data.id',
+  'data.status',
+  'data.amount',
+  'data.currency',
 ] as const
 
 // Generate unique payment reference

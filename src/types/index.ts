@@ -198,9 +198,12 @@ export interface Plan {
 export interface Subscription {
   id: string
   userId: string
+  workspaceId?: string
   planId: string
+  provider: 'safepay'
   status: SubscriptionStatus
-  stripeSubscriptionId?: string
+  providerCustomerId?: string
+  providerSubscriptionId?: string
   currentPeriodStart: number
   currentPeriodEnd: number
   cancelAtPeriodEnd: boolean
@@ -221,10 +224,10 @@ export interface Payment {
   userId: string
   subscriptionId?: string
   amount: number
-  currency: string
+  currency: string // PKR
   status: PaymentStatus
-  payfastPaymentId?: string
-  payfastToken?: string
+  provider: 'safepay'
+  providerPaymentId?: string
   invoiceId?: string
   description: string
   metadata?: Record<string, unknown>
@@ -232,7 +235,7 @@ export interface Payment {
   updatedAt: number
 }
 
-export type PaymentProvider = 'payfast' | 'stripe' | 'paypal'
+export type PaymentProvider = 'safepay'
 export type PaymentStatus = 
   | 'pending'
   | 'completed'
@@ -295,11 +298,11 @@ export interface AiRequest {
 }
 
 export type AiProvider = 
-  | 'openai'
-  | 'openrouter'
-  | 'anthropic'
-  | 'google'
-  | 'local'
+  | 'OPENROUTER'
+  | 'OPENAI'
+  | 'ANTHROPIC'
+  | 'GOOGLE'
+  | 'LOCAL'
 
 // Webhook Event Types
 export interface WebhookEvent {
@@ -315,9 +318,7 @@ export interface WebhookEvent {
 }
 
 export type WebhookProvider = 
-  | 'payfast'
-  | 'stripe'
-  | 'paypal'
+  | 'safepay'
   | 'custom'
 
 // Notification Types
@@ -781,75 +782,38 @@ export interface SignedUrlOptions {
   purpose: 'download' | 'upload' | 'preview'
 }
 
-// ==================== PAYMENT TYPES ====================
+// ==================== PAYMENT TYPES (SAFEPAY) ====================
 
-export interface PayFastConfig {
-  merchantId: string
-  merchantKey: string
-  passphrase: string
+export interface SafepayConfig {
+  publicKey: string
+  secretKey: string
+  webhookSecret: string
   isSandbox: boolean
-  baseUrl: string
   returnUrl: string
   cancelUrl: string
-  notifyUrl: string
+  webhookUrl: string
 }
 
-export interface PayFastPaymentRequest {
+export interface SafepayPaymentRequest {
   amount: number
+  currency: string // PKR
   itemName: string
   description?: string
-  paymentMethod?: string
-  emailConfirmation?: boolean
-  confirmationAddress?: string
-  customIntegers?: Record<string, number>
-  customStrings?: Record<string, string>
-  subscriptionType?: 'subscription' | 'once-off'
+  email?: string
+  orderId?: string
 }
 
-export interface PayFastNotificationPayload {
-  // Payment details
-  m_payment_id: string
-  pf_payment_id: string
-  payment_status: string
-  payment_amount: string
-  payment_currency: string
-  sandBox: string
-  
-  // Merchant info
-  merchant_id: string
-  
-  // Transaction details
-  item_name: string
-  item_description: string
-  amount_gross: string
-  amount_fee: string
-  amount_net: string
-  
-  // Custom fields
-  custom_int1?: string
-  custom_int2?: string
-  custom_int3?: string
-  custom_int4?: string
-  custom_int5?: string
-  custom_str1?: string
-  custom_str2?: string
-  custom_str3?: string
-  custom_str4?: string
-  custom_str5?: string
-  
-  // Token for subscriptions
-  tokenization?: string
-  
-  // Security
-  signature: string
-  email_address?: string
-  merchant_transaction_id?: string
-  billing_date?: string
-  recurring_billing?: string
-  
-  // Timestamps
-  date?: string
-  time?: string
+export interface SafepayWebhookEvent {
+  id: string
+  type: string
+  data: {
+    id: string
+    status: string
+    amount: number
+    currency: string
+    metadata?: Record<string, unknown>
+  }
+  created_at: string
 }
 
 // ==================== API TYPES ====================

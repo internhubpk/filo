@@ -1,6 +1,14 @@
-// AI Provider Abstraction Layer
-// This is the ONLY place that talks to AI providers
-// All other code uses this abstraction
+// =============================================================================
+// FILO AI Provider Abstraction Layer
+// =============================================================================
+// ARCHITECTURE: All AI requests go through Convex server-side functions
+//
+// IMPORTANT:
+// - This service is SERVER-SIDE ONLY (never call from browser)
+// - API keys come from Convex environment / process.env (not NEXT_PUBLIC_*)
+// - OpenRouter = Beta provider | OpenAI = Future provider
+// - Provider switching requires no code changes, just config
+// =============================================================================
 
 import type {
   AiProviderInterface,
@@ -11,8 +19,19 @@ import type {
   AiProvider,
   AiMessage,
 } from '@/types'
-import { env } from '@/config/env'
-import { getModelById, OPENROUTER_MODELS, OPENAI_MODELS } from '@/config/ai'
+import { getModelById, OPENROUTER_MODELS, OPENAI_MODELS, AI_CONFIG } from '@/config/ai'
+
+// Server-side AI configuration (keys from Convex env / process.env)
+const AI_SECRETS = {
+  openrouter: {
+    apiKey: process.env.OPENROUTER_API_KEY || '',
+    baseUrl: process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1',
+  },
+  openai: {
+    apiKey: process.env.OPENAI_API_KEY || '',
+    baseUrl: process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1',
+  },
+}
 
 // ==================== ERROR TYPES ====================
 
@@ -37,10 +56,10 @@ class OpenRouterProvider implements AiProviderInterface {
   readonly availableModels: ModelDefinition[] = OPENROUTER_MODELS
 
   private getApiKey(): string {
-    const key = env.OPENROUTER_API_KEY
+    const key = AI_SECRETS.openrouter.apiKey
     if (!key) {
       throw new AiError(
-        'OpenRouter API key not configured',
+        'OpenRouter API key not configured. Set OPENROUTER_API_KEY in Convex environment.',
         'API_KEY_MISSING',
         'OPENROUTER',
         undefined,
@@ -51,7 +70,7 @@ class OpenRouterProvider implements AiProviderInterface {
   }
 
   private getBaseUrl(): string {
-    return env.OPENROUTER_BASE_URL
+    return AI_SECRETS.openrouter.baseUrl
   }
 
   async generate(request: AiGenerateRequest): Promise<AiResponse> {
@@ -63,7 +82,7 @@ class OpenRouterProvider implements AiProviderInterface {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.getApiKey()}`,
-          'HTTP-Referer': env.APP_URL,
+          'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
           'X-Title': 'Filo',
         },
         body: JSON.stringify({
@@ -123,7 +142,7 @@ class OpenRouterProvider implements AiProviderInterface {
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${this.getApiKey()}`,
-          'HTTP-Referer': env.APP_URL,
+          'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
           'X-Title': 'Filo',
         },
         body: JSON.stringify({
@@ -257,10 +276,10 @@ class OpenAiProvider implements AiProviderInterface {
   readonly availableModels: ModelDefinition[] = OPENAI_MODELS
 
   private getApiKey(): string {
-    const key = env.OPENAI_API_KEY
+    const key = AI_SECRETS.openai.apiKey
     if (!key) {
       throw new AiError(
-        'OpenAI API key not configured',
+        'OpenAI API key not configured. Set OPENAI_API_KEY in Convex environment.',
         'API_KEY_MISSING',
         'OPENAI',
         undefined,
@@ -271,7 +290,7 @@ class OpenAiProvider implements AiProviderInterface {
   }
 
   private getBaseUrl(): string {
-    return env.OPENAI_BASE_URL
+    return AI_SECRETS.openai.baseUrl
   }
 
   async generate(request: AiGenerateRequest): Promise<AiResponse> {
@@ -481,8 +500,9 @@ class AiService {
       ['OPENAI', new OpenAiProvider()],
     ])
     
-    // Default to OpenRouter for beta
-    this.currentProvider = this.providers.get(env.defaultProvider) || 
+    // Default to OpenRouter for beta (configurable via AI_CONFIG)
+    const defaultProvider = AI_CONFIG.defaultProvider === 'OPENAI' ? 'OPENAI' : 'OPENROUTER'
+    this.currentProvider = this.providers.get(defaultProvider) || 
                           this.providers.get('OPENROUTER')!
   }
 

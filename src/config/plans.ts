@@ -1,6 +1,16 @@
-// Plan configuration - fully configurable via environment variables
-// All plans are paid. No free tier.
-// Plans: Pro (individual), Team (small teams), Department/Enterprise (contact sales)
+// =============================================================================
+// FILO Plan Configuration
+// =============================================================================
+// ARCHITECTURE: Plans are stored in Convex database (server-side).
+// This file provides CLIENT-SIDE DEFAULTS for UI display only.
+//
+// IMPORTANT:
+// - NEVER trust client-side plan limits for billing enforcement
+// - ALWAYS validate against server-side plan data from Convex
+// - Pricing/limits here are for display only, not enforcement
+//
+// CURRENCY: PKR (Pakistani Rupee) - Filo targets Pakistan market
+// =============================================================================
 
 export interface PlanConfig {
   id: string
@@ -15,33 +25,34 @@ export interface PlanConfig {
   cta: string
   popular: boolean
   icon: string
-  badge?: string // e.g., "Most Popular", "Best Value"
-  contactSales?: boolean // For department/enterprise plans
+  badge?: string
+  contactSales?: boolean
 }
 
-// Default plans configuration - PRO, TEAM, DEPARTMENT (no free plan)
+// Default plans configuration for UI display
+// In production, fetch real plans from Convex: useQuery('plans:getActivePlans')
 export const getDefaultPlans = (): PlanConfig[] => [
   {
-    id: process.env.NEXT_PUBLIC_PLAN_PRO_ID || 'pro',
-    name: process.env.NEXT_PUBLIC_PLAN_PRO_NAME || 'Pro',
-    description: process.env.NEXT_PUBLIC_PLAN_PRO_DESC || 'For individual professionals and power users',
+    id: 'pro',
+    name: 'Pro',
+    description: 'For individual professionals and power users',
     price: {
-      monthly: parseInt(process.env.NEXT_PUBLIC_PLAN_PRO_MONTHLY_PRICE || '190'),
-      yearly: parseInt(process.env.NEXT_PUBLIC_PLAN_PRO_YEARLY_PRICE || '1900'),
+      monthly: 1900,
+      yearly: 19000,
     },
     features: [
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_1 || '500 AI generations per month',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_2 || '5GB cloud storage',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_3 || 'All document types (DOCX, PDF, XLSX, PPTX)',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_4 || 'Priority processing queue',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_5 || 'Custom brand profiles',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_6 || 'Advanced export formats',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_7 || 'Email support (48hr response)',
-      process.env.NEXT_PUBLIC_PLAN_PRO_FEATURE_8 || 'No watermarks on exports',
+      '500 AI generations per month',
+      '5GB cloud storage',
+      'All document types (DOCX, PDF, XLSX, PPTX)',
+      'Priority processing queue',
+      'Custom brand profiles',
+      'Advanced export formats',
+      'Email support (48hr response)',
+      'No watermarks on exports',
     ],
     limitations: [
-      process.env.NEXT_PUBLIC_PLAN_PRO_LIMIT_1 || 'Single user account',
-      process.env.NEXT_PUBLIC_PLAN_PRO_LIMIT_2 || 'Standard API access',
+      'Single user account',
+      'Standard API access',
     ],
     cta: 'Get Started',
     popular: true,
@@ -49,24 +60,24 @@ export const getDefaultPlans = (): PlanConfig[] => [
     badge: 'Most Popular',
   },
   {
-    id: process.env.NEXT_PUBLIC_PLAN_TEAM_ID || 'team',
-    name: process.env.NEXT_PUBLIC_PLAN_TEAM_NAME || 'Team',
-    description: process.env.NEXT_PUBLIC_PLAN_TEAM_DESC || 'For small teams and growing businesses',
+    id: 'team',
+    name: 'Team',
+    description: 'For small teams and growing businesses',
     price: {
-      monthly: parseInt(process.env.NEXT_PUBLIC_PLAN_TEAM_MONTHLY_PRICE || '490'),
-      yearly: parseInt(process.env.NEXT_PUBLIC_PLAN_TEAM_YEARLY_PRICE || '4900'),
+      monthly: 4900,
+      yearly: 49000,
     },
     features: [
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_1 || '2,500 AI generations per month (shared)',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_2 || '25GB cloud storage (shared)',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_3 || 'Up to 5 team members',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_4 || 'All document types + custom templates',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_5 || 'Team collaboration features',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_6 || 'Admin dashboard & controls',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_7 || 'Priority email support (24hr response)',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_8 || 'API access with higher rate limits',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_9 || 'Shared brand profiles & assets',
-      process.env.NEXT_PUBLIC_PLAN_TEAM_FEATURE_10 || 'Usage analytics & reporting',
+      '2,500 AI generations per month (shared)',
+      '25GB cloud storage (shared)',
+      'Up to 5 team members',
+      'All document types + custom templates',
+      'Team collaboration features',
+      'Admin dashboard & controls',
+      'Priority email support (24hr response)',
+      'API access with higher rate limits',
+      'Shared brand profiles & assets',
+      'Usage analytics & reporting',
     ],
     limitations: [],
     cta: 'Start Team Trial',
@@ -75,26 +86,26 @@ export const getDefaultPlans = (): PlanConfig[] => [
     badge: 'Best for Teams',
   },
   {
-    id: process.env.NEXT_PUBLIC_PLAN_DEPARTMENT_ID || 'department',
-    name: process.env.NEXT_PUBLIC_PLAN_DEPARTMENT_NAME || 'Department',
-    description: process.env.NEXT_PUBLIC_PLAN_DEPARTMENT_DESC || 'For departments and large organizations',
+    id: 'department',
+    name: 'Department',
+    description: 'For departments and large organizations',
     price: {
       monthly: 0, // Contact sales
       yearly: 0,
     },
     features: [
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_1 || 'Unlimited AI generations',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_2 || 'Unlimited cloud storage',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_3 || 'Unlimited team members',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_4 || 'SSO & advanced security (SAML, OAuth)',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_5 || 'Dedicated account manager',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_6 || 'Custom integrations & API',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_7 || 'SLA guarantee (99.9% uptime)',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_8 || 'Priority phone & chat support',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_9 || 'On-premise deployment option',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_10 || 'Custom training & onboarding',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_11 || 'Advanced audit logs & compliance',
-      process.env.NEXT_PUBLIC_PLAN_DEPT_FEATURE_12 || 'White-label options available',
+      'Unlimited AI generations',
+      'Unlimited cloud storage',
+      'Unlimited team members',
+      'SSO & advanced security (SAML, OAuth)',
+      'Dedicated account manager',
+      'Custom integrations & API',
+      'SLA guarantee (99.9% uptime)',
+      'Priority phone & chat support',
+      'On-premise deployment option',
+      'Custom training & onboarding',
+      'Advanced audit logs & compliance',
+      'White-label options available',
     ],
     limitations: [],
     cta: 'Contact Sales',
@@ -105,22 +116,20 @@ export const getDefaultPlans = (): PlanConfig[] => [
   },
 ]
 
-// Currency configuration
+// Currency configuration - PKR for Pakistan market
 export const currencyConfig = {
-  symbol: process.env.NEXT_PUBLIC_CURRENCY_SYMBOL || 'R',
-  code: process.env.NEXT_PUBLIC_CURRENCY_CODE || 'ZAR',
+  symbol: '₨',
+  code: 'PKR',
   position: 'before' as const,
 }
 
-// PayFast configuration (server-side only values should not be exposed here)
-export const payfastConfig = {
-  merchantId: process.env.NEXT_PUBLIC_PAYFAST_MERCHANT_ID || '',
-  merchantKey: process.env.NEXT_PUBLIC_PAYFAST_MERCHANT_KEY || '',
-  sandboxMode: process.env.NEXT_PUBLIC_PAYFAST_SANDBOX === 'true',
-  returnUrl: `${process.env.NEXT_PUBLIC_APP_URL || ''}/billing?payment=success`,
-  cancelUrl: `${process.env.NEXT_PUBLIC_APP_URL || ''}/billing?payment=cancelled`,
-  notifyUrl: `${process.env.NEXT_PUBLIC_APP_URL || ''}/api/webhooks/payfast`,
-}
-
 // Contact sales URL
-export const contactSalesUrl = process.env.NEXT_PUBLIC_CONTACT_SALES_URL || 'mailto:sales@filo.ai'
+export const contactSalesUrl = 'mailto:sales@filo.ai'
+
+// Safepay configuration (server-side only - used in API routes)
+// Actual credentials come from environment/Convex secrets
+export const safepayConfig = {
+  isSandbox: process.env.SAFEPAY_SANDBOX === 'true' || process.env.NODE_ENV !== 'production',
+  returnUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/billing?payment=success`,
+  cancelUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/billing?payment=cancelled`,
+}
