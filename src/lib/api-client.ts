@@ -54,7 +54,20 @@ class ApiClient {
   private baseUrl: string
 
   constructor() {
-    this.baseUrl = process.env.NEXT_PUBLIC_APP_URL || '/api'
+    // Use relative URL for same-origin requests (works in browser and on Vercel)
+    // This ensures all calls go to /api/* routes
+    const appUrl = process.env.NEXT_PUBLIC_APP_URL
+    
+    if (appUrl && typeof window !== 'undefined') {
+      // In browser: use relative path to avoid CORS and ensure correct routing
+      this.baseUrl = '/api'
+    } else if (appUrl) {
+      // Server-side: use full URL with /api prefix
+      this.baseUrl = `${appUrl.replace(/\/$/, '')}/api`
+    } else {
+      // Default: just /api for relative requests
+      this.baseUrl = '/api'
+    }
   }
 
   // ==================== HELPER METHODS ====================
