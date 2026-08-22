@@ -1,7 +1,7 @@
 "use client"
 
-// FILO TOASTER - Using Sonner for beautiful animated toasts
-// This REPLACES the old shadcn/radix toast system entirely
+// FILO TOASTER - Thin, responsive, beautiful animated toasts
+// Single X button, auto-dismiss, mobile-friendly
 
 import { Toaster as SonnerToaster } from 'sonner'
 
@@ -13,17 +13,18 @@ export function Toaster() {
       expand={false}
       richColors
       closeButton
-      offset={16}
-      gap={8}
+      offset={12}
+      gap={6}
+      duration={4000}
       toastOptions={{
-        className: 'filo-toast-notification',
+        className: 'filo-toast-thin',
         style: {
           background: 'transparent',
           border: 'none',
           padding: 0,
           boxShadow: 'none',
         },
-        descriptionClassName: 'filo-toast-description',
+        descriptionClassName: 'filo-toast-desc',
       }}
       style={{
         '--normal-bg': 'hsl(var(--popover) / 0.95)',
