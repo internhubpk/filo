@@ -50,46 +50,8 @@ function generateSessionToken(): string {
 }
 
 // ==================== SESSION MUTATIONS ====================
-// Included here to avoid cross-file resolution issues
-
-/**
- * Create a new session for a user
- */
-export const createSession = mutation({
-  args: {
-    userId: v.id("users"),
-    token: v.string(),
-    expiresAt: v.number(),
-  },
-  handler: async (ctx, args) => {
-    return await ctx.db.insert("sessions", {
-      userId: args.userId,
-      token: args.token,
-      expiresAt: args.expiresAt,
-      createdAt: Date.now(),
-    });
-  },
-});
-
-/**
- * Delete a session (logout)
- */
-export const deleteSession = mutation({
-  args: { token: v.string() },
-  handler: async (ctx, args) => {
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.token))
-      .first();
-
-    if (session) {
-      await ctx.db.delete(session._id);
-      return true;
-    }
-
-    return false;
-  },
-});
+// Moved to sessions.ts to avoid circular resolution errors!
+// Use api.sessions.createSession and api.sessions.deleteSession
 
 // ==================== AUTH ACTIONS ====================
 
@@ -149,8 +111,8 @@ export const login = action({
       // Create session token
       const sessionToken = generateSessionToken();
       
-      // Store session in database (same file - no resolution issues!)
-      await ctx.runMutation(api.auth.createSession, {
+      // Store session in database (from sessions.ts - no circular refs!)
+      await ctx.runMutation(api.sessions.createSession, {
         userId: user._id,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -244,9 +206,9 @@ export const signup = action({
         passwordHash,
       });
 
-      // Auto-login after signup (same file - no resolution issues!)
+      // Auto-login after signup (using sessions.ts - no circular refs!)
       const sessionToken = generateSessionToken();
-      await ctx.runMutation(api.auth.createSession, {
+      await ctx.runMutation(api.sessions.createSession, {
         userId,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
@@ -318,8 +280,8 @@ export const logout = action({
     token: v.string(),
   },
   handler: async (ctx, args) => {
-    // Use the deleteSession mutation from this same file
-    await ctx.runMutation(api.auth.deleteSession, {
+    // Use the deleteSession mutation from sessions.ts (no circular refs!)
+    await ctx.runMutation(api.sessions.deleteSession, {
       token: args.token,
     });
 
