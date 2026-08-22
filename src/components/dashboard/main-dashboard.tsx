@@ -1266,13 +1266,6 @@ export function MainDashboard() {
           </DialogHeader>
           
           <form onSubmit={handleLogin} className="space-y-4 mt-4">
-            {appError && (
-              <ErrorDisplay 
-                error={appError} 
-                compact 
-                onDismiss={clearError}
-              />
-            )}
 
             <div className="space-y-2">
               <Label htmlFor="login-email" className="cursor-pointer">Email</Label>
@@ -1360,13 +1353,6 @@ export function MainDashboard() {
           </DialogHeader>
           
           <form onSubmit={handleSignup} className="space-y-4 mt-4">
-            {appError && (
-              <ErrorDisplay 
-                error={appError} 
-                compact 
-                onDismiss={clearError}
-              />
-            )}
 
             <div className="space-y-2">
               <Label htmlFor="signup-name" className="cursor-pointer">Full Name</Label>
