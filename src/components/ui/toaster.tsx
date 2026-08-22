@@ -1,23 +1,20 @@
 "use client"
 
-// FILO TOASTER - Thin, responsive, beautiful animated toasts
-// Single X button, auto-dismiss, mobile-friendly
-
+// FILO TOASTER - Ultra clean, no buttons, auto-dismiss
 import { Toaster as SonnerToaster } from 'sonner'
 
 export function Toaster() {
   return (
     <SonnerToaster
       position="top-right"
-      hotkeys={{ t: true }}
       expand={false}
       richColors
-      closeButton
-      offset={12}
-      gap={6}
-      duration={4000}
+      closeButton={false}
+      offset={16}
+      gap={8}
+      duration={3500}
       toastOptions={{
-        className: 'filo-toast-thin',
+        className: 'filo-clean-toast',
         style: {
           background: 'transparent',
           border: 'none',
@@ -27,21 +24,20 @@ export function Toaster() {
         descriptionClassName: 'filo-toast-desc',
       }}
       style={{
-        '--normal-bg': 'hsl(var(--popover) / 0.95)',
-        '--normal-border': 'hsl(var(--border) / 0.5)',
+        '--normal-bg': 'hsl(var(--popover))',
         '--normal-text': 'hsl(var(--popover-foreground))',
-        '--success-bg': 'hsl(142 76% 96%)',
-        '--success-text': 'hsl(142 70% 30%)',
-        '--success-border': 'hsl(142 76% 60% / 0.3)',
+        '--success-bg': 'hsl(142 70% 96%)',
+        '--success-text': 'hsl(142 70% 25%)',
+        '--success-border': 'hsl(142 70% 80%)',
         '--error-bg': 'hsl(0 93% 96%)',
-        '--error-text': 'hsl(0 93% 30%)',
-        '--error-border': 'hsl(0 93% 55% / 0.3)',
+        '--error-text': 'hsl(0 93% 25%)',
+        '--error-border': 'hsl(0 93% 85%)',
         '--warning-bg': 'hsl(48 96% 96%)',
-        '--warning-text': 'hsl(48 96% 25%)',
-        '--warning-border': 'hsl(48 96% 50% / 0.3)',
-        '--info-bg': 'hsl(217 91% 96%)',
-        '--info-text': 'hsl(217 91% 30%)',
-        '--info-border': 'hsl(217 91% 50% / 0.3)',
+        '--warning-text': 'hsl(48 96% 20%)',
+        '--warning-border': 'hsl(48 96% 85%)',
+        '--info-bg': 'hsl(217 91% 97%)',
+        '--info-text': 'hsl(217 91% 25%)',
+        '--info-border': 'hsl(217 91% 88%)',
       } as React.CSSProperties}
       theme="light"
     />
