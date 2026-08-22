@@ -71,4 +71,4 @@ server.log
 instructions.md
 
 # Convex generated files (auto-generated, should not be committed)
-convex/_generated/
+convex/_generated/convex/_generated/
