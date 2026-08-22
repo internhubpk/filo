@@ -1,8 +1,5 @@
 {
-  "functions": {
-    "source": "convex",
-    "ignore": ["convex/_generated/**"]
-  },
+  "functions": "convex",
   "node": {
     "externalPackages": ["docx", "pdfkit", "pptxgenjs", "xlsx"]
   }
