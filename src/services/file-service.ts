@@ -32,7 +32,7 @@ export async function uploadFile(options: FileUploadOptions): Promise<FileUpload
     )
   }
 
-  const buffer = Buffer.from(await file.arrayBuffer())
+  const buffer = Buffer.isBuffer(file) ? file : Buffer.from(await file.arrayBuffer())
   
   if (buffer.length > R2_CONFIG.maxFileSizeBytes) {
     throw new FileError(
@@ -48,7 +48,7 @@ export async function uploadFile(options: FileUploadOptions): Promise<FileUpload
   try {
     // Upload to R2 via our API route (server-side only)
     const formData = new FormData()
-    formData.append('file', file, filename)
+    formData.append('file', new Blob([new Uint8Array(buffer)], { type: mimeType }), filename)
     formData.append('r2Key', r2Key)
     formData.append('workspaceId', workspaceId)
     formData.append('ownerId', ownerId)

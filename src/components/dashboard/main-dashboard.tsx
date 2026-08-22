@@ -70,8 +70,8 @@ import {
   Sun
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
-import { useMutation } from 'convex/react'
-import { api } from '@/convex/_generated/api'
+import { useAction } from 'convex/react'
+import { api } from '../../../convex/_generated/api'
 
 // ==================== AUTH TYPES ====================
 
@@ -194,7 +194,7 @@ export function MainDashboard() {
   const [error, setError] = useState<string | null>(null)
 
   // Convex mutations (has access to server-side secrets)
-  const generateArtifact = useMutation(api.artifacts.generateArtifact)
+  const generateArtifact = useAction(api.artifacts.generateArtifact)
 
   // Load saved prompt on mount
   useEffect(() => {
@@ -390,14 +390,23 @@ export function MainDashboard() {
       }
 
       // Create artifact preview from response or fallback
-      const artifact: ArtifactPreview = data.artifact || {
-        id: crypto.randomUUID(),
-        title: extractTitle(prompt),
-        type: detectArtifactType(prompt),
-        format: selectedFormat === 'auto' ? 'DOCX' : selectedFormat,
-        status: 'completed' as const,
-        createdAt: new Date(),
-      }
+      const artifact: ArtifactPreview = data.artifact
+        ? {
+            id: data.artifact.id,
+            title: data.artifact.title,
+            type: data.artifact.type,
+            format: data.artifact.format,
+            status: 'completed' as const,
+            createdAt: new Date(),
+          }
+        : {
+            id: crypto.randomUUID(),
+            title: extractTitle(prompt),
+            type: detectArtifactType(prompt),
+            format: selectedFormat === 'auto' ? 'DOCX' : selectedFormat,
+            status: 'completed' as const,
+            createdAt: new Date(),
+          }
 
       setCurrentArtifact(artifact)
       setShowResultDialog(true)

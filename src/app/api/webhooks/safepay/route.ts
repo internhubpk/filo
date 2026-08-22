@@ -162,7 +162,7 @@ function verifySafePaySignature(event: SafePayWebhookEvent): boolean {
   }
 }
 
-function generateHMACSignature(event: SafePayEvent): string {
+function generateHMACSignature(event: SafePayWebhookEvent): string {
   const payloadString = JSON.stringify({
     id: event.id,
     event: event.event,
@@ -176,7 +176,7 @@ function generateHMACSignature(event: SafePayEvent): string {
     .digest('hex')
 }
 
-function verifyWithPublicKey(event: SafePayEvent): boolean {
+function verifyWithPublicKey(event: SafePayWebhookEvent): boolean {
   try {
     // In production, this would use the public key to verify
     // For now, we'll do basic validation

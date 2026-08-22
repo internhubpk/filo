@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { validateFile, formatFileSize, getFileCategory } from '@/services/file-service'
+import { validateFile, formatFileSize } from '@/services/file-service'
+import { getFileCategory } from '@/config/r2'
 
 // POST /api/files/upload - Handle file uploads
 export async function POST(request: NextRequest) {

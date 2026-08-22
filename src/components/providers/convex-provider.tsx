@@ -1,7 +1,7 @@
 "use client";
 
 import { ConvexProvider, ConvexReactClient } from "convex/react";
-import { ReactNode, useState, useEffect } from "react";
+import { ReactNode, useState, useSyncExternalStore } from "react";
 
 function getConvexClient() {
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
@@ -12,13 +12,17 @@ function getConvexClient() {
   return new ConvexReactClient(convexUrl);
 }
 
+const emptySubscribe = () => () => {};
+
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
   const [client] = useState(() => getConvexClient());
-  const [mounted, setMounted] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
+  // Returns false on the server and during the first client render (avoiding
+  // hydration mismatches), then true on subsequent client renders.
+  const mounted = useSyncExternalStore(
+    emptySubscribe,
+    () => true,
+    () => false
+  );
 
   // Don't render with Convex provider during SSR or if not configured
   if (!client || !mounted) {

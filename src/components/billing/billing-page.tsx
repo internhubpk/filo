@@ -337,7 +337,7 @@ export function BillingPage() {
                       </li>
                     ))}
                     
-                    {plan.limitations.length > 0 && (
+                    {plan.limitations && plan.limitations.length > 0 && (
                       <>
                         <Separator />
                         {plan.limitations.map((limitation, idx) => (

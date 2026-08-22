@@ -28,6 +28,7 @@ async function seed() {
       description: "Perfect for trying Filo",
       priceMonthly: 0,
       priceYearly: 0,
+      currency: "PKR",
       features: [
         "50 AI generations per month",
         "100MB cloud storage",
@@ -53,6 +54,7 @@ async function seed() {
       description: "For professionals and power users",
       priceMonthly: 190,
       priceYearly: 0,
+      currency: "PKR",
       features: [
         "500 AI generations per month",
         "5GB cloud storage",
@@ -76,6 +78,7 @@ async function seed() {
       description: "Best value - save 2 months",
       priceMonthly: 0,
       priceYearly: 1900,
+      currency: "PKR",
       features: [
         "600 AI generations per month",
         "5GB cloud storage",

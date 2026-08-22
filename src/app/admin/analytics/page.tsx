@@ -75,7 +75,10 @@ import {
   Zap,
   HardDrive,
   MessageSquare,
-  MoreVertical
+  MoreVertical,
+  Check,
+  AlertCircle,
+  Loader2
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 
@@ -199,10 +202,10 @@ const demoUsageRecords: UsageRecord[] = [
 
 const demoIoLogs: IoLogEntry[] = [
   { id: 'io-001', userId: 'user-001', userName: 'John Smith', inputType: 'prompt', inputPreview: 'Create a professional business proposal for Q1 2024...', outputType: 'document', outputPreview: 'Business_Proposal_Q1_2024.docx generated successfully', format: 'DOCX', feature: 'document-generation', duration: 3200, tokensUsed: 1450, timestamp: '2024-01-20T14:20:00Z', success: true },
-  { id: 'io-002', userId: 'user-002', userName: 'Sarah Johnson', inputType: 'file_upload', inputPreview: 'Q4_Presentation.pdf (2.4MB)', outputType: 'analysis', outputPreview: 'File analyzed - 24 slides detected', format: null, feature: 'file-analysis', duration: 1200, timestamp: '2024-01-20T16:40:00Z', success: true },
+  { id: 'io-002', userId: 'user-002', userName: 'Sarah Johnson', inputType: 'file_upload', inputPreview: 'Q4_Presentation.pdf (2.4MB)', outputType: 'analysis', outputPreview: 'File analyzed - 24 slides detected', format: undefined, feature: 'file-analysis', duration: 1200, timestamp: '2024-01-20T16:40:00Z', success: true },
   { id: 'io-003', userId: 'user-001', userName: 'John Smith', inputType: 'prompt', inputPreview: 'Generate monthly financial report...', outputType: 'spreadsheet', outputPreview: 'Financial_Report_Jan.xlsx created', format: 'XLSX', feature: 'spreadsheet-generation', duration: 2800, tokensUsed: 2100, timestamp: '2024-01-20T14:35:00Z', success: true },
-  { id: 'io-004', userId: 'user-003', userName: 'Mike Chen', inputType: 'prompt', inputPreview: 'Summarize the following meeting notes...', outputType: 'document', outputFormat: 'Meeting_Summary.pdf generated', format: 'PDF', feature: 'summarization', duration: 1500, tokensUsed: 890, timestamp: '2024-01-19T11:32:00Z', success: true },
-  { id: 'io-005', userId: 'user-004', userName: 'Lisa van der Berg', inputType: 'query', inputPreview: 'Export all documents as PDF bundle', outputType: 'error', outputPreview: 'Error: Storage limit exceeded', format: null, feature: 'export', duration: 800, timestamp: '2024-01-18T09:15:00Z', success: false },
+  { id: 'io-004', userId: 'user-003', userName: 'Mike Chen', inputType: 'prompt', inputPreview: 'Summarize the following meeting notes...', outputType: 'document', outputPreview: 'Meeting_Summary.pdf generated', format: 'PDF', feature: 'summarization', duration: 1500, tokensUsed: 890, timestamp: '2024-01-19T11:32:00Z', success: true },
+  { id: 'io-005', userId: 'user-004', userName: 'Lisa van der Berg', inputType: 'query', inputPreview: 'Export all documents as PDF bundle', outputType: 'error', outputPreview: 'Error: Storage limit exceeded', format: undefined, feature: 'export', duration: 800, timestamp: '2024-01-18T09:15:00Z', success: false },
   { id: 'io-006', userId: 'user-002', userName: 'Sarah Johnson', inputType: 'prompt', inputPreview: 'Write compelling marketing copy for SaaS product launch...', outputType: 'document', outputPreview: 'Marketing_Copy_Final.docx created', format: 'DOCX', feature: 'copywriting', duration: 4200, tokensUsed: 1890, timestamp: '2024-01-20T17:05:00Z', success: true },
 ]
 
@@ -649,7 +652,7 @@ export default function AdminAnalyticsPage() {
                         </div>
                         <div className="flex justify-between">
                           <span>Success:</span>
-                          <span className={`font-medium ${parseFloat(feature.successRate) >= 95 ? 'text-green-600' : 'text-orange-600'}`}>{feature.successRate}%</span>
+                          <span className={`font-medium ${feature.successRate >= 95 ? 'text-green-600' : 'text-orange-600'}`}>{feature.successRate}%</span>
                         </div>
                       </div>
                     </div>
@@ -996,7 +999,7 @@ export default function AdminAnalyticsPage() {
                           <TableCell>{feature.uniqueUsers}</TableCell>
                           <TableCell className="text-sm">{formatDuration(feature.avgDuration)}</TableCell>
                           <TableCell>
-                            <span className={`font-medium ${parseFloat(feature.successRate) >= 95 ? 'text-green-600' : 'text-orange-600'}`}>
+                            <span className={`font-medium ${feature.successRate >= 95 ? 'text-green-600' : 'text-orange-600'}`}>
                               {feature.successRate}%
                             </span>
                           </TableCell>
