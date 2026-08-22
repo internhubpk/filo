@@ -74,6 +74,7 @@ import {
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { apiClient, User as ApiUser } from '@/lib/api-client'
+import { toast } from '@/lib/toast'
 import { 
   ErrorCode, 
   createAppError, 
@@ -318,25 +319,38 @@ export function MainDashboard() {
     clearError()
     
     if (!loginEmail.trim() || !loginPassword.trim()) {
+      toast.error('Please fill in all fields', {
+        description: 'Email and password are required'
+      })
       setError(ErrorCode.AUTH_MISSING_FIELDS)
       return
     }
 
     setIsLoggingIn(true)
     
+    // Show loading toast
+    const loadingToastId = toast.loading('Signing you in...')
+    
     try {
       // Call PROXY API which calls Convex server-side
       const response = await apiClient.login(loginEmail, loginPassword)
 
       if (!response.success || !response.data?.user || !response.data?.sessionToken) {
-        // Map error codes to user-friendly errors
+        // Dismiss loading toast
+        toast.dismiss(loadingToastId)
+        
+        // Map error codes to user-friendly errors with toasts
         if (response.code === 'USER_NOT_FOUND') {
+          toast.loginError('No account found with this email')
           setError(ErrorCode.AUTH_USER_NOT_FOUND)
         } else if (response.code === 'INVALID_PASSWORD') {
+          toast.loginError('Incorrect password')
           setError(ErrorCode.AUTH_INVALID_PASSWORD)
         } else if (response.code === 'INVALID_EMAIL') {
+          toast.loginError('Invalid email format')
           setError(ErrorCode.AUTH_INVALID_EMAIL)
         } else {
+          toast.loginError(response.error || 'Login failed')
           setError(ErrorCode.AUTH_LOGIN_FAILED, response.error)
         }
         return
@@ -350,10 +364,16 @@ export function MainDashboard() {
       setSessionToken(token)
       apiClient.storeSession(userData, token)
       
+      // Dismiss loading and show success
+      toast.dismiss(loadingToastId)
+      toast.loginSuccess(userData.name || 'there')
+      
       setShowLoginModal(false)
       setLoginEmail('')
       setLoginPassword('')
     } catch (err) {
+      toast.dismiss(loadingToastId)
+      toast.loginError(err instanceof Error ? err.message : 'Network error')
       setError(ErrorCode.AUTH_LOGIN_FAILED, err)
     } finally {
       setIsLoggingIn(false)
@@ -365,16 +385,25 @@ export function MainDashboard() {
     clearError()
     
     if (!signupName.trim() || !signupEmail.trim() || !signupPassword.trim()) {
+      toast.error('Please fill in all fields', {
+        description: 'Name, email, and password are required'
+      })
       setError(ErrorCode.AUTH_MISSING_FIELDS)
       return
     }
 
     if (signupPassword.length < 6) {
+      toast.error('Password too short', {
+        description: 'Password must be at least 6 characters'
+      })
       setError(ErrorCode.AUTH_PASSWORD_TOO_SHORT)
       return
     }
 
     setIsSigningUp(true)
+    
+    // Show loading toast with animation
+    const loadingToastId = toast.loading('Creating your account...')
     
     try {
       // Call PROXY API which calls Convex server-side
@@ -382,15 +411,22 @@ export function MainDashboard() {
 
       console.log('[DASHBOARD] Signup response:', response)
 
-      if (!response.success || !response.data?.user || !response.data?.sessionToken) {
-        // Map error codes to user-friendly errors
+      if (!response.success || !response.data?.user) {
+        // Dismiss loading toast
+        toast.dismiss(loadingToastId)
+        
+        // Map error codes to user-friendly errors with toasts
         if (response.code === 'EMAIL_EXISTS') {
+          toast.signupError('An account already exists with this email')
           setError(ErrorCode.AUTH_EMAIL_EXISTS)
         } else if (response.code === 'INVALID_EMAIL') {
+          toast.signupError('Invalid email format')
           setError(ErrorCode.AUTH_INVALID_EMAIL)
         } else if (response.code === 'PASSWORD_TOO_SHORT') {
+          toast.signupError('Password must be at least 6 characters')
           setError(ErrorCode.AUTH_PASSWORD_TOO_SHORT)
         } else {
+          toast.signupError(response.error || 'Account creation failed')
           setError(ErrorCode.AUTH_SIGNUP_FAILED, response.error)
         }
         return
@@ -401,8 +437,12 @@ export function MainDashboard() {
       const token = response.data.sessionToken
       
       setUser(userData as unknown as User)
-      setSessionToken(token)
-      apiClient.storeSession(userData, token)
+      setSessionToken(token || null)
+      apiClient.storeSession(userData, token || '')
+      
+      // Dismiss loading and show success
+      toast.dismiss(loadingToastId)
+      toast.signupSuccess(userData.name || signupName)
       
       setShowSignupModal(false)
       setSignupName('')
@@ -410,6 +450,8 @@ export function MainDashboard() {
       setSignupPassword('')
     } catch (err) {
       console.error('[DASHBOARD] Signup error:', err)
+      toast.dismiss(loadingToastId)
+      toast.signupError(err instanceof Error ? err.message : 'Network error')
       setError(ErrorCode.AUTH_SIGNUP_FAILED, err)
     } finally {
       setIsSigningUp(false)
@@ -417,7 +459,9 @@ export function MainDashboard() {
   }
 
   const handleLogout = async () => {
-    // Call PROXY API to invalidate session on backend
+    // Show loading toast
+    const loadingToastId = toast.loading('Logging out...')
+    
     try {
       await apiClient.logout()
     } catch (err) {
@@ -425,17 +469,28 @@ export function MainDashboard() {
       // Don't show error for logout - just clear locally
     }
     
+    // Clear local state
     setUser(null)
     setSessionToken(null)
     apiClient.clearSession()
+    
+    // Dismiss loading and show success
+    toast.dismiss(loadingToastId)
+    toast.logoutSuccess()
   }
 
   // Handle generation
   const handleGenerate = async () => {
-    if (!prompt.trim()) return
+    if (!prompt.trim()) {
+      toast.warning('Please enter a prompt', {
+        description: 'Describe what you want to create'
+      })
+      return
+    }
     
     // Require login for generation
     if (!user) {
+      toast.sessionExpired()
       setShowLoginModal(true)
       setError(ErrorCode.AUTH_UNAUTHORIZED)
       return
@@ -443,6 +498,7 @@ export function MainDashboard() {
     
     // REQUIRE PRO SUBSCRIPTION for AI generation
     if (!subscriptionStatus?.hasActive) {
+      toast.subscriptionRequired()
       setShowUpgradeModal(true)
       setError(ErrorCode.SUBSCRIPTION_REQUIRED)
       return
@@ -450,6 +506,9 @@ export function MainDashboard() {
 
     setIsGenerating(true)
     clearError()
+    
+    // Show generation started toast with loading animation
+    const loadingToastId = toast.generationStarted(prompt)
     
     // Initialize generation stages
     const stages: GenerationStage[] = [
@@ -475,20 +534,30 @@ export function MainDashboard() {
 
       // Check for errors from API
       if (!response.success || !response.data?.artifact) {
-        // Map error codes to user-friendly messages
+        // Dismiss loading toast
+        toast.dismiss(loadingToastId)
+        
+        // Map error codes to user-friendly messages with toasts
         if (response.code === 'API_KEY_MISSING') {
+          toast.generationError('AI service not configured')
           setError(ErrorCode.AI_API_KEY_MISSING, response.error)
         } else if (response.code === 'PROVIDER_ERROR') {
+          toast.generationError('AI provider error')
           setError(ErrorCode.AI_PROVIDER_ERROR, response.error)
         } else if (response.code === 'RATE_LIMITED') {
+          toast.generationError('Rate limit exceeded. Please wait a moment.')
           setError(ErrorCode.AI_RATE_LIMITED, response.error)
         } else if (response.code === 'TIMEOUT') {
+          toast.generationError('Generation timed out')
           setError(ErrorCode.AI_TIMEOUT, response.error)
         } else if (response.code === 'PLANNING_FAILED') {
+          toast.generationError('Failed to plan your artifact')
           setError(ErrorCode.AI_PLANNING_FAILED, response.error)
         } else if (response.code === 'GENERATION_FAILED') {
+          toast.generationError(response.error || 'Generation failed')
           setError(ErrorCode.AI_GENERATION_FAILED, response.error)
         } else {
+          toast.generationError(response.error || 'Something went wrong')
           setError(ErrorCode.AI_GENERATION_FAILED, response.error)
         }
         
@@ -560,11 +629,21 @@ export function MainDashboard() {
       setCurrentArtifact(artifact)
       setShowResultDialog(true)
       
+      // Dismiss loading and show success toast
+      toast.dismiss(loadingToastId)
+      toast.generationSuccess(artifact.title || 'Your artifact')
+      
       // Clear draft after successful generation
       localStorage.removeItem('filo_draft_prompt')
       
     } catch (err) {
       console.error('Generation failed:', err)
+      
+      // Dismiss loading toast on error
+      toast.dismiss(loadingToastId)
+      
+      // Show error toast
+      toast.generationError(err instanceof Error ? err.message : 'Generation failed')
       
       // Parse error and set user-friendly message
       const parsedError = parseError(err)

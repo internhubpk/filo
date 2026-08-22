@@ -120,3 +120,195 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ==================== TOAST ANIMATIONS ==================== */
+
+/* Bounce in animation for success icons */
+@keyframes bounce-in {
+  0% {
+    transform: scale(0);
+    opacity: 0;
+  }
+  50% {
+    transform: scale(1.2);
+  }
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+}
+
+.animate-bounce-in {
+  animation: bounce-in 0.5s cubic-bezier(0.68, -0.55, 0.265, 1.55) forwards;
+}
+
+/* Shake animation for error icons */
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  10%, 30%, 50%, 70%, 90% { transform: translateX(-4px); }
+  20%, 40%, 60%, 80% { transform: translateX(4px); }
+}
+
+.animate-shake {
+  animation: shake 0.5s ease-in-out;
+}
+
+/* Gentle pulse for warning */
+@keyframes pulse-gentle {
+  0%, 100% { 
+    opacity: 1; 
+    transform: scale(1);
+  }
+  50% { 
+    opacity: 0.8; 
+    transform: scale(1.05);
+  }
+}
+
+.animate-pulse-gentle {
+  animation: pulse-gentle 2s ease-in-out infinite;
+}
+
+/* Float animation for info */
+@keyframes float {
+  0%, 100% { 
+    transform: translateY(0); 
+  }
+  50% { 
+    transform: translateY(-3px); 
+  }
+}
+
+.animate-float {
+  animation: float 2s ease-in-out infinite;
+}
+
+/* Sparkle animation for artifact */
+@keyframes sparkle {
+  0%, 100% { 
+    transform: rotate(0deg) scale(1);
+  }
+  25% { 
+    transform: rotate(10deg) scale(1.1);
+  }
+  50% { 
+    transform: rotate(0deg) scale(1);
+  }
+  75% { 
+    transform: rotate(-10deg) scale(1.1);
+  }
+}
+
+.animate-sparkle {
+  animation: sparkle 1s ease-in-out infinite;
+}
+
+/* Toast entrance animations */
+@keyframes toast-slide-in {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+@keyframes toast-slide-out {
+  from {
+    transform: translateX(0);
+    opacity: 1;
+  }
+  to {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+}
+
+/* Progress bar animation for loading toasts */
+@keyframes toast-progress {
+  from { width: 100%; }
+  to { width: 0%; }
+}
+
+/* Toast hover effects */
+.toast-success:hover {
+  box-shadow: 0 8px 25px -5px rgba(34, 197, 94, 0.3);
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+}
+
+.toast-error:hover {
+  box-shadow: 0 8px 25px -5px rgba(239, 68, 68, 0.3);
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+}
+
+.toast-warning:hover {
+  box-shadow: 0 8px 25px -5px rgba(234, 179, 8, 0.3);
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+}
+
+.toast-info:hover {
+  box-shadow: 0 8px 25px -5px rgba(59, 130, 246, 0.3);
+  transform: translateY(-2px);
+  transition: all 0.2s ease;
+}
+
+.toast-loading:hover {
+  box-shadow: 0 8px 25px -5px rgba(99, 102, 241, 0.3);
+  transition: all 0.2s ease;
+}
+
+/* Sonner custom overrides */
+[data-sonner-toaster] [data-sonner-toast] {
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  background: linear-gradient(
+    135deg,
+    hsl(var(--popover) / 0.95) 0%,
+    hsl(var(--popover) / 0.9) 100%
+  );
+  border: 1px solid hsl(var(--border) / 0.5);
+  box-shadow: 
+    0 10px 40px -10px rgba(0, 0, 0, 0.15),
+    0 0 0 1px rgba(255, 255, 255, 0.05) inset;
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-type="success"] {
+  background: linear-gradient(
+    135deg,
+    hsl(142 76% 96%) 0%,
+    hsl(142 70% 92%) 100%
+  );
+  border-color: hsl(142 76% 60% / 0.3);
+}
+
+.dark [data-sonner-toaster] [data-sonner-toast][data-type="success"] {
+  background: linear-gradient(
+    135deg,
+    hsl(142 70% 12%) 0%,
+    hsl(142 70% 15%) 100%
+  );
+  border-color: hsl(142 70% 40% / 0.3);
+}
+
+[data-sonner-toaster] [data-sonner-toast][data-type="error"] {
+  background: linear-gradient(
+    135deg,
+    hsl(0 93% 96%) 0%,
+    hsl(0 90% 92%) 100%
+  );
+  border-color: hsl(0 93% 55% / 0.3);
+}
+
+.dark [data-sonner-toaster] [data-sonner-toast][data-type="error"] {
+  background: linear-gradient(
+    135deg,
+    hsl(0 70% 12%) 0%,
+    hsl(0 70% 15%) 100%
+  );
+  border-color: hsl(0 70% 45% / 0.3);
+}
