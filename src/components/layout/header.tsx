@@ -1,6 +1,8 @@
 'use client'
 
-import React from 'react'
+import React, { useState, useEffect } from 'react'
+import { useRouter } from 'next/navigation'
+import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
@@ -27,12 +29,82 @@ import {
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 
-interface HeaderProps {
-  onMobileMenuToggle?: () => void
+// User interface
+interface UserData {
+  id: string
+  name: string
+  email: string
 }
 
-export function Header({ onMobileMenuToggle }: HeaderProps) {
+interface HeaderProps {
+  onMobileMenuToggle?: () => void
+  userData?: UserData | null
+}
+
+export function Header({ onMobileMenuToggle, userData: propUserData }: HeaderProps) {
   const { theme, setTheme } = useTheme()
+  const router = useRouter()
+  
+  // Local state for user data (can be passed as prop or loaded from storage)
+  const [userData, setUserData] = useState<UserData | null>(propUserData || null)
+
+  // Load user data from localStorage if not provided as prop
+  useEffect(() => {
+    if (!propUserData) {
+      try {
+        const sessionData = localStorage.getItem('filo_session')
+        if (sessionData) {
+          const session = JSON.parse(sessionData)
+          if (session.user) {
+            setUserData(session.user)
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load user session:', e)
+      }
+    }
+  }, [propUserData])
+
+  // Listen for storage changes (when user logs in/out in another tab)
+  useEffect(() => {
+    const handleStorageChange = () => {
+      try {
+        const sessionData = localStorage.getItem('filo_session')
+        if (sessionData) {
+          const session = JSON.parse(sessionData)
+          setUserData(session.user || null)
+        } else {
+          setUserData(null)
+        }
+      } catch (e) {
+        console.error('Failed to parse updated session:', e)
+      }
+    }
+
+    window.addEventListener('storage', handleStorageChange)
+    return () => window.removeEventListener('storage', handleStorageChange)
+  }, [])
+
+  const handleLogout = () => {
+    // Clear session from localStorage
+    localStorage.removeItem('filo_session')
+    setUserData(null)
+    
+    // Redirect to home (which will show login form)
+    router.push('/')
+    router.refresh()
+  }
+
+  // Get initials for avatar
+  const getInitials = (name: string) => {
+    return name
+      .split(' ')
+      .map(word => word.charAt(0))
+      .join('')
+      .toUpperCase()
+      .slice(0, 2)
+      || 'U'
+  }
 
   return (
     <header className="sticky top-0 z-30 flex h-16 items-center gap-4 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60 px-4 lg:px-6">
@@ -55,7 +127,7 @@ export function Header({ onMobileMenuToggle }: HeaderProps) {
             className="pl-10 bg-muted/50"
           />
           <kbd className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 hidden h-5 select-none items-center gap-1 rounded border bg-muted px-1.5 font-mono text-[10px] font-medium opacity-100 sm:flex">
-            CMD+K
+            ⌘K
           </kbd>
         </div>
       </div>
@@ -63,10 +135,12 @@ export function Header({ onMobileMenuToggle }: HeaderProps) {
       {/* Right side actions */}
       <div className="flex items-center gap-2">
         {/* Quick create */}
-        <Button size="sm" className="hidden sm:flex gap-2">
-          <Plus className="h-4 w-4" />
-          Create
-        </Button>
+        <Link href="/">
+          <Button size="sm" className="hidden sm:flex gap-2">
+            <Plus className="h-4 w-4" />
+            Create
+          </Button>
+        </Link>
 
         {/* Theme toggle */}
         <Button
@@ -82,7 +156,7 @@ export function Header({ onMobileMenuToggle }: HeaderProps) {
         {/* Notifications */}
         <Button variant="ghost" size="icon" className="relative">
           <Bell className="h-4 w-4" />
-          <Badge className="absolute -top-1 -right-1 h-4 w-4 p-0 flex items-center justify-center text-[10px]">
+          <Badge className="absolute -top-1 -right-1 h-4 w-4 p-0 flex items-center justify-center text-[10px] bg-red-500 text-white">
             3
           </Badge>
         </Button>
@@ -93,7 +167,7 @@ export function Header({ onMobileMenuToggle }: HeaderProps) {
             <Button variant="ghost" className="relative h-9 w-9 rounded-full">
               <Avatar className="h-9 w-9">
                 <AvatarFallback className="bg-primary/10 text-primary font-semibold text-sm">
-                  U
+                  {userData ? getInitials(userData.name) : 'U'}
                 </AvatarFallback>
               </Avatar>
             </Button>
@@ -101,27 +175,38 @@ export function Header({ onMobileMenuToggle }: HeaderProps) {
           <DropdownMenuContent align="end" className="w-56">
             <DropdownMenuLabel className="font-normal">
               <div className="flex flex-col space-y-1">
-                <p className="text-sm font-medium leading-none">User Name</p>
+                <p className="text-sm font-medium leading-none">
+                  {userData?.name || 'Guest'}
+                </p>
                 <p className="text-xs leading-none text-muted-foreground">
-                  user@email.com
+                  {userData?.email || 'Not signed in'}
                 </p>
               </div>
             </DropdownMenuLabel>
             <DropdownMenuSeparator />
-            <DropdownMenuItem>
-              <User className="mr-2 h-4 w-4" />
-              Profile
+            <DropdownMenuItem asChild>
+              <Link href="/settings">
+                <User className="mr-2 h-4 w-4" />
+                Profile
+              </Link>
             </DropdownMenuItem>
-            <DropdownMenuItem>
-              <Settings className="mr-2 h-4 w-4" />
-              Settings
+            <DropdownMenuItem asChild>
+              <Link href="/settings">
+                <Settings className="mr-2 h-4 w-4" />
+                Settings
+              </Link>
             </DropdownMenuItem>
-            <DropdownMenuItem>
-              <CreditCard className="mr-2 h-4 w-4" />
-              Billing
+            <DropdownMenuItem asChild>
+              <Link href="/billing">
+                <CreditCard className="mr-2 h-4 w-4" />
+                Billing
+              </Link>
             </DropdownMenuItem>
             <DropdownMenuSeparator />
-            <DropdownMenuItem className="text-destructive">
+            <DropdownMenuItem 
+              className="text-destructive"
+              onClick={handleLogout}
+            >
               <LogOut className="mr-2 h-4 w-4" />
               Log out
             </DropdownMenuItem>

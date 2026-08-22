@@ -1,8 +1,8 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import Link from 'next/link'
-import { usePathname } from 'next/navigation'
+import { usePathname, useRouter } from 'next/navigation'
 import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 import { ScrollArea } from '@/components/ui/scroll-area'
@@ -24,8 +24,16 @@ import {
   ChevronRight
 } from 'lucide-react'
 
+// User interface
+interface UserData {
+  id: string
+  name: string
+  email: string
+}
+
 interface SidebarProps {
   className?: string
+  userData?: UserData | null
 }
 
 const mainNavItems = [
@@ -82,12 +90,41 @@ const secondaryNavItems = [
 function SidebarContent({ 
   collapsed, 
   pathname, 
-  onCloseMobile 
+  onCloseMobile,
+  userData 
 }: { 
   collapsed: boolean; 
   pathname: string; 
   onCloseMobile?: () => void;
+  userData?: UserData | null;
 }) {
+  const router = useRouter()
+
+  // Get initials for avatar
+  const getInitials = (name: string) => {
+    return name
+      .split(' ')
+      .map(word => word.charAt(0))
+      .join('')
+      .toUpperCase()
+      .slice(0, 2)
+      || 'U'
+  }
+
+  const handleLogout = () => {
+    // Clear session from localStorage
+    localStorage.removeItem('filo_session')
+    
+    // Redirect to home
+    router.push('/')
+    router.refresh()
+    
+    // Close mobile menu if open
+    if (onCloseMobile) {
+      onCloseMobile()
+    }
+  }
+
   return (
     <div className="flex h-full flex-col">
       {/* Logo */}
@@ -186,14 +223,31 @@ function SidebarContent({
         <div className={cn("flex items-center gap-3", collapsed && "flex-col")}>
           <Avatar className="h-9 w-9">
             <AvatarFallback className="bg-primary/10 text-primary font-semibold">
-              U
+              {userData ? getInitials(userData.name) : 'U'}
             </AvatarFallback>
           </Avatar>
           {!collapsed && (
             <div className="flex-1 min-w-0">
-              <p className="text-sm font-medium truncate">User</p>
-              <p className="text-xs text-muted-foreground truncate">user@email.com</p>
+              <p className="text-sm font-medium truncate">
+                {userData?.name || 'Guest'}
+              </p>
+              <p className="text-xs text-muted-foreground truncate">
+                {userData?.email || 'Not signed in'}
+              </p>
             </div>
+          )}
+          
+          {/* Logout button when not collapsed */}
+          {!collapsed && userData && (
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-8 w-8 shrink-0"
+              onClick={handleLogout}
+              title="Log out"
+            >
+              <LogOut className="h-4 w-4" />
+            </Button>
           )}
         </div>
       </div>
@@ -201,10 +255,48 @@ function SidebarContent({
   )
 }
 
-export function Sidebar({ className }: SidebarProps) {
+export function Sidebar({ className, userData: propUserData }: SidebarProps) {
   const pathname = usePathname()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
+  const [userData, setUserData] = useState<UserData | null>(propUserData || null)
+
+  // Load user data from localStorage if not provided as prop
+  useEffect(() => {
+    if (!propUserData) {
+      try {
+        const sessionData = localStorage.getItem('filo_session')
+        if (sessionData) {
+          const session = JSON.parse(sessionData)
+          if (session.user) {
+            setUserData(session.user)
+          }
+        }
+      } catch (e) {
+        console.error('Failed to load user session:', e)
+      }
+    }
+  }, [propUserData])
+
+  // Listen for storage changes (when user logs in/out in another tab)
+  useEffect(() => {
+    const handleStorageChange = () => {
+      try {
+        const sessionData = localStorage.getItem('filo_session')
+        if (sessionData) {
+          const session = JSON.parse(sessionData)
+          setUserData(session.user || null)
+        } else {
+          setUserData(null)
+        }
+      } catch (e) {
+        console.error('Failed to parse updated session:', e)
+      }
+    }
+
+    window.addEventListener('storage', handleStorageChange)
+    return () => window.removeEventListener('storage', handleStorageChange)
+  }, [])
 
   return (
     <>
@@ -226,7 +318,8 @@ export function Sidebar({ className }: SidebarProps) {
         <SidebarContent 
           collapsed={false} 
           pathname={pathname} 
-          onCloseMobile={() => setMobileOpen(false)} 
+          onCloseMobile={() => setMobileOpen(false)}
+          userData={userData}
         />
       </aside>
 
@@ -238,7 +331,11 @@ export function Sidebar({ className }: SidebarProps) {
           className
         )}
       >
-        <SidebarContent collapsed={collapsed} pathname={pathname} />
+        <SidebarContent 
+          collapsed={collapsed} 
+          pathname={pathname} 
+          userData={userData}
+        />
         
         {/* Collapse toggle */}
         <button
