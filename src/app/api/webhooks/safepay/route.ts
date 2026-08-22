@@ -8,11 +8,34 @@ import * as crypto from 'crypto'
 // Endpoint: /api/webhooks/safepay
 // =============================================================================
 
-// SafePay Configuration
+// =============================================================================
+// SAFEPAY CONFIGURATION
+// =============================================================================
+// ARCHITECTURE: Secrets live in CONVEX (backend), not Vercel (frontend)
+//
+// Vercel/Next.js has:
+//   - SAFEPAY_PUBLIC_KEY (safe to expose to browser)
+//   - SAFEPAY_SANDBOX (mode flag)
+//
+// Convex Backend has:
+//   - SAFEPAY_SECRET_KEY (for API calls)
+//   - SAFEPAY_WEBHOOK_SECRET (for signature verification)
+//
+// For PRODUCTION: Add SAFEPAY_WEBHOOK_SECRET to Vercel too if you want
+// webhook signature verification at the edge (recommended but optional)
+// =============================================================================
+
 const SAFEPAY_CONFIG = {
-  publicKey: process.env.SAFEPAY_PUBLIC_KEY || '',
+  // From Vercel environment
+  publicKey: process.env.SAFEPAY_PUBLIC_KEY || process.env.NEXT_PUBLIC_SAFEPAY_PUBLIC_KEY || '',
+  
+  // From Convex environment (or Vercel for convenience in sandbox)
   secretKey: process.env.SAFEPAY_SECRET_KEY || '',
-  isSandbox: process.env.SAFEPAY_SANDBOX === 'true',
+  
+  // Mode
+  isSandbox: process.env.SAFEPAY_SANDBOX !== 'false', // Default to sandbox
+  
+  // Webhook signing secret (Convex primary, Vercel fallback)
   webhookSecret: process.env.SAFEPAY_WEBHOOK_SECRET || '',
 }
 
@@ -174,14 +197,34 @@ export async function POST(request: NextRequest) {
 
 // GET /api/webhooks/safepay - For Safepay dashboard verification/ping
 export async function GET() {
+  const hasPublicKey = !!SAFEPAY_CONFIG.publicKey
+  const hasSecretKey = !!SAFEPAY_CONFIG.secretKey
+  const hasWebhookSecret = !!SAFEPAY_CONFIG.webhookSecret
+  
   return NextResponse.json({ 
     status: 'ok',
     service: 'filo-safepay-webhook',
-    version: '2.0.0',
+    version: '2.1.0',
     timestamp: new Date().toISOString(),
     endpoint: '/api/webhooks/safepay',
-    safepayConfigured: !!(SAFEPAY_CONFIG.publicKey && SAFEPAY_CONFIG.secretKey),
+    
+    // Configuration status
+    configuration: {
+      // Vercel (should have public key)
+      publicKeyConfigured: hasPublicKey,
+      
+      // Convex (secrets live here)
+      secretKeyConfigured: hasSecretKey,
+      webhookSecretConfigured: hasWebhookSecret,
+      
+      // Overall status
+      // Note: In production, only public key + webhook secret needed here
+      // Secret key lives in Convex for API calls
+      fullyConfigured: hasPublicKey && (hasWebhookSecret || SAFEPAY_CONFIG.isSandbox),
+    },
+    
     environment: SAFEPAY_CONFIG.isSandbox ? 'sandbox' : 'production',
+    architecture: 'convex-backend-secrets',
     supportedEvents: [
       // Payment events
       'payment.created',
@@ -220,7 +263,8 @@ export async function GET() {
 
 function verifySafePaySignature(event: SafepayWebhookEvent): boolean {
   try {
-    // Method 1: HMAC-SHA256 verification (preferred when webhook secret is set)
+    // Method 1: HMAC-SHA256 verification (when webhook secret available)
+    // In production, add SAFEPAY_WEBHOOK_SECRET to Vercel for edge verification
     if (SAFEPAY_CONFIG.webhookSecret && event.signature) {
       const expectedSignature = generateHMACSignature(event)
       
@@ -236,15 +280,22 @@ function verifySafePaySignature(event: SafepayWebhookEvent): boolean {
       }
     }
 
-    // Method 2: Basic validation if no signature but we have credentials
-    if (SAFEPAY_CONFIG.secretKey) {
+    // Method 2: Sandbox/Dev mode - basic validation only
+    // Secrets live in Convex, so we trust the webhook source in sandbox
+    if (SAFEPAY_CONFIG.isSandbox) {
+      console.log('[SAFEPAY] Sandbox mode: skipping strict signature verification')
+      console.log('[SAFEPAY] Tip: For production security, add SAFEPAY_WEBHOOK_SECRET to Vercel')
       // At minimum verify the event has proper structure
       return !!event.id && !!event.event && !!event.data?.id
     }
 
-    // No verification possible - log warning
-    console.warn('[SAFEPAY] No credentials configured for signature verification')
-    return true // Accept in development/no-config mode
+    // Method 3: Production without webhook secret configured
+    // This is less secure but functional - events will be processed
+    console.warn('[SAFEPAY] Production mode without webhook signature verification')
+    console.warn('[SAFEPAY] Recommendation: Add SAFEPAY_WEBHOOK_SECRET to Vercel environment')
+    
+    // Basic structure validation
+    return !!event.id && !!event.event && !!event.data?.id
 
   } catch (error) {
     console.error('[SAFEPAY] Signature verification error:', error)
