@@ -515,24 +515,33 @@ export function MainDashboard() {
       }
 
       // Create artifact preview from response or fallback
-      // Add comprehensive null/undefined checks to prevent runtime errors
-      const artifact: ArtifactPreview = (data && data.artifact && data.artifact.title)
-        ? {
-            id: data.artifact.id || crypto.randomUUID(),
-            title: data.artifact.title || extractTitle(prompt),
-            type: data.artifact.type || detectArtifactType(prompt),
-            format: data.artifact.format || (selectedFormat === 'auto' ? 'DOCX' : selectedFormat),
-            status: 'completed' as const,
-            createdAt: new Date(),
-          }
-        : {
-            id: crypto.randomUUID(),
-            title: extractTitle(prompt),
-            type: detectArtifactType(prompt),
-            format: selectedFormat === 'auto' ? 'DOCX' : selectedFormat,
-            status: 'completed' as const,
-            createdAt: new Date(),
-          }
+      // EXTRA DEFENSIVE: Handle any shape of response data safely
+      let artifact: ArtifactPreview
+      
+      try {
+        const safeData = data && typeof data === 'object' ? data : {}
+        const safeArtifact = safeData.artifact && typeof safeData.artifact === 'object' ? safeData.artifact : {}
+        
+        artifact = {
+          id: (safeArtifact.id && typeof safeArtifact.id === 'string') ? safeArtifact.id : crypto.randomUUID(),
+          title: (safeArtifact.title && typeof safeArtifact.title === 'string') ? safeArtifact.title : extractTitle(prompt),
+          type: (safeArtifact.type && typeof safeArtifact.type === 'string') ? safeArtifact.type : detectArtifactType(prompt),
+          format: (safeArtifact.format && typeof safeArtifact.format === 'string') ? safeArtifact.format : (selectedFormat === 'auto' ? 'DOCX' : selectedFormat),
+          status: 'completed' as const,
+          createdAt: new Date(),
+        }
+      } catch (constructErr) {
+        // Ultimate fallback if anything goes wrong
+        console.error('Artifact construction error:', constructErr)
+        artifact = {
+          id: crypto.randomUUID(),
+          title: extractTitle(prompt),
+          type: detectArtifactType(prompt),
+          format: selectedFormat === 'auto' ? 'DOCX' : selectedFormat,
+          status: 'completed' as const,
+          createdAt: new Date(),
+        }
+      }
 
       setCurrentArtifact(artifact)
       setShowResultDialog(true)
