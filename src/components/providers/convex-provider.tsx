@@ -1,7 +1,7 @@
 "use client";
 
 import { ConvexProvider, ConvexReactClient } from "convex/react";
-import { ReactNode, useState, useSyncExternalStore } from "react";
+import { ReactNode, useState } from "react";
 
 function getConvexClient() {
   const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
@@ -12,20 +12,15 @@ function getConvexClient() {
   return new ConvexReactClient(convexUrl);
 }
 
-const emptySubscribe = () => () => {};
-
 export function ConvexClientProvider({ children }: { children: ReactNode }) {
   const [client] = useState(() => getConvexClient());
-  // Returns false on the server and during the first client render (avoiding
-  // hydration mismatches), then true on subsequent client renders.
-  const mounted = useSyncExternalStore(
-    emptySubscribe,
-    () => true,
-    () => false
-  );
 
-  // Don't render with Convex provider during SSR or if not configured
-  if (!client || !mounted) {
+  // Only skip the provider if Convex isn't configured at all. The client
+  // must be provided during SSR/prerender too, since child components
+  // (e.g. main-dashboard) call Convex hooks like useAction/useQuery
+  // unconditionally and those throw immediately without a provider in
+  // the tree, regardless of whether we're on the server or the client.
+  if (!client) {
     return <>{children}</>;
   }
 
