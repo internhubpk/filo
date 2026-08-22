@@ -5,7 +5,7 @@
 // Avoids circular dependency issues by using HTTP client
 // =============================================================================
 
-import { ConvexHttpClient } from 'convex/server'
+import { ConvexHttpClient } from 'convex/browser'
 
 let convexClient: ConvexHttpClient | null = null
 
