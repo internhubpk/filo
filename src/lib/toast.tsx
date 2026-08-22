@@ -1,107 +1,137 @@
 // =============================================================================
-// FILO Toast Notifications - Clean, Minimal, No Buttons
+// FILO Toast Notifications - Using react-hot-toast
 // =============================================================================
-// Just beautiful notifications that auto-dismiss. No shitty buttons.
+// Clean, beautiful toasts with proper backgrounds
 // =============================================================================
 
-import { toast as sonnerToast } from 'sonner'
-
-// ==================== CLEAN ICONS ====================
-
-const Icons = {
-  success: (
-    <svg className="w-4 h-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-    </svg>
-  ),
-  
-  error: (
-    <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
-    </svg>
-  ),
-  
-  warning: (
-    <svg className="w-4 h-4 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
-    </svg>
-  ),
-  
-  info: (
-    <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
-    </svg>
-  ),
-  
-  loading: (
-    <div className="w-4 h-4 border-2 border-primary/30 border-t-primary rounded-full animate-spin" />
-  ),
-
-  user: (
-    <svg className="w-4 h-4 text-purple-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z" />
-    </svg>
-  ),
-
-  artifact: (
-    <svg className="w-4 h-4 text-indigo-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M19.428 15.428a2 2 0 00-1.022-.547l-2.387-.477a6 6 0 00-3.86.517l-.318.158a6 6 0 01-3.86.517L6.05 15.21a2 2 0 00-1.806.547M8 4h8l-1 1v5.172a2 2 0 00.586 1.414l5 5c1.26 1.26.367 3.414-1.415 3.414H4.828c-1.782 0-2.674-2.154-1.414-3.414l5-5A2 2 0 009 10.172V5L8 4z" />
-    </svg>
-  ),
-
-  logout: (
-    <svg className="w-4 h-4 text-gray-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-      <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
-    </svg>
-  ),
-}
+import toast, { ToastOptions } from 'react-hot-toast'
 
 // ==================== CLEAN TOAST API ====================
 
-export const toast = {
+export const filoToast = {
   success(message: string, description?: string) {
-    return sonnerToast.success(message, {
-      description,
-      icon: Icons.success,
-      duration: 3000,
-    })
+    return toast.success(
+      <div className="flex flex-col">
+        <span className="font-semibold text-sm">{message}</span>
+        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
+      </div>,
+      {
+        icon: (
+          <svg className="w-4 h-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+          </svg>
+        ),
+        duration: 3000,
+        style: {
+          background: '#f0fdf4',
+          border: '1px solid #bbf7d0',
+          color: '#166534',
+        },
+        iconTheme: {
+          primary: '#22c55e',
+          secondary: '#ffffff',
+        },
+      }
+    )
   },
 
   error(message: string, description?: string) {
-    return sonnerToast.error(message, {
-      description,
-      icon: Icons.error,
-      duration: 4000,
-    })
+    return toast.error(
+      <div className="flex flex-col">
+        <span className="font-semibold text-sm">{message}</span>
+        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
+      </div>,
+      {
+        icon: (
+          <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M6 18L18 6M6 6l12 12" />
+          </svg>
+        ),
+        duration: 4000,
+        style: {
+          background: '#fef2f2',
+          border: '1px solid #fecaca',
+          color: '#991b1b',
+        },
+        iconTheme: {
+          primary: '#ef4444',
+          secondary: '#ffffff',
+        },
+      }
+    )
   },
 
   warning(message: string, description?: string) {
-    return sonnerToast.warning(message, {
-      description,
-      icon: Icons.warning,
-      duration: 4000,
-    })
+    return toast(
+      <div className="flex flex-col">
+        <span className="font-semibold text-sm">{message}</span>
+        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
+      </div>,
+      {
+        icon: (
+          <svg className="w-4 h-4 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+          </svg>
+        ),
+        duration: 4000,
+        style: {
+          background: '#fefce8',
+          border: '1px solid #fef08a',
+          color: '#854d0e',
+        },
+        iconTheme: {
+          primary: '#eab308',
+          secondary: '#ffffff',
+        },
+      }
+    )
   },
 
   info(message: string, description?: string) {
-    return sonnerToast.info(message, {
-      description,
-      icon: Icons.info,
-      duration: 3000,
-    })
+    return toast(
+      <div className="flex flex-col">
+        <span className="font-semibold text-sm">{message}</span>
+        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
+      </div>,
+      {
+        icon: (
+          <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+            <path strokeLinecap="round" strokeLinejoin="round" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+          </svg>
+        ),
+        duration: 3000,
+        style: {
+          background: '#eff6ff',
+          border: '1px solid #bfdbfe',
+          color: '#1e40af',
+        },
+        iconTheme: {
+          primary: '#3b82f6',
+          secondary: '#ffffff',
+        },
+      }
+    )
   },
 
   loading(message: string) {
-    return sonnerToast.loading(message, {
-      icon: Icons.loading,
+    return toast.loading(message, {
+      style: {
+        background: 'hsl(var(--popover))',
+        border: '1px solid hsl(var(--border))',
+        color: 'hsl(var(--foreground))',
+      },
     })
   },
 
-  dismiss(id?: string | number) {
-    return sonnerToast.dismiss(id)
+  dismiss(id?: string) {
+    if (id) {
+      toast.dismiss(id)
+    } else {
+      toast.dismiss()
+    }
   },
 
-  // ==================== SPECIFIC TOASTS (NO BUTTONS) ====================
+  // ==================== SPECIFIC TOASTS ====================
 
   signupSuccess(name: string) {
     return this.success(`Welcome, ${name}!`, 'Account created successfully')
@@ -149,4 +179,6 @@ export const toast = {
   },
 }
 
-export default toast
+// Export original toast for advanced usage
+export { toast }
+export default filoToast
