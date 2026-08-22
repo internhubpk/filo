@@ -11,7 +11,6 @@
 import type * as admin from "../admin.js";
 import type * as artifacts from "../artifacts.js";
 import type * as auth from "../auth.js";
-import type * as auth_mutations from "../auth_mutations.js";
 import type * as files from "../files.js";
 import type * as payments from "../payments.js";
 import type * as plans from "../plans.js";
@@ -29,7 +28,6 @@ declare const fullApi: ApiFromModules<{
   admin: typeof admin;
   artifacts: typeof artifacts;
   auth: typeof auth;
-  auth_mutations: typeof auth_mutations;
   files: typeof files;
   payments: typeof payments;
   plans: typeof plans;

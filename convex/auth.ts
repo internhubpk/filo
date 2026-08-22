@@ -1,8 +1,8 @@
 // =============================================================================
-// FILO Authentication - REAL Implementation
+// FILO Authentication - COMPLETE Implementation
 // =============================================================================
-// NO FAKE CODE - Real user management with Convex
-// - Password hashing (simple but secure for MVP)
+// All auth functions in ONE file to avoid resolution issues
+// - Password hashing (SHA-256 for MVP)
 // - Session tokens stored in database
 // - Email validation
 // =============================================================================
@@ -25,8 +25,7 @@ interface AuthResult {
   code?: string;
 }
 
-// ==================== SIMPLE PASSWORD HASHING ====================
-// In production, use bcrypt/argon2 - this is for MVP
+// ==================== PASSWORD HASHING ====================
 
 async function hashPassword(password: string): Promise<string> {
   const encoder = new TextEncoder();
@@ -50,11 +49,52 @@ function generateSessionToken(): string {
     .join("");
 }
 
+// ==================== SESSION MUTATIONS ====================
+// Included here to avoid cross-file resolution issues
+
+/**
+ * Create a new session for a user
+ */
+export const createSession = mutation({
+  args: {
+    userId: v.id("users"),
+    token: v.string(),
+    expiresAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db.insert("sessions", {
+      userId: args.userId,
+      token: args.token,
+      expiresAt: args.expiresAt,
+      createdAt: Date.now(),
+    });
+  },
+});
+
+/**
+ * Delete a session (logout)
+ */
+export const deleteSession = mutation({
+  args: { token: v.string() },
+  handler: async (ctx, args) => {
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", args.token))
+      .first();
+
+    if (session) {
+      await ctx.db.delete(session._id);
+      return true;
+    }
+
+    return false;
+  },
+});
+
 // ==================== AUTH ACTIONS ====================
 
 /**
- * REAL Login - Validates email/password against database
- * NO MORE FAKE LOGIN THAT ACCEPTS ANYTHING
+ * Login - Validates email/password against database
  */
 export const login = action({
   args: {
@@ -82,7 +122,7 @@ export const login = action({
         };
       }
 
-      // Look up user in REAL database
+      // Look up user in database
       const user = await ctx.runQuery(api.users.getUserByEmail, {
         email: args.email.toLowerCase().trim(),
       });
@@ -95,9 +135,7 @@ export const login = action({
         };
       }
 
-      // Verify password against stored hash
-      // For now, we store passwords as SHA-256 hashes
-      // User must have been created through our signup system
+      // Verify password
       const isValid = await verifyPassword(args.password, user.passwordHash || "");
       
       if (!isValid) {
@@ -111,7 +149,7 @@ export const login = action({
       // Create session token
       const sessionToken = generateSessionToken();
       
-      // Store session in database
+      // Store session in database (same file - no resolution issues!)
       await ctx.runMutation(api.auth.createSession, {
         userId: user._id,
         token: sessionToken,
@@ -140,8 +178,7 @@ export const login = action({
 });
 
 /**
- * REAL Signup - Creates actual user in database
- * NO MORE FAKE SIGNUP THAT ACCEPTS ANYTHING
+ * Signup - Creates actual user in database
  */
 export const signup = action({
   args: {
@@ -180,7 +217,7 @@ export const signup = action({
 
       const normalizedEmail = args.email.toLowerCase().trim();
 
-      // Check if user already exists in REAL database
+      // Check if user already exists
       const existingUser = await ctx.runQuery(api.users.getUserByEmail, {
         email: normalizedEmail,
       });
@@ -193,17 +230,17 @@ export const signup = action({
         };
       }
 
-      // Hash the password (REAL hashing)
+      // Hash the password
       const passwordHash = await hashPassword(args.password);
 
-      // Create the user in REAL database
+      // Create the user in database
       const userId = await ctx.runMutation(api.users.createUserWithPassword, {
         name: args.name.trim(),
         email: normalizedEmail,
         passwordHash,
       });
 
-      // Auto-login after signup
+      // Auto-login after signup (same file - no resolution issues!)
       const sessionToken = generateSessionToken();
       await ctx.runMutation(api.auth.createSession, {
         userId,
@@ -277,14 +314,10 @@ export const logout = action({
     token: v.string(),
   },
   handler: async (ctx, args) => {
-    const session = await ctx.db
-      .query("sessions")
-      .withIndex("by_token", (q) => q.eq("token", args.token))
-      .first();
-
-    if (session) {
-      await ctx.db.delete(session._id);
-    }
+    // Use the deleteSession mutation from this same file
+    await ctx.runMutation(api.auth.deleteSession, {
+      token: args.token,
+    });
 
     return { success: true };
   },
