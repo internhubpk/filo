@@ -348,16 +348,19 @@ export function MainDashboard() {
         
         // Map error codes to user-friendly errors with toasts
         if (response.code === 'USER_NOT_FOUND') {
-          toast.loginError('No account found with this email')
+          toast.loginError('No account found with this email. Please sign up first.')
           setError(ErrorCode.AUTH_USER_NOT_FOUND)
         } else if (response.code === 'INVALID_PASSWORD') {
-          toast.loginError('Incorrect password')
+          toast.loginError('Incorrect password. Please try again or reset your password.')
           setError(ErrorCode.AUTH_INVALID_PASSWORD)
         } else if (response.code === 'INVALID_EMAIL') {
           toast.loginError('Invalid email format')
           setError(ErrorCode.AUTH_INVALID_EMAIL)
+        } else if (response.code === 'SERVICE_UNAVAILABLE') {
+          toast.loginError('Authentication service is unavailable. Please try again later.')
+          setError(ErrorCode.AUTH_LOGIN_FAILED, response.error)
         } else {
-          toast.loginError(response.error || 'Login failed')
+          toast.loginError(response.error || 'Login failed. Please check your credentials and try again.')
           setError(ErrorCode.AUTH_LOGIN_FAILED, response.error)
         }
         return
@@ -751,14 +754,17 @@ export function MainDashboard() {
 
   const switchToSignup = () => {
     setShowLoginModal(false)
-    setShowSignupModal(true)
     setError(null)
+    // Delay opening signup dialog to avoid Radix UI Dialog ref race condition
+    // ("r.title is undefined" when two dialogs toggle in the same tick)
+    setTimeout(() => setShowSignupModal(true), 150)
   }
 
   const switchToLogin = () => {
     setShowSignupModal(false)
-    setShowLoginModal(true)
     setError(null)
+    // Delay opening login dialog to avoid Radix UI Dialog ref race condition
+    setTimeout(() => setShowLoginModal(true), 150)
   }
 
   return (

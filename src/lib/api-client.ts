@@ -317,6 +317,54 @@ class ApiClient {
     })
   }
 
+  // ==================== PAYMENT ENDPOINTS (SAFEPAY) ====================
+
+  /**
+   * Create a Safepay checkout session for subscription
+   */
+  async createCheckout(data: {
+    planId: string
+    isYearly?: boolean
+    userEmail?: string
+    userName?: string
+  }): Promise<ApiResponse<{
+    checkoutUrl: string
+    checkoutToken: string
+    paymentId?: string
+    reference: string
+    amount: number
+    currency: string
+    planName: string
+    isYearly: boolean
+    isSandbox?: boolean
+    devMode?: boolean
+  }>> {
+    return this.request('/payments/create-checkout', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
+  /**
+   * Verify a Safepay payment after redirect
+   */
+  async verifyPayment(data: {
+    reference?: string
+    paymentId?: string
+  }): Promise<ApiResponse<{
+    paymentStatus: string
+    safepayStatus?: string
+    subscriptionActivated: boolean
+    reference?: string
+    paymentId?: string
+    devMode?: boolean
+  }>> {
+    return this.request('/payments/verify', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
   // ==================== FILE ENDPOINTS ====================
 
   /**

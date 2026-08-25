@@ -23,10 +23,13 @@ import {
   Mail,
   Sun,
   Moon,
-  X
+  X,
+  Loader2
 } from 'lucide-react'
 import { getDefaultPlans, currencyConfig, contactSalesUrl, type PlanConfig } from '@/config/plans'
 import { useTheme } from 'next-themes'
+import { apiClient } from '@/lib/api-client'
+import { toast } from '@/lib/toast'
 
 // Icon mapping for plans
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -45,9 +48,41 @@ export default function PricingPage() {
   const [isAnnual, setIsAnnual] = useState(false)
   const { theme, setTheme } = useTheme()
 
-  const handleSubscribe = (planId: string) => {
-    // Redirect to signup/login with plan selection
-    router.push(`/?signup=true&plan=${planId}`)
+  const [isRedirecting, setIsRedirecting] = useState<string | null>(null)
+
+  const handleSubscribe = async (planId: string) => {
+    // Check if user has an active session
+    if (!apiClient.isAuthenticated()) {
+      // Redirect to home with signup prompt and plan selection
+      router.push(`/?signup=true&plan=${planId}`)
+      return
+    }
+
+    setIsRedirecting(planId)
+    const loadingId = toast.loading('Creating your secure checkout...')
+
+    try {
+      const response = await apiClient.createCheckout({
+        planId,
+        isYearly,
+      })
+
+      toast.dismiss(loadingId)
+
+      if (!response.success || !response.data?.checkoutUrl) {
+        toast.error('Checkout failed', response.error || 'Please try again')
+        setIsRedirecting(null)
+        return
+      }
+
+      // Redirect to Safepay checkout
+      toast.success('Redirecting to payment...', `You will be redirected to Safepay to complete your ${isYearly ? 'yearly' : 'monthly'} subscription.`)
+      window.location.href = response.data.checkoutUrl
+    } catch (err) {
+      toast.dismiss(loadingId)
+      toast.error('Something went wrong', 'Please try again or contact support')
+      setIsRedirecting(null)
+    }
   }
 
   const handleContactSales = () => {
@@ -270,12 +305,18 @@ export default function PricingPage() {
                             : "secondary"
                       }
                       onClick={() => plan.contactSales ? handleContactSales() : handleSubscribe(plan.id)}
+                      disabled={isRedirecting === plan.id}
                     >
                       {plan.contactSales ? (
                         <>
                           <Phone className="mr-2 h-4 w-4" />
                           {plan.cta}
                           <Mail className="ml-2 h-4 w-4" />
+                        </>
+                      ) : isRedirecting === plan.id ? (
+                        <>
+                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                          Redirecting...
                         </>
                       ) : (
                         <>
@@ -314,7 +355,7 @@ export default function PricingPage() {
               },
               {
                 q: 'What payment methods do you accept?',
-                a: 'We accept all major credit and debit cards through PayFast, South Africa\'s leading payment gateway.',
+                a: 'We accept all major credit and debit cards, bank transfers, and JazzCash/EasyPaisa through SafePay, Pakistan\'s leading payment gateway.',
                 icon: CreditCard
               },
               {

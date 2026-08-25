@@ -30,7 +30,9 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ---- DEV MODE: Bypass Convex, create local session ----
+    const normalizedEmail = email.toLowerCase().trim()
+
+    // ---- DEV MODE or NO CONVEX: Bypass backend, create local session ----
     if (IS_DEV || !process.env.NEXT_PUBLIC_CONVEX_URL) {
       console.log('[API /auth/login] DEV MODE: Skipping Convex auth')
       
@@ -41,7 +43,7 @@ export async function POST(request: NextRequest) {
         .map((b) => b.toString(16).padStart(2, '0'))
         .join('')
 
-      const name = email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+      const name = normalizedEmail.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
 
       return NextResponse.json({
         success: true,
@@ -49,7 +51,7 @@ export async function POST(request: NextRequest) {
           user: {
             id: 'dev-user-' + Date.now(),
             name,
-            email: email.toLowerCase().trim(),
+            email: normalizedEmail,
           },
           sessionToken,
         }
@@ -57,22 +59,70 @@ export async function POST(request: NextRequest) {
     }
 
     // ---- PRODUCTION: Use Convex ----
-    const { getConvexClient } = await import('@/lib/convex-server')
-    const convex = getConvexClient()
-    
-    const result = await convex.action('auth:login', {
-      email: email.toLowerCase().trim(),
-      password,
-    })
-
-    if (!result.success) {
+    let convexClient: any
+    try {
+      const { getConvexClient } = await import('@/lib/convex-server')
+      convexClient = getConvexClient()
+    } catch (initError) {
+      console.error('[API /auth/login] Failed to initialize Convex client:', initError)
       return NextResponse.json(
-        { 
-          success: false, 
-          error: result.error || 'Login failed',
-          code: result.code || 'LOGIN_FAILED' 
+        {
+          success: false,
+          error: 'Authentication service is not available. Please try again later.',
+          code: 'SERVICE_UNAVAILABLE'
         },
-        { status: 401 }
+        { status: 503 }
+      )
+    }
+    
+    // Call Convex auth action
+    let result: any
+    try {
+      result = await convexClient.action('auth:login', {
+        email: normalizedEmail,
+        password,
+      })
+    } catch (actionError) {
+      console.error('[API /auth/login] Convex action error:', actionError)
+      const msg = actionError instanceof Error ? actionError.message : String(actionError)
+      
+      // If Convex is unreachable, provide a clear error
+      if (msg.includes('fetch') || msg.includes('network') || msg.includes('ECONNREFUSED') || msg.includes('Failed to fetch')) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'Unable to reach authentication server. Please check your connection and try again.',
+            code: 'SERVICE_UNAVAILABLE'
+          },
+          { status: 503 }
+        )
+      }
+      
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Login failed. Please try again.',
+          code: 'LOGIN_FAILED'
+        },
+        { status: 500 }
+      )
+    }
+
+    // Check Convex action result
+    if (!result || !result.success) {
+      const errorCode = result?.code || 'LOGIN_FAILED'
+      const errorMsg = result?.error || 'Login failed'
+      
+      // Use 401 for authentication failures, 404 for missing users
+      const status = errorCode === 'USER_NOT_FOUND' ? 404 : 401
+      
+      return NextResponse.json(
+        {
+          success: false,
+          error: errorMsg,
+          code: errorCode
+        },
+        { status }
       )
     }
 
@@ -86,13 +136,13 @@ export async function POST(request: NextRequest) {
     })
 
   } catch (error) {
-    console.error('[API /auth/login] Error:', error)
+    console.error('[API /auth/login] Unhandled error:', error)
     
     return NextResponse.json(
-      { 
-        success: false, 
+      {
+        success: false,
         error: 'Internal server error during login',
-        code: 'INTERNAL_ERROR' 
+        code: 'INTERNAL_ERROR'
       },
       { status: 500 }
     )
