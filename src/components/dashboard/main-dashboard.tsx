@@ -199,7 +199,14 @@ export function MainDashboard() {
   const [isGenerating, setIsGenerating] = useState(false)
   const [showResultDialog, setShowResultDialog] = useState(false)
   const [generationStages, setGenerationStages] = useState<GenerationStage[]>([])
-  const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview | null>(null)
+  // Artifact state with file data for download
+  const [currentArtifact, setCurrentArtifact] = useState<ArtifactPreview & {
+    fileData?: string
+    fileName?: string
+    fileSize?: number
+    mimeType?: string
+  } | null>(null)
+  const [lastResponseData, setLastResponseData] = useState<any>(null)
   const [dragActive, setDragActive] = useState(false)
   
   // Error handling with proper types (using our error system)
@@ -524,8 +531,8 @@ export function MainDashboard() {
     setGenerationStages(stages)
 
     try {
-      // Call PROXY API which calls Convex server-side (has access to AI secrets)
-      const response = await apiClient.generateArtifact({
+      // Call AGENT ROUTER for real document generation (produces downloadable files)
+      const response = await apiClient.agentGenerate({
         prompt,
         artifactType: detectArtifactType(prompt),
         outputFormat: selectedFormat === 'auto' ? undefined : selectedFormat,
@@ -597,9 +604,17 @@ export function MainDashboard() {
         }
       }
 
+      // Store full response data for download
+      setLastResponseData(data)
+
       // Create artifact preview from response or fallback
       // EXTRA DEFENSIVE: Handle any shape of response data safely
-      let artifact: ArtifactPreview
+      let artifact: ArtifactPreview & {
+        fileData?: string
+        fileName?: string
+        fileSize?: number
+        mimeType?: string
+      }
       
       try {
         const safeData = data && typeof data === 'object' ? data : {}
@@ -612,6 +627,11 @@ export function MainDashboard() {
           format: (safeArtifact.format && typeof safeArtifact.format === 'string') ? safeArtifact.format : (selectedFormat === 'auto' ? 'DOCX' : selectedFormat),
           status: 'completed' as const,
           createdAt: new Date(),
+          // Capture file data for download
+          fileData: (safeArtifact.fileData && typeof safeArtifact.fileData === 'string') ? safeArtifact.fileData : undefined,
+          fileName: (safeArtifact.fileName && typeof safeArtifact.fileName === 'string') ? safeArtifact.fileName : undefined,
+          fileSize: (safeArtifact.fileSize && typeof safeArtifact.fileSize === 'number') ? safeArtifact.fileSize : undefined,
+          mimeType: (safeArtifact.mimeType && typeof safeArtifact.mimeType === 'string') ? safeArtifact.mimeType : undefined,
         }
       } catch (constructErr) {
         // Ultimate fallback if anything goes wrong
@@ -663,6 +683,45 @@ export function MainDashboard() {
   }
 
   // Retry generation (for error recovery)
+  // Handle file download from base64 data
+  const handleDownload = () => {
+    if (!currentArtifact?.fileData) {
+      toast.warning('No file data available', {
+        description: 'The file could not be downloaded. Please try regenerating.'
+      })
+      return
+    }
+
+    try {
+      // Decode base64 to binary
+      const binaryString = atob(currentArtifact.fileData)
+      const bytes = new Uint8Array(binaryString.length)
+      for (let i = 0; i < binaryString.length; i++) {
+        bytes[i] = binaryString.charCodeAt(i)
+      }
+
+      // Create blob and trigger download
+      const blob = new Blob([bytes], { type: currentArtifact.mimeType || 'application/octet-stream' })
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = currentArtifact.fileName || `${currentArtifact.title || 'document'}.${(currentArtifact.format || 'docx').toLowerCase()}`
+      document.body.appendChild(link)
+      link.click()
+      document.body.removeChild(link)
+      URL.revokeObjectURL(url)
+
+      toast.success('Download started!', {
+        description: `${link.download} (${currentArtifact.fileSize ? `${(currentArtifact.fileSize / 1024).toFixed(1)} KB` : 'unknown size'})`
+      })
+    } catch (err) {
+      console.error('Download failed:', err)
+      toast.error('Download failed', {
+        description: 'Could not process the file. Please try again.'
+      })
+    }
+  }
+
   const handleRetryGeneration = () => {
     clearError()
     handleGenerate()
@@ -1186,9 +1245,13 @@ export function MainDashboard() {
 
               {/* Actions */}
               <div className="flex flex-wrap gap-3">
-                <Button className="gap-2 cursor-pointer hover:shadow-md transition-all min-h-[44px]">
+                <Button 
+                  className="gap-2 cursor-pointer hover:shadow-md transition-all min-h-[44px]"
+                  onClick={handleDownload}
+                  disabled={!currentArtifact?.fileData}
+                >
                   <Download className="h-4 w-4" />
-                  Download {currentArtifact.format || 'DOCX'}
+                  {currentArtifact?.fileData ? `Download ${currentArtifact.format}` : 'Download'}
                 </Button>
                 <Button variant="outline" className="gap-2 cursor-pointer hover:bg-accent transition-colors min-h-[44px]">
                   <Eye className="h-4 w-4" />

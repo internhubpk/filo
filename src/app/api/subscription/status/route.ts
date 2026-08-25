@@ -5,7 +5,8 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getConvexClient } from '@/lib/convex-server'
+
+const IS_DEV = process.env.NODE_ENV === 'development'
 
 export async function GET(request: NextRequest) {
   try {
@@ -20,7 +21,21 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Validate session
+    // ---- DEV MODE: Return unlimited access ----
+    if (IS_DEV || !process.env.NEXT_PUBLIC_CONVEX_URL) {
+      return NextResponse.json({
+        success: true,
+        data: {
+          hasActiveSubscription: true,
+          remainingGenerations: 999,
+          planLimit: 999,
+          planName: 'Pro (Dev)',
+        }
+      })
+    }
+
+    // ---- PRODUCTION: Use Convex ----
+    const { getConvexClient } = await import('@/lib/convex-server')
     const convex = getConvexClient()
     
     const session = await convex.query('auth:validateSession', { token })

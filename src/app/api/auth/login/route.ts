@@ -5,7 +5,8 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getConvexClient } from '@/lib/convex-server'
+
+const IS_DEV = process.env.NODE_ENV === 'development'
 
 export async function POST(request: NextRequest) {
   try {
@@ -29,7 +30,34 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Call Convex login action
+    // ---- DEV MODE: Bypass Convex, create local session ----
+    if (IS_DEV || !process.env.NEXT_PUBLIC_CONVEX_URL) {
+      console.log('[API /auth/login] DEV MODE: Skipping Convex auth')
+      
+      // Generate a dev session token
+      const array = new Uint8Array(32)
+      crypto.getRandomValues(array)
+      const sessionToken = Array.from(array)
+        .map((b) => b.toString(16).padStart(2, '0'))
+        .join('')
+
+      const name = email.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
+
+      return NextResponse.json({
+        success: true,
+        data: {
+          user: {
+            id: 'dev-user-' + Date.now(),
+            name,
+            email: email.toLowerCase().trim(),
+          },
+          sessionToken,
+        }
+      })
+    }
+
+    // ---- PRODUCTION: Use Convex ----
+    const { getConvexClient } = await import('@/lib/convex-server')
     const convex = getConvexClient()
     
     const result = await convex.action('auth:login', {

@@ -939,6 +939,17 @@ export interface SearchFacets {
   dateRange: { from: Date; to: Date }
 }
 
+// ==================== GENERATED CONTENT TYPES ====================
+
+export interface GeneratedComponent {
+  sectionId: string
+  componentId: string
+  type: ComponentType
+  content: unknown
+  style?: Record<string, unknown>
+  order: number
+}
+
 // ==================== ADMIN TYPES ====================
 
 export interface SystemHealth {

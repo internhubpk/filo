@@ -178,7 +178,7 @@ class ApiClient {
   // ==================== ARTIFACT ENDPOINTS ====================
 
   /**
-   * Generate a new artifact using AI
+   * Generate a new artifact using AI (legacy endpoint)
    */
   async generateArtifact(data: {
     prompt: string
@@ -187,6 +187,50 @@ class ApiClient {
     workspaceId?: string
   }): Promise<ApiResponse<Artifact>> {
     return this.request('/artifacts/generate', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    })
+  }
+
+  /**
+   * Generate a real downloadable document using Agent Router
+   * Returns file data (base64) along with artifact metadata
+   */
+  async agentGenerate(data: {
+    prompt: string
+    artifactType?: string
+    outputFormat?: string
+    workspaceId?: string
+    brandConfig?: {
+      companyName?: string
+      logoUrl?: string
+      footerText?: string
+      colors?: { primary?: string; secondary?: string; accent?: string }
+      fonts?: { heading?: string; body?: string }
+    }
+    files?: Array<{ filename: string; content: string; mimeType: string }>
+  }): Promise<ApiResponse<{
+    artifact: {
+      id: string
+      title: string
+      type: string
+      format: string
+      content: string
+      fileData?: string
+      fileSize?: number
+      fileName?: string
+      mimeType?: string
+    }
+    tokensUsed?: number
+    generationTimeMs?: number
+    stages?: Array<{
+      id: string
+      label: string
+      status: 'pending' | 'active' | 'completed' | 'error'
+      detail?: string
+    }>
+  }>> {
+    return this.request('/artifacts/agent-generate', {
       method: 'POST',
       body: JSON.stringify(data),
     })

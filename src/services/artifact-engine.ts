@@ -445,13 +445,16 @@ Respond with JSON containing the generated components array.`
     })
 
     const parsed = JSON.parse(response.content)
-    const components: GeneratedComponent[] = (parsed.components || []).map((comp: unknown, idx: number) => ({
-      sectionId: section.id,
-      componentId: crypto.randomUUID(),
-      type: (comp as Record<string, unknown>).type as ComponentType || 'PARAGRAPH',
-      content: comp,
-      order: idx,
-    }))
+    const components: GeneratedComponent[] = (parsed.components || []).map((comp: unknown, idx: number) => {
+      const c = comp as Record<string, unknown>
+      return {
+        sectionId: section.id,
+        componentId: crypto.randomUUID(),
+        type: (c.type as ComponentType) || 'PARAGRAPH',
+        content: c.content, // Extract the actual content field, not the whole object
+        order: idx,
+      }
+    })
 
     return {
       components,
@@ -688,10 +691,16 @@ export function prepareForRendering(
   specification: ArtifactSpecification,
   components: GeneratedComponent[]
 ): RenderableDocument {
+  // Normalize component types to uppercase for consistent rendering
+  const normalizedComponents = components.map(c => ({
+    ...c,
+    type: (c.type?.toUpperCase?.() || 'PARAGRAPH') as ComponentType,
+  }))
+
   // Group components by section
   const sections: RenderableSection[] = specification.sections.map(section => ({
     ...section,
-    components: components
+    components: normalizedComponents
       .filter(c => c.sectionId === section.id)
       .sort((a, b) => a.order - b.order)
       .map(c => ({

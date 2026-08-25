@@ -681,9 +681,9 @@ export class PptxRenderer implements DocumentRenderer {
       bold: true,
       align: 'center',
     })
-    
-    // Accent line
-    slide.addShape(pres.shapes.RECTANGLE, {
+
+    // Accent line using addShape with shapeType string
+    slide.addShape('rect', {
       x: 3.5,
       y: 4.2,
       w: 3,
@@ -767,9 +767,17 @@ export class PptxRenderer implements DocumentRenderer {
         case 'TABLE':
         case 'table':
           if (Array.isArray(comp.content) && comp.content.length > 0) {
-            const tableData = comp.content.map((row: any) =>
-              Array.isArray(row) ? row.map(String) : [String(row)]
-            )
+            const tableData = comp.content.map((row: any, rowIndex) => {
+              const cells = Array.isArray(row) ? row.map(String) : [String(row)]
+              // Style header row differently
+              if (rowIndex === 0) {
+                return cells.map(cell => ({
+                  text: cell,
+                  options: { bold: true, color: primaryColor, fontSize: 12, fill: { color: 'F0F4FF' } }
+                }))
+              }
+              return cells
+            })
             
             slide.addTable(tableData, {
               x: leftMargin,
@@ -778,10 +786,10 @@ export class PptxRenderer implements DocumentRenderer {
               fontSize: 11,
               fontFace: 'Arial',
               border: { pt: 0.5, color: 'CCCCCC' },
-              fill: { color: 'F8F9FA' },
               color: '333333',
               valign: 'middle',
               align: 'left',
+              autoPage: false,
             })
             
             // Estimate height based on rows
@@ -882,6 +890,201 @@ export class CsvRenderer implements DocumentRenderer {
   }
 }
 
+// ==================== TXT RENDERER ====================
+
+export class TxtRenderer implements DocumentRenderer {
+  readonly format: OutputFormat = 'TXT'
+
+  async render(document: RenderableDocument): Promise<RendererOutput> {
+    const lines: string[] = []
+
+    // Title
+    lines.push(document.specification.title)
+    lines.push('='.repeat(document.specification.title.length))
+    lines.push('')
+
+    if (document.specification.description) {
+      lines.push(document.specification.description)
+      lines.push('')
+    }
+
+    for (const section of document.sections) {
+      if (section.type !== 'cover') {
+        lines.push(section.title)
+        lines.push('-'.repeat(section.title.length))
+        lines.push('')
+      }
+
+      for (const comp of section.components) {
+        switch (comp.type) {
+          case 'HEADING':
+          case 'heading':
+            lines.push(typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content))
+            lines.push('')
+            break
+
+          case 'PARAGRAPH':
+          case 'text':
+            lines.push(typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content))
+            lines.push('')
+            break
+
+          case 'LIST':
+          case 'list':
+            if (Array.isArray(comp.content)) {
+              for (const item of comp.content) {
+                lines.push(`  - ${typeof item === 'string' ? item : JSON.stringify(item)}`)
+              }
+              lines.push('')
+            }
+            break
+
+          case 'TABLE':
+          case 'table':
+            if (Array.isArray(comp.content)) {
+              for (const row of comp.content) {
+                const cells = Array.isArray(row) ? row : [row]
+                lines.push('  ' + cells.map(c => String(c)).join(' | '))
+              }
+              lines.push('')
+            }
+            break
+
+          default:
+            lines.push(typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content))
+            lines.push('')
+        }
+      }
+    }
+
+    const textContent = lines.join('\n')
+    const filename = `${this.sanitizeFilename(document.specification.title)}.txt`
+
+    return {
+      buffer: Buffer.from(textContent, 'utf-8'),
+      filename,
+      mimeType: 'text/plain',
+      size: textContent.length,
+    }
+  }
+
+  private sanitizeFilename(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 50)
+  }
+}
+
+// ==================== HTML RENDERER ====================
+
+export class HtmlRenderer implements DocumentRenderer {
+  readonly format: OutputFormat = 'HTML'
+
+  async render(document: RenderableDocument): Promise<RendererOutput> {
+    const primaryColor = document.specification.design.colors?.primary || '#1a1a1a'
+    const accentColor = document.specification.design.colors?.accent || '#3B82F6'
+
+    let bodyHtml = ''
+
+    // Cover / Title section
+    bodyHtml += `<div style="text-align:center; padding: 48px 0 32px;">`
+    bodyHtml += `<h1 style="color:${primaryColor}; font-size:2em; margin-bottom:8px;">${this.escapeHtml(document.specification.title)}</h1>`
+    if (document.specification.description) {
+      bodyHtml += `<p style="color:#666; font-size:1.1em;">${this.escapeHtml(document.specification.description)}</p>`
+    }
+    bodyHtml += `</div>`
+
+    for (const section of document.sections) {
+      if (section.type === 'cover') continue
+
+      bodyHtml += `<section style="margin-bottom:32px;">`
+      bodyHtml += `<h2 style="color:${primaryColor}; border-bottom:2px solid ${accentColor}; padding-bottom:8px;">${this.escapeHtml(section.title)}</h2>`
+
+      for (const comp of section.components) {
+        switch (comp.type) {
+          case 'HEADING':
+          case 'heading':
+            bodyHtml += `<h3 style="color:#333; margin:16px 0 8px;">${this.escapeHtml(String(comp.content))}</h3>`
+            break
+
+          case 'PARAGRAPH':
+          case 'text':
+            bodyHtml += `<p style="line-height:1.7; color:#444; margin-bottom:12px;">${this.escapeHtml(String(comp.content))}</p>`
+            break
+
+          case 'LIST':
+          case 'list':
+            if (Array.isArray(comp.content)) {
+              bodyHtml += `<ul style="margin-bottom:12px; padding-left:24px;">`
+              for (const item of comp.content) {
+                bodyHtml += `<li style="line-height:1.6; margin-bottom:4px;">${this.escapeHtml(String(item))}</li>`
+              }
+              bodyHtml += `</ul>`
+            }
+            break
+
+          case 'TABLE':
+          case 'table':
+            if (Array.isArray(comp.content) && comp.content.length > 0) {
+              bodyHtml += `<table style="width:100%; border-collapse:collapse; margin-bottom:16px;">`
+              comp.content.forEach((row: any, rowIdx: number) => {
+                const cells = Array.isArray(row) ? row : [row]
+                const tag = rowIdx === 0 ? 'th' : 'td'
+                const bg = rowIdx === 0 ? `background:${primaryColor}; color:white;` : rowIdx % 2 === 0 ? 'background:#f8f9fa;' : ''
+                bodyHtml += `<tr>`
+                for (const cell of cells) {
+                  bodyHtml += `<${tag} style="${bg} padding:8px 12px; border:1px solid #ddd; text-align:left;">${this.escapeHtml(String(cell))}</${tag}>`
+                }
+                bodyHtml += `</tr>`
+              })
+              bodyHtml += `</table>`
+            }
+            break
+
+          default:
+            bodyHtml += `<p style="line-height:1.7; color:#444; margin-bottom:12px;">${this.escapeHtml(String(comp.content))}</p>`
+        }
+      }
+
+      bodyHtml += `</section>`
+    }
+
+    const fullHtml = `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${this.escapeHtml(document.specification.title)}</title>
+  <style>
+    body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 800px; margin: 0 auto; padding: 24px; color: #333; }
+  </style>
+</head>
+<body>
+${bodyHtml}
+</body>
+</html>`
+
+    const filename = `${this.sanitizeFilename(document.specification.title)}.html`
+
+    return {
+      buffer: Buffer.from(fullHtml, 'utf-8'),
+      filename,
+      mimeType: 'text/html',
+      size: fullHtml.length,
+    }
+  }
+
+  private escapeHtml(text: string): string {
+    return text
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+  }
+
+  private sanitizeFilename(name: string): string {
+    return name.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').substring(0, 50)
+  }
+}
+
 // ==================== RENDERER REGISTRY ====================
 
 export const renderers: Map<OutputFormat, DocumentRenderer> = new Map([
@@ -890,6 +1093,8 @@ export const renderers: Map<OutputFormat, DocumentRenderer> = new Map([
   ['XLSX', new XlsxRenderer()],
   ['PPTX', new PptxRenderer()],
   ['CSV', new CsvRenderer()],
+  ['TXT', new TxtRenderer()],
+  ['HTML', new HtmlRenderer()],
 ])
 
 /**
