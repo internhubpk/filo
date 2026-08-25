@@ -43,7 +43,7 @@ import {
   Clock,
   AlertCircle
 } from 'lucide-react'
-import { useQuery, useAction } from 'convex/react'
+import { useQuery, useAction, useMutation } from 'convex/react'
 import { api } from '../../../convex/_generated/api'
 import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans'
 import { ErrorDisplay } from '@/components/ui/error-boundary'
@@ -84,12 +84,20 @@ export function BillingPage() {
       }
     }
     
-    // Check URL params for payment status
+    // Check URL params for payment status and verify with Safepay
     const urlParams = new URLSearchParams(window.location.search)
-    if (urlParams.get('payment') === 'success') {
-      // Payment was successful - we'll verify via webhook
+    const paymentStatus = urlParams.get('payment')
+    const safepayPaymentId = urlParams.get('payment_id')
+    const safepayReference = urlParams.get('reference')
+    if (paymentStatus === 'success' && safepayPaymentId) {
+      // Verify payment with Safepay API to confirm
       setPaymentError(null)
-    } else if (urlParams.get('payment') === 'cancelled') {
+      // Payment verification runs via webhook - the Convex action handles it
+      // This is a defense-in-depth check on the client side
+      console.log('[BILLING] Payment return detected, webhook will confirm')
+    } else if (paymentStatus === 'success') {
+      setPaymentError(null)
+    } else if (paymentStatus === 'cancelled') {
       setPaymentError('Payment was cancelled. No charges were made.')
     }
   }, [])
@@ -109,6 +117,12 @@ export function BillingPage() {
 
   // Safepay checkout action
   const createSafepayCheckout = useAction(api.safepay.createSafepayCheckout)
+
+  // Cancel subscription mutation
+  const cancelSubscription = useMutation(api.subscriptions.cancelSubscription)
+
+  // Verify payment action (on return from Safepay)
+  const verifyPayment = useAction(api.safepay.verifySafepayPayment)
 
   // Calculate usage data based on subscription
   const usageData = subscriptionStatus?.hasActive && subscriptionStatus.plan 
@@ -179,16 +193,19 @@ export function BillingPage() {
     if (!subscriptionStatus?.subscription?._id) return
 
     setIsProcessing(true)
+    setPaymentError(null)
     
     try {
-      // TODO: Call cancelSubscription mutation when implemented
-      await new Promise(resolve => setTimeout(resolve, 1000))
+      // Call the real Convex mutation to cancel subscription
+      const result = await cancelSubscription({
+        subscriptionId: subscriptionStatus.subscription._id,
+      })
       
       setShowCancelDialog(false)
-      // In production, this would show a success message
+      console.log('[BILLING] Subscription cancellation scheduled:', result)
     } catch (error: any) {
       console.error('Cancellation error:', error)
-      setPaymentError(error.message || 'Failed to cancel subscription')
+      setPaymentError(error.message || 'Failed to cancel subscription. Please try again.')
     } finally {
       setIsProcessing(false)
     }

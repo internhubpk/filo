@@ -7,9 +7,39 @@
 BEFORE (Broken):
   Browser → Direct Convex Client → Circular Dependencies ❌
 
-AFTER (Working):  
+AFTER (Working):
   Browser → Next.js API Routes → ConvexHttpClient → Convex Cloud ✅
 ```
+
+### **SafePay Payment Gateway (Production-Ready)**
+```
+Payment Flow:
+  User clicks Subscribe → Convex createSafepayCheckout → Safepay Checkout Page
+  User pays → Safepay sends webhook → Next.js /api/webhooks/safepay
+  → Convex safepay-webhook:processSafepayWebhook → DB Updates (payments + subscriptions)
+  User redirected back → Billing page shows active subscription
+```
+
+---
+
+## 📁 FILES CREATED/MODIFIED FOR SAFEPAY PRODUCTION
+
+### **New Files**
+- `convex/safepay-webhook.ts` - Convex action for processing all webhook events
+  - Handles: payment.succeeded, payment.failed, payment.refunded,
+    payment.cancelled, subscription.canceled, subscription.ended,
+    subscription.unpaid, subscription.payment.succeeded/failed
+  - Idempotent: Records every event in webhookEvents table
+  - Updates payments table, creates/extends subscriptions, updates user plans
+
+### **Modified Files**
+- `src/app/api/webhooks/safepay/route.ts` - Complete production rewrite
+  - Was: Commented-out Convex integration, in-memory duplicate detection
+  - Now: Real Convex HTTP client calls, HMAC-SHA256 signature verification,
+    proper error handling, request ID tracking
+- `src/components/billing/billing-page.tsx` - Fixed cancel subscription
+  - Was: `setTimeout` stub with TODO comment
+  - Now: Real `cancelSubscription` Convex mutation call
 
 ---
 
@@ -228,3 +258,69 @@ apiClient.storeSession(user, token) // Saves to localStorage
 Run `npx convex deploy` on your machine, then test the app!
 
 Everything should work 100% now! 🚀
+
+---
+
+## 💳 SAFEPAY PRODUCTION SETUP
+
+### **Step 1: Get Safepay Credentials**
+1. Sign up at [getsafepay.com](https://getsafepay.com)
+2. Go to Dashboard → API Keys
+3. Copy your **Public Key** and **Secret Key**
+4. Go to Developers → Webhooks
+5. Create a webhook pointing to: `https://your-app.vercel.app/api/webhooks/safepay`
+6. Subscribe to events: `payment.succeeded`, `payment.failed`, `payment.cancelled`, `payment.refunded`
+7. Copy the **Webhook Signing Secret**
+
+### **Step 2: Configure Convex Secrets**
+
+Go to [Convex Dashboard](https://dashboard.convex.dev) → Your Project → Settings → Environment Variables:
+
+```
+SAFEPAY_SECRET_KEY=sp_sec_xxxxx     # From Safepay Dashboard
+SAFEPAY_WEBHOOK_SECRET=whsec_xxxxx  # From Webhook config
+SAFEPAY_SANDBOX=false                # Set to 'true' for testing
+```
+
+### **Step 3: Configure Vercel Environment Variables**
+
+```
+SAFEPAY_PUBLIC_KEY=sp_pub_xxxxx      # Safe to expose to browser
+SAFEPAY_SECRET_KEY=sp_sec_xxxxx       # For webhook signature verification (backup)
+SAFEPAY_WEBHOOK_SECRET=whsec_xxxxx    # For production HMAC verification
+SAFEPAY_SANDBOX=false
+CONVEX_URL=https://your-project.convex.cloud
+NEXT_PUBLIC_CONVEX_URL=https://your-project.convex.cloud
+NEXT_PUBLIC_APP_URL=https://your-app.vercel.app
+```
+
+### **Step 4: Deploy & Verify**
+
+```bash
+# 1. Deploy Convex backend (includes safepay-webhook.ts)
+npx convex deploy
+
+# 2. Push to GitHub (triggers Vercel auto-deploy)
+git add . && git commit -m "feat: production SafePay integration" && git push
+
+# 3. Verify webhook endpoint
+# Visit: https://your-app.vercel.app/api/webhooks/safepay
+# Should return: { "status": "ok", "fullyConfigured": true }
+```
+
+### **Step 5: Test Payment Flow**
+
+1. Go to `/billing` page
+2. Select a paid plan and click Subscribe
+3. Complete payment on Safepay checkout
+4. You should be redirected back with `?payment=success`
+5. Subscription should show as Active
+6. Check Convex dashboard: payments table should show `completed`, subscriptions table should show `active`
+
+### **Webhook Security (Production)**
+
+The webhook handler uses HMAC-SHA256 signature verification:
+- In **sandbox mode**: Basic structure validation (for development)
+- In **production mode**: Full HMAC-SHA256 verification using `SAFEPAY_WEBHOOK_SECRET`
+- All events are recorded in `webhookEvents` table for audit trail
+- Idempotent: Duplicate events are silently ignored
