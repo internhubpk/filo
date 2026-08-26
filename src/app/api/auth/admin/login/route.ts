@@ -126,7 +126,7 @@ export async function POST(request: NextRequest) {
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
       maxAge: SESSION_MAX_AGE,
-      path: '/admin',
+      path: '/',
     })
 
     console.log('[Admin Login] Successful for:', user.email, 'IP:', clientIP)

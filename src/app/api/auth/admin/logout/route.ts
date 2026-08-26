@@ -13,7 +13,7 @@ export async function DELETE() {
     secure: process.env.NODE_ENV === 'production',
     sameSite: 'lax',
     maxAge: 0,
-    path: '/admin',
+    path: '/',
   })
 
   return response

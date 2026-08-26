@@ -54,7 +54,7 @@ export function middleware(request: NextRequest) {
 
     const response = NextResponse.redirect(loginUrl)
     // Clear invalid cookie
-    response.cookies.delete({ name: 'admin_session', path: '/admin' })
+    response.cookies.delete({ name: 'admin_session', path: '/' })
     return response
   }
 
