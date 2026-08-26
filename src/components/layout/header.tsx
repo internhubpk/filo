@@ -14,7 +14,6 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu'
-import { Badge } from '@/components/ui/badge'
 import { 
   Search, 
   Bell, 
@@ -27,6 +26,11 @@ import {
   Menu,
   Plus
 } from 'lucide-react'
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from '@/components/ui/popover'
 import { useTheme } from 'next-themes'
 
 // User interface
@@ -162,12 +166,25 @@ export function Header({ onMobileMenuToggle, userData: propUserData }: HeaderPro
         </Button>
 
         {/* Notifications */}
-        <Button variant="ghost" size="icon" className="relative">
-          <Bell className="h-4 w-4" />
-          <Badge className="absolute -top-1 -right-1 h-4 w-4 p-0 flex items-center justify-center text-[10px] bg-red-500 text-white">
-            3
-          </Badge>
-        </Button>
+        <Popover>
+          <PopoverTrigger asChild>
+            <Button variant="ghost" size="icon" className="relative">
+              <Bell className="h-4 w-4" />
+            </Button>
+          </PopoverTrigger>
+          <PopoverContent align="end" className="w-80 p-0">
+            <div className="p-4 border-b">
+              <h3 className="font-semibold text-sm">Notifications</h3>
+            </div>
+            <div className="p-4 text-center">
+              <Bell className="h-8 w-8 mx-auto text-muted-foreground mb-2" />
+              <p className="text-sm text-muted-foreground">No new notifications</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                You&apos;ll see updates about your generations and account here.
+              </p>
+            </div>
+          </PopoverContent>
+        </Popover>
 
         {/* User menu */}
         <DropdownMenu>
