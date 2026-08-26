@@ -17,6 +17,8 @@ import type {
   GeneratedComponent,
 } from '@/types'
 import { renderArtifact, type RendererOutput } from './document-renderer'
+import { aiRouter } from './ai'
+import type { AiTask } from './ai'
 
 // ==================== TYPES ====================
 
@@ -69,10 +71,10 @@ export interface RouterStage {
 }
 
 // ==================== AI CONFIG ====================
-
-const AI_API_KEY = () => process.env.OPENROUTER_API_KEY || ''
-const AI_BASE_URL = () => process.env.OPENROUTER_BASE_URL || 'https://openrouter.ai/api/v1'
-const AI_MODEL = () => process.env.AI_MODEL || 'openai/gpt-4o-mini'
+// NOTE: Direct OpenRouter configuration was removed — all AI calls now flow
+// through the canonical aiRouter (src/services/ai/) with Gemini as the
+// primary provider and OpenRouter/OpenAI as optional fallbacks. The env vars
+// below are honored by the AI layer itself (see src/services/ai/*.ts).
 
 // ==================== AGENT ROUTER ====================
 
@@ -237,6 +239,7 @@ export class AgentRouter {
       temperature: 0.7,
       maxTokens: 4096,
       responseFormat: 'json_object',
+      task: 'reasoning',
     })
 
     return this.parsePlanResponse(response, artifactType, outputFormat)
@@ -563,6 +566,15 @@ Generate the actual content now. Be thorough and professional.`
 
   // ==================== AI CALL ====================
 
+  /**
+   * Single AI choke point for the AgentRouter.
+   *
+   * Previously this made a raw fetch() to OpenRouter with the key read here.
+   * It now delegates to the canonical aiRouter (src/services/ai/) which
+   * owns provider selection (Gemini primary), retry with backoff, provider
+   * fallback, timeouts, and the typed error hierarchy. Retry/fallback are
+   * centralized in the router so this method stays a thin adapter.
+   */
   private async callAI(
     systemPrompt: string,
     userPrompt: string,
@@ -570,47 +582,33 @@ Generate the actual content now. Be thorough and professional.`
       temperature?: number
       maxTokens?: number
       responseFormat?: string
+      task?: AiTask
     } = {}
   ): Promise<string> {
-    const apiKey = AI_API_KEY()
-    if (!apiKey) {
-      throw new Error('AI API key not configured')
-    }
-
-    const body: any = {
-      model: AI_MODEL(),
-      messages: [
-        { role: 'system', content: systemPrompt },
-        { role: 'user', content: userPrompt },
-      ],
-      temperature: options.temperature ?? 0.7,
-      max_tokens: options.maxTokens,
-    }
-
-    if (options.responseFormat === 'json_object') {
-      body.response_format = { type: 'json_object' }
-    }
-
-    const response = await fetch(`${AI_BASE_URL()}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${apiKey}`,
-        'HTTP-Referer': process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000',
-        'X-Title': 'Filo AI',
+    const response = await aiRouter.generate(
+      {
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        options: {
+          temperature: options.temperature ?? 0.7,
+          maxTokens: options.maxTokens,
+          responseFormat:
+            options.responseFormat === 'json_object'
+              ? { type: 'json' as const }
+              : { type: 'text' as const },
+        },
       },
-      body: JSON.stringify(body),
-    })
+      {
+        // Planning calls benefit from a reasoning-grade model; content
+        // generation uses the default generation profile.
+        task: options.task || 'generation',
+      }
+    )
 
-    if (!response.ok) {
-      const errorText = await response.text()
-      throw new Error(`AI provider error (${response.status}): ${errorText.substring(0, 200)}`)
-    }
-
-    const data = await response.json()
-    this.totalTokensUsed += data.usage?.total_tokens || 0
-
-    return data.choices?.[0]?.message?.content || '{}'
+    this.totalTokensUsed += response.usage.totalTokens
+    return response.content || '{}'
   }
 
   // ==================== STAGE MANAGEMENT ====================

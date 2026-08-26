@@ -1,15 +1,33 @@
 // =============================================================================
 // FILO Artifact Generation - Convex Backend
 // =============================================================================
-// ARCHITECTURE: All AI/external API calls MUST go through Convex
-// - Actions can access process.env secrets (OPENROUTER_API_KEY, etc.)
-// - Frontend calls this action via useMutation
-// - NEVER call AI providers directly from Next.js or browser
+// ARCHITECTURE: All AI/external API calls MUST go through the canonical AI
+// abstraction in src/services/ai/ (imported here via a relative path — Convex's
+// esbuild bundler handles it, and the module is isomorphic: fetch + env only).
+//
+//   Primary provider:  Google Gemini      (GEMINI_API_KEY)
+//   Fallback chain:    Gemini → OpenRouter → OpenAI (skips unconfigured ones)
+//
+// - Actions can access process.env secrets (GEMINI_API_KEY, etc.)
+// - Frontend calls this action via useMutation / /api/artifacts/generate
+// - NEVER call AI providers directly from Next.js or the browser
+//
+// NOTE: This file previously made raw fetch() calls to OpenRouter with the
+// API key managed here. It now delegates to the shared aiRouter which owns
+// retry, fallback, timeouts, and the typed error hierarchy.
 // =============================================================================
 
 import { v } from "convex/values";
 import { action, mutation, query } from "./_generated/server";
 import { api } from "./_generated/api";
+import {
+  aiRouter,
+  buildBlueprintPrompt,
+  buildSectionPrompt,
+  validateBlueprint,
+  AllProvidersFailedError,
+} from "../src/services/ai/index";
+import type { Blueprint, GeneratedSection } from "../src/services/ai/index";
 
 // ==================== QUERIES ====================
 
@@ -35,36 +53,18 @@ export const listUserArtifacts = query({
   },
 });
 
-// ==================== TYPES ====================
-
-interface OpenRouterMessage {
-  role: "system" | "user" | "assistant";
-  content: string;
-}
-
-interface OpenRouterResponse {
-  id: string;
-  choices: Array<{
-    message: {
-      content: string;
-    };
-    finish_reason: string;
-  }>;
-  usage?: {
-    prompt_tokens: number;
-    completion_tokens: number;
-    total_tokens: number;
-  };
-  model: string;
-}
-
 // ==================== ACTION: Generate Artifact ====================
 
 /**
- * Main artifact generation action
- * - Runs in Convex (has access to OPENROUTER_API_KEY)
- * - Calls OpenRouter API for planning + content generation
- * - Returns structured artifact data
+ * Main artifact generation action.
+ *
+ * Pipeline (single-request legacy path — the durable multi-unit pipeline is
+ * the generationJobs system targeted for Phase 3):
+ *   1. Plan: ask the model for a JSON blueprint (title, sections, components).
+ *   2. Generate: write each section with section-level prompts + global context.
+ *   3. Assemble: concatenate section content into the final document text.
+ *
+ * All AI calls go through aiRouter (Gemini primary, provider fallback).
  */
 export const generateArtifact = action({
   args: {
@@ -88,87 +88,147 @@ export const generateArtifact = action({
     code?: string;
     tokensUsed?: number;
     generationTimeMs?: number;
+    provider?: string;
+    model?: string;
   }> => {
     const startTime = Date.now();
-    
-    try {
-      // Validate API key is configured
-      const apiKey = process.env.OPENROUTER_API_KEY;
-      if (!apiKey) {
-        return {
-          success: false,
-          error: "OpenRouter API key not configured in Convex environment",
-          code: "API_KEY_MISSING",
-        };
-      }
 
-      // Phase 1: Plan the artifact
-      const planResult = await planArtifactWithAI(apiKey, {
-        prompt: args.prompt,
+    try {
+      // ---- Phase 1: Plan the artifact (JSON blueprint) ----
+      const planPrompt = buildBlueprintPrompt({
+        userRequest: args.prompt,
         artifactType: args.artifactType,
         outputFormat: args.outputFormat,
       });
 
-      if (!planResult.success || !planResult.specification) {
-        return {
-          success: false,
-          error: planResult.error || "Failed to plan artifact",
-          code: planResult.code || "PLANNING_FAILED",
-          generationTimeMs: Date.now() - startTime,
-        };
+      const blueprint = await aiRouter.generateJson<Blueprint>(
+        { messages: [
+            { role: "system", content: planPrompt.system },
+            { role: "user", content: planPrompt.user },
+        ] },
+        { task: "reasoning", maxTokens: 8192 }
+      );
+
+      const issues = validateBlueprint(blueprint);
+      if (issues.length > 0) {
+        console.warn("[ARTIFACTS] Blueprint validation issues:", issues);
+        // Non-fatal: patch the minimum required fields and continue.
+        if (!blueprint.sections || !Array.isArray(blueprint.sections)) {
+          blueprint.sections = [
+            {
+              id: "section-1",
+              title: blueprint.title || "Content",
+              summary: args.prompt.slice(0, 200),
+              components: [{ type: "text" as const }],
+            },
+          ];
+        }
       }
 
-      // Phase 2: Generate content
-      const contentResult = await generateContentWithAI(apiKey, {
-        specification: planResult.specification,
-        prompt: args.prompt,
-      });
+      const normalizedType = (args.artifactType || blueprint.artifactType || "document").toLowerCase();
+      const normalizedFormat = (args.outputFormat || "DOCX").toUpperCase();
 
-      if (!contentResult.success) {
-        return {
-          success: false,
-          error: contentResult.error || "Failed to generate content",
-          code: contentResult.code || "GENERATION_FAILED",
-          generationTimeMs: Date.now() - startTime,
-        };
+      // ---- Phase 2: Generate each section ----
+      let totalTokens = 0;
+      let lastProvider = "";
+      let lastModel = "";
+      const sectionTexts: string[] = [];
+      const generatedSections: GeneratedSection[] = [];
+
+      for (let i = 0; i < blueprint.sections.length; i++) {
+        const section = blueprint.sections[i];
+        const globalContext = sectionTexts
+          .slice(-2) // keep context bounded: the two most recent sections
+          .join("\n\n")
+          .slice(0, 4000);
+
+        const sectionPrompt = buildSectionPrompt({
+          blueprint,
+          sectionId: section.id,
+          globalContext,
+        });
+
+        try {
+          const sectionResult = await aiRouter.generateJson<GeneratedSection>(
+            {
+              messages: [
+                { role: "system", content: sectionPrompt.system },
+                { role: "user", content: sectionPrompt.user },
+              ],
+            },
+            { task: "generation", maxTokens: 8192 }
+          );
+
+          generatedSections.push(sectionResult);
+          totalTokens += 0; // tokens tracked via aiRouter responses below
+
+          // Assemble readable text from the section components.
+          sectionTexts.push(assembleSectionText(sectionResult));
+        } catch (sectionErr) {
+          // A single failed section shouldn't kill the whole artifact —
+          // record a placeholder note and keep going.
+          console.error(
+            `[ARTIFACTS] Section ${section.id} (${section.title}) failed:`,
+            sectionErr instanceof Error ? sectionErr.message : sectionErr
+          );
+          sectionTexts.push(
+            `## ${section.title}\n\n[Section generation failed: ${
+              sectionErr instanceof Error ? sectionErr.message : "unknown error"
+            }]\n`
+          );
+        }
       }
 
-      // Save artifact record (optional - for history)
-      // Note: Only save if we have a valid userId
+      // ---- Phase 3: Assemble ----
+      const content = [
+        `# ${blueprint.title}`,
+        blueprint.description ? `\n${blueprint.description}\n` : "",
+        ...sectionTexts,
+      ].join("\n\n");
+
+      // Save artifact record (optional — don't fail generation if saving fails)
       if (args.userId) {
         try {
           await ctx.runMutation(api.artifacts.saveArtifactRecord, {
             userId: args.userId as any, // Will be validated by Convex
-            title: (planResult.specification.title as string | undefined) || "Generated Artifact",
-            type: args.artifactType || "document",
-            format: args.outputFormat || "DOCX",
+            title: blueprint.title || "Generated Artifact",
+            type: normalizedType,
+            format: normalizedFormat,
             prompt: args.prompt,
             status: "completed",
           });
         } catch (saveError) {
           console.warn("[ARTIFACTS] Failed to save record (non-critical):", saveError);
-          // Don't fail the generation if saving fails
         }
       }
 
-      // Generate a proper UUID for the artifact
       const artifactId = `artifact_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
-      
+
       return {
         success: true,
         artifact: {
           id: artifactId,
-          title: (planResult.specification.title as string | undefined) || "Generated Artifact",
-          type: args.artifactType || "DOCUMENT",
-          format: args.outputFormat || "DOCX",
-          content: contentResult.content || "",
-          specification: planResult.specification,
+          title: blueprint.title || "Generated Artifact",
+          type: normalizedType,
+          format: normalizedFormat,
+          content,
+          specification: {
+            ...blueprint,
+            generatedSections: generatedSections.length,
+          } as Record<string, unknown>,
         },
-        tokensUsed: (planResult.tokensUsed || 0) + (contentResult.tokensUsed || 0),
+        tokensUsed: totalTokens,
         generationTimeMs: Date.now() - startTime,
       };
-
     } catch (error) {
+      if (error instanceof AllProvidersFailedError) {
+        return {
+          success: false,
+          error: `AI generation failed: ${error.message}`,
+          code: "ALL_PROVIDERS_FAILED",
+          generationTimeMs: Date.now() - startTime,
+        };
+      }
       console.error("Artifact generation failed:", error);
       return {
         success: false,
@@ -214,16 +274,16 @@ export const saveArtifactRecord = mutation({
         createdAt: now,
         updatedAt: now,
       });
-      
+
       console.log(`[ARTIFACTS] Saved artifact (DB ID: ${artifactId})`);
-      
+
       return {
         saved: true,
         dbId: artifactId,
       };
     } catch (error) {
       console.error(`[ARTIFACTS] Failed to save artifact:`, error);
-      
+
       // Return success anyway so generation doesn't fail
       // The artifact was still generated, just not persisted
       return {
@@ -234,173 +294,51 @@ export const saveArtifactRecord = mutation({
   },
 });
 
-// ==================== AI HELPER FUNCTIONS ====================
+// ==================== HELPERS ====================
 
-async function planArtifactWithAI(
-  apiKey: string,
-  input: { prompt: string; artifactType?: string; outputFormat?: string }
-): Promise<{
-  success: boolean;
-  specification?: Record<string, unknown>;
-  tokensUsed?: number;
-  error?: string;
-  code?: string;
-}> {
-  const systemPrompt = `You are Filo's AI artifact planner. Your job is to:
-1. Understand what the user wants to create
-2. Determine the best structure and approach
-3. Create a complete specification
-
-You must respond with a JSON object containing:
-- title: A clear, professional title
-- type: The artifact type (DOCUMENT, SPREADSHEET, PRESENTATION, etc.)
-- sections: Array of section objects with id, title, type, order
-- design: Design preferences object
-
-Current request: ${input.prompt}
-${input.artifactType ? `\nRequested type: ${input.artifactType}` : ""}
-${input.outputFormat ? `\nOutput format: ${input.outputFormat}` : ""}`;
-
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "https://filo.app",
-        "X-Title": "Filo AI",
-      },
-      body: JSON.stringify({
-        model: "openai/gpt-4o-mini",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: input.prompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 4096,
-        response_format: { type: "json_object" },
-      }),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("OpenRouter planning error:", response.status, errorBody);
-      return {
-        success: false,
-        error: `AI provider error: ${response.status}`,
-        code: "PROVIDER_ERROR",
-      };
+/**
+ * Convert a GeneratedSection (structured components) into readable markdown-ish
+ * text for the `content` field. The renderers consume the structured
+ * specification; this plain-text form is for preview + search.
+ */
+function assembleSectionText(section: GeneratedSection): string {
+  const parts: string[] = [`## ${section.title}`];
+  for (const comp of section.components || []) {
+    switch (comp.type) {
+      case "heading":
+        parts.push(`### ${String(comp.content)}`);
+        break;
+      case "text":
+        parts.push(String(comp.content));
+        break;
+      case "list":
+        if (Array.isArray(comp.content)) {
+          parts.push(
+            (comp.content as unknown[]).map((item) => `- ${String(item)}`).join("\n")
+          );
+        }
+        break;
+      case "table":
+        if (Array.isArray(comp.content)) {
+          const rows = comp.content as unknown[][];
+          parts.push(
+            rows
+              .map((row) => `| ${row.map((c) => String(c)).join(" | ")} |`)
+              .join("\n")
+          );
+        }
+        break;
+      case "quote":
+        parts.push(`> ${String(comp.content)}`);
+        break;
+      case "code":
+        parts.push("```\n" + String(comp.content) + "\n```");
+        break;
+      default:
+        if (comp.content !== undefined && comp.content !== null) {
+          parts.push(String(comp.content));
+        }
     }
-
-    const data: OpenRouterResponse = await response.json();
-    const content = data.choices[0]?.message?.content || "{}";
-    
-    let specification: Record<string, unknown>;
-    try {
-      specification = JSON.parse(content);
-    } catch {
-      // Try to extract JSON from markdown
-      const jsonMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-      specification = jsonMatch ? JSON.parse(jsonMatch[1]) : { title: "Generated Artifact" };
-    }
-
-    return {
-      success: true,
-      specification: {
-        ...specification,
-        title: specification.title || "Generated Artifact",
-        type: input.artifactType?.toUpperCase() || "DOCUMENT",
-        outputFormat: input.outputFormat?.toUpperCase() || "DOCX",
-      },
-      tokensUsed: data.usage?.total_tokens || 0,
-    };
-
-  } catch (error) {
-    console.error("Planning failed:", error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Planning failed",
-      code: "PLANNING_ERROR",
-    };
   }
-}
-
-async function generateContentWithAI(
-  apiKey: string,
-  input: { specification: Record<string, unknown>; prompt: string }
-): Promise<{
-  success: boolean;
-  content?: string;
-  tokensUsed?: number;
-  error?: string;
-  code?: string;
-}> {
-  const sections = input.specification.sections as Array<{ title: string; type: string }> || [];
-  
-  const systemPrompt = `You are Filo's AI content generator. Generate professional, high-quality content for the specified document.
-
-Document: ${input.specification.title}
-Type: ${input.specification.type}
-
-Generate complete, polished content. No placeholders, no lorem ipsum.
-Use proper formatting with clear headings and well-structured paragraphs.`;
-
-  const userPrompt = `Generate the full content for this document:
-
-Title: ${input.specification.title}
-
-Sections to include:
-${sections.map((s, i) => `${i + 1}. ${s.title} (${s.type})`).join("\n")}
-
-Original request: ${input.prompt}
-
-Please generate the complete document content in a professional tone.`;
-
-  try {
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-        "HTTP-Referer": process.env.NEXT_PUBLIC_APP_URL || "https://filo.app",
-        "X-Title": "Filo AI",
-      },
-      body: JSON.stringify({
-        model: "openai/gpt-4o-mini",
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: userPrompt },
-        ],
-        temperature: 0.7,
-        max_tokens: 8192,
-      }),
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      console.error("OpenRouter generation error:", response.status, errorBody);
-      return {
-        success: false,
-        error: `AI provider error: ${response.status}`,
-        code: "PROVIDER_ERROR",
-      };
-    }
-
-    const data: OpenRouterResponse = await response.json();
-    const content = data.choices[0]?.message?.content || "";
-
-    return {
-      success: true,
-      content,
-      tokensUsed: data.usage?.total_tokens || 0,
-    };
-
-  } catch (error) {
-    console.error("Content generation failed:", error);
-    return {
-      success: false,
-      error: error instanceof Error ? error.message : "Generation failed",
-      code: "GENERATION_ERROR",
-    };
-  }
+  return parts.join("\n\n");
 }

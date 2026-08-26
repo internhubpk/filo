@@ -9,7 +9,7 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run lint && npm run build",
-    "test": "node --test tests/unit/",
+    "test": "node --test tests/unit/*.test.js",
     "convex:dev": "convex dev",
     "convex:deploy": "convex deploy",
     "convex:seed": "convex run convex/seed.ts"
