@@ -1,30 +1,36 @@
 import { NextRequest, NextResponse } from 'next/server'
-import crypto from 'crypto'
-
-// Admin configuration
-const ADMIN_CONFIG = {
-  username: process.env.ADMIN_USERNAME || 'admin',
-  password: process.env.ADMIN_PASSWORD || 'admin_secure_password_2024',
-  sessionSecret: process.env.ADMIN_SESSION_SECRET || 'filo_admin_session_secret_key_2024',
-}
+import { api } from '@convex/_generated/api'
 
 // Session duration (24 hours)
 const SESSION_MAX_AGE = 24 * 60 * 60
 
-interface AdminSession {
-  username: string
-  loggedInAt: number
-  expiresAt: number
-  token: string
+// Simple rate limiting (in-memory - use Redis in production)
+const failedAttempts = new Map<string, { count: number; lastAttempt: number }>()
+
+async function isRateLimited(ip: string): Promise<boolean> {
+  const attempts = failedAttempts.get(ip)
+  if (!attempts) return false
+  if (Date.now() - attempts.lastAttempt > 15 * 60 * 1000) {
+    failedAttempts.delete(ip)
+    return false
+  }
+  return attempts.count >= 5
 }
 
-// POST /api/auth/admin/login - Admin login
+function recordFailedAttempt(ip: string): void {
+  const attempts = failedAttempts.get(ip) || { count: 0, lastAttempt: Date.now() }
+  failedAttempts.set(ip, {
+    count: attempts.count + 1,
+    lastAttempt: Date.now(),
+  })
+}
+
+// POST /api/auth/admin/login - Admin login against Convex database
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
     const { username, password } = body
 
-    // Validate input
     if (!username || !password) {
       return NextResponse.json(
         { error: 'Username and password are required', code: 'MISSING_CREDENTIALS' },
@@ -32,11 +38,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Rate limiting (simple in-memory, use Redis/Convex in production)
-    const clientIP = request.headers.get('x-forwarded-for') || 
-                     request.headers.get('x-real-ip') || 
+    const clientIP = request.headers.get('x-forwarded-for') ||
+                     request.headers.get('x-real-ip') ||
                      'unknown'
-    
+
     if (await isRateLimited(clientIP)) {
       return NextResponse.json(
         { error: 'Too many login attempts. Please try again later.', code: 'RATE_LIMITED' },
@@ -44,40 +49,79 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate credentials
-    const isValid = await verifyCredentials(username, password)
+    // Initialize Convex client
+    let convexClient: any
+    try {
+      const { getConvexClient } = await import('@/lib/convex-server')
+      convexClient = getConvexClient()
+    } catch (initError) {
+      console.error('[Admin Login] Failed to initialize Convex client:', initError)
+      return NextResponse.json(
+        { error: 'Authentication service unavailable. Please try again later.', code: 'SERVICE_UNAVAILABLE' },
+        { status: 503 }
+      )
+    }
 
-    if (!isValid) {
-      // Log failed attempt
-      console.warn('Admin login failed:', { 
-        username, 
-        ip: clientIP,
-        timestamp: new Date().toISOString() 
+    // Look up user by email (admin login uses email as username)
+    const input = username.trim().toLowerCase()
+    let user: any = null
+    try {
+      user = await convexClient.query(api.users.getUserByEmail, {
+        email: input,
       })
-      
-      recordFailedAttempt(clientIP)
+    } catch (queryError) {
+      console.error('[Admin Login] User lookup failed:', queryError)
+      return NextResponse.json(
+        { error: 'Login failed. Please try again.', code: 'LOGIN_FAILED' },
+        { status: 500 }
+      )
+    }
 
+    if (!user) {
+      console.log('[Admin Login] User not found:', input)
+      recordFailedAttempt(clientIP)
       return NextResponse.json(
         { error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' },
         { status: 401 }
       )
     }
 
-    // Create session
-    const session = createAdminSession(username)
-    
+    // Hash the password the same way as user login (SHA-256 with filo salt)
+    const encoder = new TextEncoder()
+    const data = encoder.encode(password + "filo_salt_2024_secret")
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+    const passwordHash = Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+
+    if (passwordHash !== (user.passwordHash || '')) {
+      console.log('[Admin Login] Invalid password for:', input)
+      recordFailedAttempt(clientIP)
+      return NextResponse.json(
+        { error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' },
+        { status: 401 }
+      )
+    }
+
+    // Generate session token (64-char hex for middleware compatibility)
+    const array = new Uint8Array(32)
+    crypto.getRandomValues(array)
+    const sessionToken = Array.from(array)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+
     // Create response with session cookie
     const response = NextResponse.json({
       success: true,
       message: 'Login successful',
       user: {
-        username: session.username,
+        username: user.email,
+        name: user.name,
         role: 'admin',
       },
     })
 
-    // Set HTTP-only secure cookie
-    response.cookies.set('admin_session', session.token, {
+    response.cookies.set('admin_session', sessionToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -85,85 +129,15 @@ export async function POST(request: NextRequest) {
       path: '/admin',
     })
 
-    console.log('Admin logged in successfully:', { 
-      username, 
-      ip: clientIP,
-      timestamp: new Date().toISOString() 
-    })
+    console.log('[Admin Login] Successful for:', user.email, 'IP:', clientIP)
 
     return response
 
   } catch (error) {
-    console.error('Admin login error:', error)
+    console.error('[Admin Login] Unhandled error:', error)
     return NextResponse.json(
       { error: 'Login failed', code: 'SERVER_ERROR' },
       { status: 500 }
     )
   }
-}
-
-// ==================== HELPER FUNCTIONS ====================
-
-async function verifyCredentials(username: string, password: string): Promise<boolean> {
-  // Timing-safe comparison to prevent timing attacks
-  try {
-    const usernameMatch = crypto.timingSafeEqual(
-      Buffer.from(username),
-      Buffer.from(ADMIN_CONFIG.username)
-    )
-
-    const passwordMatch = crypto.timingSafeEqual(
-      Buffer.from(password),
-      Buffer.from(ADMIN_CONFIG.password)
-    )
-
-    return usernameMatch && passwordMatch
-  } catch {
-    // Length mismatch - definitely not equal
-    return false
-  }
-}
-
-function createAdminSession(username: string): AdminSession {
-  const now = Date.now()
-  const tokenData = `${username}:${now}:${Math.random().toString(36)}`
-  
-  const token = crypto
-    .createHmac('sha256', ADMIN_CONFIG.sessionSecret)
-    .update(tokenData)
-    .digest('hex')
-
-  return {
-    username,
-    loggedInAt: now,
-    expiresAt: now + (SESSION_MAX_AGE * 1000),
-    token,
-  }
-}
-
-// Simple rate limiting (in-memory - use Redis in production)
-const failedAttempts = new Map<string, { count: number; lastAttempt: number }>()
-
-async function isRateLimited(ip: string): Promise<boolean> {
-  const attempts = failedAttempts.get(ip)
-  
-  if (!attempts) return false
-  
-  // Reset after 15 minutes
-  if (Date.now() - attempts.lastAttempt > 15 * 60 * 1000) {
-    failedAttempts.delete(ip)
-    return false
-  }
-
-  // Allow max 5 attempts per 15 minutes
-  return attempts.count >= 5
-}
-
-function recordFailedAttempt(ip: string): void {
-  const attempts = failedAttempts.get(ip) || { count: 0, lastAttempt: Date.now() }
-  
-  failedAttempts.set(ip, {
-    count: attempts.count + 1,
-    lastAttempt: Date.now(),
-  })
 }
