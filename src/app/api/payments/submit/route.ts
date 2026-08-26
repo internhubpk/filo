@@ -1,13 +1,25 @@
 // =============================================================================
-// POST /api/payments/create-checkout
+// POST /api/payments/submit
 // =============================================================================
-// Backwards-compatible route name, but the SafePay automatic checkout flow
-// has been removed. This now expects the user to have already paid outside
-// the app (bank transfer, EasyPaisa, JazzCash, etc.) and to be submitting
-// their transaction details for admin review.
+// Manual payment submission endpoint. Replaces the SafePay automatic
+// checkout flow.
 //
-// The body shape is the same as /api/payments/submit — this route is kept
-// so older client code that still POSTs to /create-checkout keeps working.
+// The user pays externally (bank transfer, EasyPaisa, JazzCash, etc.) and
+// submits their transaction details here. A `paymentVerification` record is
+// created in Convex with status="pending". An admin reviews it in /admin
+// and either approves (which activates the user account) or rejects (with
+// a reason that gets surfaced back to the user).
+//
+// Body:
+//   {
+//     planId?: "pro" | "team" | "department",     // optional - falls back to amount
+//     isYearly?: boolean,
+//     amount?: number,                            // optional override (PKR)
+//     paymentMethod: "bank_transfer" | "easypaisa" | "jazzcash" | "other",
+//     transactionId: string,                     // user-submitted TRX ID
+//     proofUrl?: string,                          // optional screenshot URL
+//     notes?: string                              // optional user notes
+//   }
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -43,6 +55,29 @@ export async function POST(request: NextRequest) {
           success: false,
           error: 'paymentMethod and transactionId are required',
           code: 'MISSING_PARAMS',
+        },
+        { status: 400 }
+      )
+    }
+
+    const validMethods = ['bank_transfer', 'easypaisa', 'jazzcash', 'other']
+    if (!validMethods.includes(paymentMethod)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `paymentMethod must be one of: ${validMethods.join(', ')}`,
+          code: 'INVALID_PAYMENT_METHOD',
+        },
+        { status: 400 }
+      )
+    }
+
+    if (typeof transactionId !== 'string' || transactionId.trim().length < 3) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'transactionId must be at least 3 characters',
+          code: 'INVALID_TRANSACTION_ID',
         },
         { status: 400 }
       )
@@ -90,12 +125,12 @@ export async function POST(request: NextRequest) {
       amount,
       currency: 'PKR',
       paymentMethod,
-      transactionId,
-      proofUrl: proofUrl ?? undefined,
-      notes: notes ?? undefined,
+      transactionId: transactionId.trim(),
+      proofUrl: proofUrl?.trim() || undefined,
+      notes: notes?.trim() || undefined,
     })
 
-    console.log(`[CREATE-CHECKOUT->SUBMIT] Verification ${verificationId} created for user ${userId}`)
+    console.log(`[PAYMENTS-SUBMIT] Verification ${verificationId} created for user ${userId}`)
 
     return NextResponse.json({
       success: true,
@@ -111,7 +146,7 @@ export async function POST(request: NextRequest) {
     })
 
   } catch (error) {
-    console.error('[CREATE-CHECKOUT] Unhandled error:', error)
+    console.error('[PAYMENTS-SUBMIT] Unhandled error:', error)
     return NextResponse.json(
       { success: false, error: 'Internal server error', code: 'INTERNAL_ERROR' },
       { status: 500 }

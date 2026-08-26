@@ -16,6 +16,11 @@ interface AuthResult {
     id: string;
     name: string;
     email: string;
+    // Manual activation flow: surface the user's status so the client
+    // can gate AI generation. New signups are "pending_activation" until
+    // an admin verifies payment and flips to "active".
+    status?: "pending_activation" | "active" | "suspended";
+    planId?: string | null;
   };
   sessionToken?: string;
   error?: string;
@@ -110,6 +115,11 @@ export const login = action({
           id: user._id,
           name: user.name,
           email: user.email,
+          // Surface activation status. New signups are "pending_activation";
+          // admin flips to "active" after verifying payment. The client uses
+          // this to decide whether to allow AI generation.
+          status: user.status ?? "pending_activation",
+          planId: user.planId ?? null,
         },
         sessionToken,
       };
@@ -196,6 +206,8 @@ export const signup = action({
           id: userId,
           name: args.name.trim(),
           email: normalizedEmail,
+          // New signups are pending_activation until admin verifies payment
+          status: "pending_activation",
         },
         sessionToken,
       };
@@ -243,6 +255,11 @@ export const validateSession = query({
         id: user._id,
         name: user.name,
         email: user.email,
+        // Surface activation status so the client can gate AI generation.
+        // New signups default to "pending_activation"; admin flips to
+        // "active" after manually verifying the payment.
+        status: user.status ?? "pending_activation",
+        planId: user.planId ?? null,
       } : null,
     };
   },

@@ -70,7 +70,8 @@ import {
   Sun,
   Crown,
   Shield,
-  HardDrive
+  HardDrive,
+  Clock
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { apiClient, User as ApiUser } from '@/lib/api-client'
@@ -90,6 +91,9 @@ interface User {
   email: string
   name: string
   avatar?: string
+  // Manual activation flow: "pending_activation" means admin hasn't
+  // verified the user's payment yet, so AI generation is blocked.
+  status?: 'pending_activation' | 'active' | 'suspended'
 }
 
 // ==================== CREATION TYPES ====================
@@ -223,12 +227,28 @@ export function MainDashboard() {
   }, [])
 
   // Subscription/Pro status check
+  // In the manual activation model, "hasActive" is true only when the
+  // user's status is "active" - i.e. an admin has approved their payment.
+  // pending_activation and suspended both block AI generation.
   const [showUpgradeModal, setShowUpgradeModal] = useState(false)
+  const [showPendingActivationModal, setShowPendingActivationModal] = useState(false)
   const [subscriptionStatus, setSubscriptionStatus] = useState<{
     hasActive: boolean
     remaining: number
     limit: number
     reason?: string
+    accountStatus?: 'pending_activation' | 'active' | 'suspended'
+    latestVerification?: {
+      id: string
+      status: 'pending' | 'approved' | 'rejected'
+      amount: number
+      currency: string
+      paymentMethod: string
+      transactionId: string
+      adminNote: string | null
+      createdAt: number
+      reviewedAt: number | null
+    } | null
   } | null>(null)
 
   // Load saved session on mount (REAL session, not fake user)
@@ -261,22 +281,46 @@ export function MainDashboard() {
       apiClient.getSubscriptionStatus()
         .then(response => {
           if (response.success && response.data) {
+            const accountStatus = (response.data as any).accountStatus ?? 'pending_activation'
+            const latestVerification = (response.data as any).latestVerification ?? null
             setSubscriptionStatus({
               hasActive: response.data.hasActiveSubscription,
               remaining: response.data.remainingGenerations,
               limit: response.data.planLimit,
+              accountStatus,
+              latestVerification,
               reason: undefined,
             })
+            // Also sync the user object's status field so the UI can branch
+            // on `user.status` directly (used for the banner + gating).
+            if (user.status !== accountStatus) {
+              setUser(prev => prev ? { ...prev, status: accountStatus } : prev)
+              // Persist back to localStorage so other components see it.
+              try {
+                const raw = localStorage.getItem('filo_session')
+                if (raw) {
+                  const parsed = JSON.parse(raw)
+                  if (parsed?.user) {
+                    parsed.user.status = accountStatus
+                    localStorage.setItem('filo_session', JSON.stringify(parsed))
+                  }
+                }
+              } catch {
+                // ignore
+              }
+            }
           }
         })
         .catch(err => {
           console.error('[DASHBOARD] Failed to load subscription:', err)
-          // Default to allow generation for MVP
+          // Default to pending - DO NOT silently unlock generation
           setSubscriptionStatus({
-            hasActive: true,
-            remaining: 999,
-            limit: 999,
-            reason: 'default',
+            hasActive: false,
+            remaining: 0,
+            limit: 0,
+            accountStatus: 'pending_activation',
+            latestVerification: null,
+            reason: 'status_check_failed',
           })
         })
     }
@@ -505,12 +549,30 @@ export function MainDashboard() {
       setError(ErrorCode.AUTH_UNAUTHORIZED)
       return
     }
-    
-    // REQUIRE PRO SUBSCRIPTION for AI generation
-    if (!subscriptionStatus?.hasActive) {
-      toast.subscriptionRequired()
-      setShowUpgradeModal(true)
-      setError(ErrorCode.SUBSCRIPTION_REQUIRED)
+
+    // MANUAL ACTIVATION GATE: user must have status === "active" before
+    // they can perform AI generation. New signups are "pending_activation"
+    // and only flip to "active" after an admin verifies their payment.
+    const accountStatus = user.status ?? subscriptionStatus?.accountStatus ?? 'pending_activation'
+    if (accountStatus !== 'active') {
+      toast.warning('Account pending activation', {
+        description:
+          accountStatus === 'suspended'
+            ? 'Your account has been suspended. Please contact support.'
+            : 'Please complete payment and wait for admin verification to unlock AI generation.',
+      })
+      setShowPendingActivationModal(true)
+      return
+    }
+
+    // Defensive: subscriptionStatus should agree with accountStatus.
+    // If it doesn't (e.g. stale), block generation rather than silently unlock.
+    if (!subscriptionStatus?.hasActive && subscriptionStatus?.reason !== 'status_check_failed') {
+      // Status check itself succeeded but says no active sub - block.
+      toast.warning('Account pending activation', {
+        description: 'Please complete payment and wait for admin verification to unlock AI generation.',
+      })
+      setShowPendingActivationModal(true)
       return
     }
 
@@ -1594,6 +1656,90 @@ export function MainDashboard() {
               Cancel anytime. 7-day free trial on all plans.
             </p>
           </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Pending Activation Modal - shown when user is logged in but their
+          account hasn't been activated by an admin yet. AI generation is
+          blocked until activation. */}
+      <Dialog open={showPendingActivationModal} onOpenChange={setShowPendingActivationModal}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-2xl flex items-center gap-3">
+              <div className="flex h-12 w-12 items-center justify-center rounded-xl bg-yellow-100 dark:bg-yellow-950">
+                <Clock className="h-6 w-6 text-yellow-600 dark:text-yellow-400" />
+              </div>
+              Account Pending Activation
+            </DialogTitle>
+            <DialogDescription className="text-base">
+              {user?.status === 'suspended'
+                ? 'Your account has been suspended. Please contact support to restore access.'
+                : 'Your payment is being reviewed by our admin team. AI generation will unlock automatically once your account is activated.'}
+            </DialogDescription>
+          </DialogHeader>
+
+          {/* Latest verification state - shows user what's happening */}
+          {subscriptionStatus?.latestVerification && (
+            <div className="rounded-lg border bg-muted/50 p-4 space-y-2">
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Submission status</span>
+                <Badge
+                  variant={
+                    subscriptionStatus.latestVerification.status === 'approved' ? 'default' :
+                    subscriptionStatus.latestVerification.status === 'rejected' ? 'destructive' :
+                    'secondary'
+                  }
+                  className="cursor-default"
+                >
+                  {subscriptionStatus.latestVerification.status}
+                </Badge>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Transaction ID</span>
+                <span className="font-mono text-xs">{subscriptionStatus.latestVerification.transactionId}</span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Amount</span>
+                <span className="font-medium">
+                  {subscriptionStatus.latestVerification.currency} {subscriptionStatus.latestVerification.amount.toLocaleString()}
+                </span>
+              </div>
+              <div className="flex justify-between text-sm">
+                <span className="text-muted-foreground">Method</span>
+                <span className="font-medium capitalize">{subscriptionStatus.latestVerification.paymentMethod.replace('_', ' ')}</span>
+              </div>
+              {subscriptionStatus.latestVerification.adminNote && (
+                <div className="border-t pt-2 mt-2">
+                  <p className="text-xs text-muted-foreground mb-1">Admin note:</p>
+                  <p className="text-sm font-medium">{subscriptionStatus.latestVerification.adminNote}</p>
+                </div>
+              )}
+            </div>
+          )}
+
+          <div className="space-y-2 py-2">
+            <Button
+              className="w-full cursor-pointer hover:shadow-md transition-all min-h-[48px]"
+              onClick={() => {
+                setShowPendingActivationModal(false)
+                window.location.href = '/billing'
+              }}
+            >
+              <CreditCard className="mr-2 h-5 w-5" />
+              {subscriptionStatus?.latestVerification ? 'View Billing' : 'Submit Payment'}
+            </Button>
+            <Button
+              variant="outline"
+              className="w-full cursor-pointer"
+              onClick={() => setShowPendingActivationModal(false)}
+            >
+              Close
+            </Button>
+          </div>
+
+          <p className="text-xs text-center text-muted-foreground">
+            Activations are typically completed within 24 hours of submission.
+          </p>
         </DialogContent>
       </Dialog>
     </div>

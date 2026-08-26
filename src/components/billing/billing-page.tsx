@@ -5,6 +5,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { Separator } from '@/components/ui/separator'
+import { Input } from '@/components/ui/input'
+import { Label } from '@/components/ui/label'
+import { Textarea } from '@/components/ui/textarea'
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select'
 import {
   Dialog,
   DialogContent,
@@ -41,12 +51,13 @@ import {
   Loader2,
   CheckCircle2,
   Clock,
-  AlertCircle
+  AlertCircle,
+  Send
 } from 'lucide-react'
-import { useQuery, useAction, useMutation } from 'convex/react'
-import { api } from '../../../convex/_generated/api'
 import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans'
 import { ErrorDisplay } from '@/components/ui/error-boundary'
+import { apiClient } from '@/lib/api-client'
+import { toast } from '@/lib/toast'
 
 // Icon mapping
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -56,6 +67,27 @@ const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
   Rocket,
   Shield,
   Sparkles,
+}
+
+// ==================== TYPES ====================
+
+interface VerificationRecord {
+  _id?: string
+  id?: string
+  userId: string
+  planId?: string
+  amount: number
+  currency: string
+  paymentMethod: string
+  transactionId: string
+  proofUrl?: string
+  notes?: string
+  status: 'pending' | 'approved' | 'rejected'
+  reviewedBy?: string
+  reviewedAt?: number
+  adminNote?: string | null
+  createdAt: number
+  updatedAt: number
 }
 
 // ==================== COMPONENT ====================
@@ -68,9 +100,62 @@ export function BillingPage() {
   const [isYearly, setIsYearly] = useState(false)
   const [paymentError, setPaymentError] = useState<string | null>(null)
 
+  // Manual payment submission dialog state
+  const [showSubmitDialog, setShowSubmitDialog] = useState(false)
+  const [submitForm, setSubmitForm] = useState({
+    paymentMethod: 'bank_transfer' as 'bank_transfer' | 'easypaisa' | 'jazzcash' | 'other',
+    transactionId: '',
+    proofUrl: '',
+    notes: '',
+  })
+
   // Get user session from localStorage (same as dashboard)
-  const [user, setUser] = useState<{ id: string; email: string; name: string } | null>(null)
-  
+  const [user, setUser] = useState<{ id: string; email: string; name: string; status?: string } | null>(null)
+
+  // Account status fetched from /api/subscription/status (manual activation model)
+  const [accountStatus, setAccountStatus] = useState<'pending_activation' | 'active' | 'suspended' | 'unknown'>('unknown')
+  const [latestVerification, setLatestVerification] = useState<VerificationRecord | null>(null)
+  const [verificationHistory, setVerificationHistory] = useState<VerificationRecord[]>([])
+
+  // Reload user's account + verification status from the API.
+  const refreshStatus = async () => {
+    if (!user) return
+    try {
+      const resp = await apiClient.getSubscriptionStatus()
+      if (resp.success && resp.data) {
+        const data = resp.data as any
+        setAccountStatus(data.accountStatus ?? 'pending_activation')
+        setLatestVerification(data.latestVerification ?? null)
+      }
+
+      const histResp = await apiClient.getPaymentStatus()
+      if (histResp.success && histResp.data) {
+        const h = histResp.data as any
+        // For now we only have the latest from the API; future iterations
+        // can extend the API to return the full history.
+        if (h.verificationId) {
+          setVerificationHistory([{
+            _id: h.verificationId,
+            userId: user.id,
+            amount: h.amount ?? 0,
+            currency: h.currency ?? 'PKR',
+            paymentMethod: h.paymentMethod ?? 'unknown',
+            transactionId: h.transactionId ?? '',
+            status: h.paymentStatus === 'none' ? 'pending' : (h.paymentStatus as any),
+            adminNote: h.adminNote ?? null,
+            reviewedAt: h.reviewedAt ?? null,
+            createdAt: h.createdAt ?? Date.now(),
+            updatedAt: h.reviewedAt ?? Date.now(),
+          }])
+        } else {
+          setVerificationHistory([])
+        }
+      }
+    } catch (err) {
+      console.error('[BILLING] Failed to refresh status:', err)
+    }
+  }
+
   useEffect(() => {
     const savedSession = localStorage.getItem('filo_session')
     if (savedSession) {
@@ -83,132 +168,115 @@ export function BillingPage() {
         // Invalid session
       }
     }
-    
-    // Check URL params for payment status and verify with Safepay
+
+    // Check URL params for legacy ?payment=success/cancelled and surface a
+    // friendly message (the manual flow doesn't use these redirects but old
+    // bookmarks may still hit them).
     const urlParams = new URLSearchParams(window.location.search)
     const paymentStatus = urlParams.get('payment')
-    const safepayPaymentId = urlParams.get('payment_id')
-    const safepayReference = urlParams.get('reference')
-    if (paymentStatus === 'success' && safepayPaymentId) {
-      // Verify payment with Safepay API to confirm
-      setPaymentError(null)
-      // Payment verification runs via webhook - the Convex action handles it
-      // This is a defense-in-depth check on the client side
-      console.log('[BILLING] Payment return detected, webhook will confirm')
-    } else if (paymentStatus === 'success') {
+    if (paymentStatus === 'success') {
       setPaymentError(null)
     } else if (paymentStatus === 'cancelled') {
       setPaymentError('Payment was cancelled. No charges were made.')
     }
   }, [])
 
-  // Query subscription status
-  const userIdForQuery = user?.id as any
-  const subscriptionStatus = useQuery(
-    api.subscriptions.hasActiveSubscription,
-    userIdForQuery ? { userId: userIdForQuery } : 'skip'
-  )
+  // Refresh account + verification status whenever user changes
+  useEffect(() => {
+    if (user) {
+      refreshStatus()
+    }
+  }, [user?.id])
 
-  // Query payment history
-  const payments = useQuery(
-    api.payments.getUserPayments,
-    userIdForQuery ? { userId: userIdForQuery } : 'skip'
-  )
-
-  // Safepay checkout action
-  const createSafepayCheckout = useAction(api.safepay.createSafepayCheckout)
-
-  // Cancel subscription mutation
-  const cancelSubscription = useMutation(api.subscriptions.cancelSubscription)
-
-  // Verify payment action (on return from Safepay)
-  const verifyPayment = useAction(api.safepay.verifySafepayPayment)
-
-  // Calculate usage data based on subscription
-  const usageData = subscriptionStatus?.hasActive && subscriptionStatus.plan 
+  // Calculate usage data - the manual activation model has no per-plan
+  // quota tracking yet, so we show a friendly placeholder for pending
+  // users and "unlimited" for active ones.
+  const usageData = accountStatus === 'active'
     ? {
-        aiGenerations: { 
-          used: 0, 
-          limit: subscriptionStatus.plan.maxAiGenerations, 
-          percentage: 0 
-        },
-        storage: { 
-          used: 0, 
-          limit: subscriptionStatus.plan.maxStorageMb, 
-          percentage: 0, 
-          unit: 'MB' 
-        },
-        artifacts: { 
-          used: 0, 
-          limit: 20, 
-          percentage: 0 
-        },
+        aiGenerations: { used: 0, limit: -1, percentage: 0 },
+        storage: { used: 0, limit: 5120, percentage: 0, unit: 'MB' },
+        artifacts: { used: 0, limit: -1, percentage: 0 },
       }
     : {
-        aiGenerations: { used: 23, limit: 50, percentage: 46 },
-        storage: { used: 34, limit: 100, percentage: 34, unit: 'MB' },
-        artifacts: { used: 8, limit: 20, percentage: 40 },
+        aiGenerations: { used: 0, limit: 0, percentage: 0 },
+        storage: { used: 0, limit: 0, percentage: 0, unit: 'MB' },
+        artifacts: { used: 0, limit: 0, percentage: 0 },
       }
 
-  const handleSubscribe = async (planId: string) => {
+  // Submit a manual payment. The user has already paid externally
+  // (bank transfer, EasyPaisa, JazzCash, etc.) and just needs to submit
+  // their transaction details for admin review.
+  const handleSubmitPayment = async (e: React.FormEvent) => {
+    e.preventDefault()
+
     if (!user) {
-      setPaymentError('Please log in to subscribe')
+      setPaymentError('Please log in to submit a payment')
+      return
+    }
+
+    if (!submitForm.transactionId.trim()) {
+      setPaymentError('Transaction ID is required')
       return
     }
 
     setIsProcessing(true)
     setPaymentError(null)
-    setSelectedPlan(planId)
-    
+
     try {
-      // Call Safepay checkout action
-      const result = await createSafepayCheckout({
-        userId: user.id as any,
-        planId: planId as any,
-        userEmail: user.email,
-        isYearly: isYearly,
+      const plan = selectedPlan
+        ? plans.find(p => p.id === selectedPlan)
+        : plans.find(p => !p.contactSales) || plans[0]
+
+      const amount = plan
+        ? (isYearly ? plan.price.yearly : plan.price.monthly)
+        : 0
+
+      const response = await apiClient.submitPayment({
+        planId: selectedPlan ?? plan?.id,
+        isYearly,
+        amount,
+        paymentMethod: submitForm.paymentMethod,
+        transactionId: submitForm.transactionId.trim(),
+        proofUrl: submitForm.proofUrl.trim() || undefined,
+        notes: submitForm.notes.trim() || undefined,
       })
 
-      if (!result.success) {
-        throw new Error(result.error?.message || 'Failed to create checkout')
+      if (!response.success) {
+        throw new Error(response.error || 'Failed to submit payment')
       }
 
-      // Redirect to Safepay checkout
-      if (result.data?.checkoutUrl) {
-        window.location.href = result.data.checkoutUrl
-      } else {
-        throw new Error('No checkout URL received')
-      }
+      // Reset form + close dialog
+      setSubmitForm({
+        paymentMethod: 'bank_transfer',
+        transactionId: '',
+        proofUrl: '',
+        notes: '',
+      })
+      setShowSubmitDialog(false)
+      setSelectedPlan(null)
 
+      toast.success('Payment submitted!', {
+        description: 'Your payment is being reviewed by our admin team. You will be able to generate documents once approved.',
+      })
+
+      // Refresh the verification status display
+      await refreshStatus()
     } catch (error: any) {
-      console.error('Subscription error:', error)
-      setPaymentError(error.message || 'Failed to initiate payment. Please try again.')
+      console.error('Payment submission error:', error)
+      setPaymentError(error.message || 'Failed to submit payment. Please try again.')
     } finally {
       setIsProcessing(false)
-      setSelectedPlan(null)
     }
   }
 
+  // No-op placeholder for the legacy "Cancel Plan" button. The manual
+  // activation flow doesn't have a subscription record to cancel; users
+  // who want to revoke access should contact support.
   const handleCancelSubscription = async () => {
-    if (!subscriptionStatus?.subscription?._id) return
-
-    setIsProcessing(true)
-    setPaymentError(null)
-    
-    try {
-      // Call the real Convex mutation to cancel subscription
-      const result = await cancelSubscription({
-        subscriptionId: subscriptionStatus.subscription._id,
-      })
-      
-      setShowCancelDialog(false)
-      console.log('[BILLING] Subscription cancellation scheduled:', result)
-    } catch (error: any) {
-      console.error('Cancellation error:', error)
-      setPaymentError(error.message || 'Failed to cancel subscription. Please try again.')
-    } finally {
-      setIsProcessing(false)
-    }
+    setShowCancelDialog(false)
+    toast.success('Subscription cancellation', {
+      description: 'Please contact support to cancel your subscription.',
+    })
   }
 
   const formatPrice = (amount: number): string => {
@@ -227,12 +295,16 @@ export function BillingPage() {
     switch (status.toLowerCase()) {
       case 'completed':
       case 'active':
+      case 'approved':
         return <Badge variant="default" className="bg-green-600 cursor-default"><CheckCircle2 className="h-3 w-3 mr-1" />{status}</Badge>
       case 'pending':
+      case 'pending_activation':
       case 'processing':
         return <Badge variant="secondary" className="cursor-default"><Clock className="h-3 w-3 mr-1" />{status}</Badge>
       case 'failed':
       case 'expired':
+      case 'rejected':
+      case 'suspended':
         return <Badge variant="destructive" className="cursor-default"><AlertCircle className="h-3 w-3 mr-1" />{status}</Badge>
       default:
         return <Badge variant="outline" className="cursor-default">{status}</Badge>
@@ -248,13 +320,13 @@ export function BillingPage() {
           Billing & Subscription
         </h1>
         <p className="mt-2 text-muted-foreground">
-          Manage your subscription, payment methods, and usage
+          Submit your payment for admin verification to unlock AI generation
         </p>
       </div>
 
       {/* Error Display */}
       {paymentError && (
-        <ErrorDisplay 
+        <ErrorDisplay
           error={paymentError}
           onDismiss={() => setPaymentError(null)}
         />
@@ -265,81 +337,140 @@ export function BillingPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Crown className="h-5 w-5" />
-            Current Plan
+            Account Status
           </CardTitle>
-          <CardDescription>Your subscription status and next billing date</CardDescription>
+          <CardDescription>Your activation status and pending payment submissions</CardDescription>
         </CardHeader>
         <CardContent>
           <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-4">
             <div className="flex items-center gap-4">
               <div className={`flex h-12 w-12 items-center justify-center rounded-lg ${
-                subscriptionStatus?.hasActive ? 'bg-primary/10' : 'bg-muted'
+                accountStatus === 'active' ? 'bg-primary/10' : 'bg-muted'
               }`}>
-                {subscriptionStatus?.plan ? (
+                {accountStatus === 'active' ? (
                   <Crown className="h-6 w-6 text-primary" />
                 ) : (
-                  <Zap className="h-6 w-6 text-muted-foreground" />
+                  <Clock className="h-6 w-6 text-muted-foreground" />
                 )}
               </div>
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-xl font-semibold">
-                    {subscriptionStatus?.plan?.name || 'Free Plan'}
+                    {accountStatus === 'active' ? 'Verified Account' : 'Pending Verification'}
                   </span>
-                  {getStatusBadge(subscriptionStatus?.hasActive ? 'active' : 'free')}
+                  {getStatusBadge(accountStatus === 'active' ? 'active' : 'pending_activation')}
                 </div>
                 <p className="text-sm text-muted-foreground mt-1">
-                  {subscriptionStatus?.hasActive ? (
-                    <>
-                      Next billing date:{' '}
-                      {subscriptionStatus.subscription?.currentPeriodEnd 
-                        ? formatDate(subscriptionStatus.subscription.currentPeriodEnd)
-                        : 'N/A'}
-                    </>
-                  ) : (
-                    <>Limited features - Upgrade to unlock full potential</>
-                  )}
+                  {accountStatus === 'active'
+                    ? 'Your account is active. You can generate documents.'
+                    : accountStatus === 'suspended'
+                      ? 'Your account is suspended. Contact support to restore access.'
+                      : 'Submit your payment below to unlock AI generation. An admin will verify it shortly.'}
                 </p>
               </div>
             </div>
-            
+
             <div className="flex gap-3">
-              {subscriptionStatus?.hasActive ? (
-                <Button 
-                  variant="outline"
-                  onClick={() => setShowCancelDialog(true)}
-                  disabled={isProcessing}
-                  className="cursor-pointer"
-                >
-                  {isProcessing ? (
-                    <>
-                      <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                      Processing...
-                    </>
-                  ) : (
-                    'Cancel Plan'
-                  )}
-                </Button>
-              ) : (
-                <Button 
-                  variant="outline"
-                  disabled
-                  className="cursor-pointer"
-                >
-                  Cancel Plan
-                </Button>
-              )}
-              <Button 
-                onClick={() => document.getElementById('plans')?.scrollIntoView({ behavior: 'smooth' })}
-                disabled={subscriptionStatus?.hasActive}
+              <Button
+                onClick={() => {
+                  const plan = plans.find(p => !p.contactSales)
+                  if (plan) {
+                    setSelectedPlan(plan.id)
+                    setShowSubmitDialog(true)
+                  }
+                }}
+                disabled={isProcessing || accountStatus === 'active'}
                 className="cursor-pointer"
               >
-                {subscriptionStatus?.hasActive ? 'Current Plan' : 'Upgrade Plan'}
+                {accountStatus === 'active' ? 'Active' : 'Submit Payment'}
+              </Button>
+              <Button
+                variant="outline"
+                onClick={refreshStatus}
+                disabled={isProcessing}
+                className="cursor-pointer"
+              >
+                <RefreshCw className={`h-4 w-4 mr-2 ${isProcessing ? 'animate-spin' : ''}`} />
+                Refresh
               </Button>
             </div>
           </div>
         </CardContent>
       </Card>
+
+      {/* Latest Verification Status - shown when user has submitted a payment */}
+      {latestVerification && (
+        <Card>
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2">
+              <CheckCircle2 className="h-5 w-5" />
+              Latest Payment Submission
+            </CardTitle>
+            <CardDescription>The most recent payment you submitted for verification</CardDescription>
+          </CardHeader>
+          <CardContent>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+              <div className="space-y-3">
+                <div>
+                  <p className="text-xs text-muted-foreground">Status</p>
+                  <div className="mt-1">{getStatusBadge(latestVerification.status)}</div>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Transaction ID</p>
+                  <p className="font-mono text-sm mt-1">{latestVerification.transactionId}</p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Payment Method</p>
+                  <p className="font-medium capitalize mt-1">{latestVerification.paymentMethod.replace('_', ' ')}</p>
+                </div>
+              </div>
+              <div className="space-y-3">
+                <div>
+                  <p className="text-xs text-muted-foreground">Amount</p>
+                  <p className="font-medium mt-1">
+                    {latestVerification.currency} {latestVerification.amount.toLocaleString()}
+                  </p>
+                </div>
+                <div>
+                  <p className="text-xs text-muted-foreground">Submitted</p>
+                  <p className="font-medium mt-1">{formatDate(latestVerification.createdAt)}</p>
+                </div>
+                {latestVerification.reviewedAt && (
+                  <div>
+                    <p className="text-xs text-muted-foreground">Reviewed</p>
+                    <p className="font-medium mt-1">{formatDate(latestVerification.reviewedAt)}</p>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {latestVerification.adminNote && (
+              <div className={`mt-4 p-4 rounded-lg border ${
+                latestVerification.status === 'approved'
+                  ? 'bg-green-50 dark:bg-green-950 border-green-200 dark:border-green-800'
+                  : latestVerification.status === 'rejected'
+                    ? 'bg-red-50 dark:bg-red-950 border-red-200 dark:border-red-800'
+                    : 'bg-muted/50'
+              }`}>
+                <p className="text-xs font-medium text-muted-foreground mb-1">Admin note:</p>
+                <p className="text-sm font-medium">{latestVerification.adminNote}</p>
+              </div>
+            )}
+
+            {latestVerification.status === 'rejected' && (
+              <div className="mt-4 flex items-start gap-3 p-4 rounded-lg bg-yellow-50 dark:bg-yellow-950 border border-yellow-200 dark:border-yellow-800">
+                <AlertTriangle className="h-5 w-5 text-yellow-600 shrink-0 mt-0.5" />
+                <div>
+                  <p className="text-sm font-medium">Payment rejected</p>
+                  <p className="text-sm text-muted-foreground mt-1">
+                    Please review the admin note above and submit a new payment with the correct details.
+                  </p>
+                </div>
+              </div>
+            )}
+          </CardContent>
+        </Card>
+      )}
 
       {/* Usage Overview */}
       <div className="grid gap-6 md:grid-cols-3">
@@ -356,16 +487,16 @@ export function BillingPage() {
                 <span>{usageData.aiGenerations.used} / {usageData.aiGenerations.limit === -1 ? 'Unlimited' : usageData.aiGenerations.limit}</span>
                 <span className="text-muted-foreground">{usageData.aiGenerations.limit === -1 ? 'Unlimited' : `${usageData.aiGenerations.percentage}%`}</span>
               </div>
-              {usageData.aiGenerations.limit !== -1 && (
+              {usageData.aiGenerations.limit !== -1 && usageData.aiGenerations.limit !== 0 && (
                 <div className="h-2 rounded-full bg-secondary overflow-hidden cursor-default">
-                  <div 
+                  <div
                     className="h-full rounded-full bg-primary transition-all"
                     style={{ width: `${usageData.aiGenerations.percentage}%` }}
                   />
                 </div>
               )}
               <p className="text-xs text-muted-foreground">
-                Resets on 1st of each month
+                {accountStatus === 'active' ? 'Unlocked' : 'Locked - submit payment to unlock'}
               </p>
             </div>
           </CardContent>
@@ -381,11 +512,11 @@ export function BillingPage() {
           <CardContent>
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>{usageData.storage.used} / {usageData.storage.limit} {usageData.storage.unit}</span>
+                <span>{usageData.storage.used} / {usageData.storage.limit === -1 ? 'Unlimited' : usageData.storage.limit} {usageData.storage.unit}</span>
                 <span className="text-muted-foreground">{usageData.storage.percentage}%</span>
               </div>
               <div className="h-2 rounded-full bg-secondary overflow-hidden cursor-default">
-                <div 
+                <div
                   className="h-full rounded-full bg-blue-500 transition-all"
                   style={{ width: `${usageData.storage.percentage}%` }}
                 />
@@ -407,11 +538,11 @@ export function BillingPage() {
           <CardContent>
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>{usageData.artifacts.used} / {usageData.artifacts.limit}</span>
+                <span>{usageData.artifacts.used} / {usageData.artifacts.limit === -1 ? 'Unlimited' : usageData.artifacts.limit}</span>
                 <span className="text-muted-foreground">{usageData.artifacts.percentage}%</span>
               </div>
               <div className="h-2 rounded-full bg-secondary overflow-hidden cursor-default">
-                <div 
+                <div
                   className="h-full rounded-full bg-green-500 transition-all"
                   style={{ width: `${usageData.artifacts.percentage}%` }}
                 />
@@ -428,7 +559,7 @@ export function BillingPage() {
       <div id="plans" className="scroll-mt-20">
         <div className="flex items-center justify-between mb-6">
           <h2 className="text-2xl font-bold">Available Plans</h2>
-          
+
           {/* Billing Toggle */}
           <div className="flex items-center gap-3 bg-muted p-1 rounded-lg">
             <button
@@ -455,11 +586,11 @@ export function BillingPage() {
           {plans.filter(p => !p.contactSales).map((plan) => {
             const IconComponent = iconMap[plan.icon] || Zap
             const price = isYearly ? plan.price.yearly : plan.price.monthly
-            const isActive = subscriptionStatus?.plan?._id === plan.id
-            
+            const isActive = accountStatus === 'active' && selectedPlan === plan.id
+
             return (
-              <Card 
-                key={plan.id} 
+              <Card
+                key={plan.id}
                 className={`relative flex flex-col transition-all duration-300 ${
                   plan.popular ? 'border-primary shadow-lg md:scale-[1.02]' : ''
                 } ${isActive ? 'ring-2 ring-primary bg-primary/5' : ''}`}
@@ -471,7 +602,7 @@ export function BillingPage() {
                     </Badge>
                   </div>
                 )}
-                
+
                 {isActive && (
                   <div className="absolute top-3 right-3 z-10">
                     <Badge variant="default" className="bg-green-600 cursor-default">
@@ -486,10 +617,10 @@ export function BillingPage() {
                   }`}>
                     <IconComponent className={`h-7 w-7 ${isActive ? 'text-primary' : plan.popular ? 'text-primary' : 'text-muted-foreground'}`} />
                   </div>
-                  
+
                   <CardTitle className="mt-4 text-xl">{plan.name}</CardTitle>
                   <CardDescription className="text-sm mt-2">{plan.description}</CardDescription>
-                  
+
                   <div className="mt-4">
                     {price === 0 ? (
                       <div className="text-center">
@@ -526,7 +657,7 @@ export function BillingPage() {
                         <span className="text-sm">{feature}</span>
                       </li>
                     ))}
-                    
+
                     {plan.limitations && plan.limitations.length > 0 && (
                       <>
                         <Separator className="my-2" />
@@ -540,30 +671,33 @@ export function BillingPage() {
                     )}
                   </ul>
 
-                  <Button 
+                  <Button
                     className="w-full mt-6 cursor-pointer hover:shadow-md transition-all min-h-[44px]"
                     variant={
-                      isActive 
-                        ? "outline" 
-                        : plan.popular 
-                          ? "default" 
+                      isActive
+                        ? "outline"
+                        : plan.popular
+                          ? "default"
                           : "secondary"
                     }
-                    disabled={isActive || isProcessing || price === 0}
-                    onClick={() => handleSubscribe(plan.id)}
+                    disabled={isProcessing || price === 0 || accountStatus === 'active'}
+                    onClick={() => {
+                      setSelectedPlan(plan.id)
+                      setShowSubmitDialog(true)
+                    }}
                   >
                     {isProcessing && selectedPlan === plan.id ? (
                       <>
                         <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                        Processing...
+                        Submitting...
                       </>
-                    ) : isActive ? (
-                      'Current Plan'
+                    ) : accountStatus === 'active' ? (
+                      'Verified'
                     ) : price === 0 ? (
-                      'Current Plan'
+                      'Free'
                     ) : (
                       <>
-                        Subscribe
+                        Submit Payment
                         <ArrowRight className="ml-2 h-4 w-4" />
                       </>
                     )}
@@ -575,54 +709,51 @@ export function BillingPage() {
         </div>
       </div>
 
-      {/* Payment History */}
+      {/* Verification History */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Calendar className="h-5 w-5" />
-            Payment History
+            Payment Submission History
           </CardTitle>
-          <CardDescription>Recent transactions and invoices</CardDescription>
+          <CardDescription>Your submitted payment verifications and their status</CardDescription>
         </CardHeader>
         <CardContent>
-          {payments && payments.length > 0 ? (
+          {verificationHistory.length > 0 ? (
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Date</TableHead>
-                  <TableHead>Description</TableHead>
+                  <TableHead>Transaction</TableHead>
                   <TableHead>Amount</TableHead>
+                  <TableHead>Method</TableHead>
                   <TableHead>Status</TableHead>
-                  <TableHead></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {payments.map((payment) => (
-                  <TableRow key={payment._id}>
+                {verificationHistory.map((v) => (
+                  <TableRow key={v._id || v.id}>
                     <TableCell className="text-sm">
-                      {formatDate(payment.createdAt)}
+                      {formatDate(v.createdAt)}
                     </TableCell>
                     <TableCell>
                       <div className="flex flex-col">
-                        <span className="font-medium text-sm">{payment.description}</span>
-                        {payment.metadata?.reference && (
-                          <span className="text-xs text-muted-foreground">
-                            Ref: {payment.metadata.reference}
+                        <span className="font-mono text-xs">{v.transactionId}</span>
+                        {v.adminNote && (
+                          <span className="text-xs text-muted-foreground mt-1">
+                            Note: {v.adminNote}
                           </span>
                         )}
                       </div>
                     </TableCell>
                     <TableCell className="font-medium">
-                      {formatPrice(payment.amount)} {payment.currency}
+                      {formatPrice(v.amount)} {v.currency}
+                    </TableCell>
+                    <TableCell className="capitalize text-sm">
+                      {v.paymentMethod.replace('_', ' ')}
                     </TableCell>
                     <TableCell>
-                      {getStatusBadge(payment.status)}
-                    </TableCell>
-                    <TableCell>
-                      <Button variant="ghost" size="sm" className="cursor-pointer">
-                        <Download className="h-4 w-4 mr-1" />
-                        Invoice
-                      </Button>
+                      {getStatusBadge(v.status)}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -631,16 +762,18 @@ export function BillingPage() {
           ) : (
             <div className="text-center py-8 text-muted-foreground">
               <CreditCard className="h-12 w-12 mx-auto mb-3 opacity-50" />
-              <p className="font-medium">No payment history yet</p>
+              <p className="font-medium">No payment submissions yet</p>
               <p className="text-sm mt-1">
-                Your transactions will appear here after you subscribe
+                Pick a plan above and submit your payment transaction details for admin verification.
               </p>
             </div>
           )}
         </CardContent>
       </Card>
 
-      {/* Cancel Subscription Dialog */}
+      {/* Cancel Subscription Dialog - kept for legacy UI but
+          the manual activation flow doesn't have a real subscription
+          record to cancel. */}
       <Dialog open={showCancelDialog} onOpenChange={setShowCancelDialog}>
         <DialogContent>
           <DialogHeader>
@@ -649,46 +782,20 @@ export function BillingPage() {
               Cancel Subscription?
             </DialogTitle>
             <DialogDescription>
-              Are you sure you want to cancel your Pro subscription? You will lose access to premium features at the end of your current billing period.
+              In the manual activation flow, account access is managed by our team. Please contact support to cancel your subscription.
             </DialogDescription>
           </DialogHeader>
-          
-          <div className="space-y-4 py-4">
-            <div className="bg-muted/50 rounded-lg p-4 space-y-2">
-              <div className="flex items-center gap-2 text-sm">
-                <X className="h-4 w-4 text-red-500" />
-                Unlimited AI generation will be disabled
-              </div>
-              <div className="flex items-center gap-2 text-sm">
-                <X className="h-4 w-4 text-red-500" />
-                Storage will be reduced to free tier limits
-              </div>
-              <div className="flex items-center gap-2 text-sm">
-                <X className="h-4 w-4 text-red-500" />
-                Priority support will be removed
-              </div>
-            </div>
-            
-            <p className="text-sm text-muted-foreground">
-              You will retain access until{' '}
-              <strong>
-                {subscriptionStatus?.subscription?.currentPeriodEnd 
-                  ? formatDate(subscriptionStatus.subscription.currentPeriodEnd)
-                  : 'the end of your billing period'}
-              </strong>.
-            </p>
-          </div>
 
           <DialogFooter className="gap-2 sm:gap-0">
-            <Button 
-              variant="outline" 
+            <Button
+              variant="outline"
               onClick={() => setShowCancelDialog(false)}
               className="cursor-pointer"
             >
-              Keep Subscription
+              Close
             </Button>
-            <Button 
-              variant="destructive" 
+            <Button
+              variant="destructive"
               onClick={handleCancelSubscription}
               disabled={isProcessing}
               className="cursor-pointer"
@@ -699,10 +806,156 @@ export function BillingPage() {
                   Cancelling...
                 </>
               ) : (
-                'Yes, Cancel'
+                'Contact Support'
               )}
             </Button>
           </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      {/* Manual Payment Submission Dialog */}
+      <Dialog open={showSubmitDialog} onOpenChange={(open) => {
+        setShowSubmitDialog(open)
+        if (!open) {
+          setSubmitForm({
+            paymentMethod: 'bank_transfer',
+            transactionId: '',
+            proofUrl: '',
+            notes: '',
+          })
+          setSelectedPlan(null)
+        }
+      }}>
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="text-xl flex items-center gap-2">
+              <Send className="h-5 w-5 text-primary" />
+              Submit Payment for Verification
+            </DialogTitle>
+            <DialogDescription>
+              Pay externally (bank transfer, EasyPaisa, JazzCash) then submit your transaction details below. An admin will review and activate your account shortly.
+            </DialogDescription>
+          </DialogHeader>
+
+          <form onSubmit={handleSubmitPayment} className="space-y-4 mt-2">
+            {/* Plan summary */}
+            {selectedPlan && (() => {
+              const plan = plans.find(p => p.id === selectedPlan)
+              if (!plan) return null
+              const price = isYearly ? plan.price.yearly : plan.price.monthly
+              return (
+                <div className="rounded-lg border bg-muted/50 p-3 space-y-1">
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Plan</span>
+                    <span className="font-medium">{plan.name}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Billing</span>
+                    <span className="font-medium">{isYearly ? 'Yearly' : 'Monthly'}</span>
+                  </div>
+                  <div className="flex justify-between text-sm">
+                    <span className="text-muted-foreground">Amount due</span>
+                    <span className="font-bold text-primary">{formatPrice(price)}</span>
+                  </div>
+                </div>
+              )
+            })()}
+
+            {/* Payment method */}
+            <div className="space-y-2">
+              <Label htmlFor="payment-method">Payment Method</Label>
+              <Select
+                value={submitForm.paymentMethod}
+                onValueChange={(v) => setSubmitForm(prev => ({ ...prev, paymentMethod: v as any }))}
+              >
+                <SelectTrigger id="payment-method" className="cursor-pointer">
+                  <SelectValue placeholder="Select payment method" />
+                </SelectTrigger>
+                <SelectContent>
+                  <SelectItem value="bank_transfer" className="cursor-pointer">Bank Transfer</SelectItem>
+                  <SelectItem value="easypaisa" className="cursor-pointer">EasyPaisa</SelectItem>
+                  <SelectItem value="jazzcash" className="cursor-pointer">JazzCash</SelectItem>
+                  <SelectItem value="other" className="cursor-pointer">Other</SelectItem>
+                </SelectContent>
+              </Select>
+            </div>
+
+            {/* Transaction ID */}
+            <div className="space-y-2">
+              <Label htmlFor="transaction-id">Transaction ID / Reference *</Label>
+              <Input
+                id="transaction-id"
+                type="text"
+                placeholder="e.g. TRX1234567890"
+                value={submitForm.transactionId}
+                onChange={(e) => setSubmitForm(prev => ({ ...prev, transactionId: e.target.value }))}
+                required
+                minLength={3}
+                className="cursor-text"
+              />
+              <p className="text-xs text-muted-foreground">
+                Enter the reference number from your payment confirmation.
+              </p>
+            </div>
+
+            {/* Proof URL (optional) */}
+            <div className="space-y-2">
+              <Label htmlFor="proof-url">Receipt/Screenshot URL (optional)</Label>
+              <Input
+                id="proof-url"
+                type="url"
+                placeholder="https://..."
+                value={submitForm.proofUrl}
+                onChange={(e) => setSubmitForm(prev => ({ ...prev, proofUrl: e.target.value }))}
+                className="cursor-text"
+              />
+              <p className="text-xs text-muted-foreground">
+                Link to a screenshot of your payment receipt (Google Drive, Dropbox, etc.).
+              </p>
+            </div>
+
+            {/* Notes (optional) */}
+            <div className="space-y-2">
+              <Label htmlFor="notes">Additional Notes (optional)</Label>
+              <Textarea
+                id="notes"
+                placeholder="Any additional information for the admin reviewer..."
+                value={submitForm.notes}
+                onChange={(e) => setSubmitForm(prev => ({ ...prev, notes: e.target.value }))}
+                rows={3}
+                className="cursor-text"
+              />
+            </div>
+
+            <DialogFooter className="gap-2 sm:gap-0">
+              <Button
+                type="button"
+                variant="outline"
+                onClick={() => setShowSubmitDialog(false)}
+                disabled={isProcessing}
+                className="cursor-pointer"
+              >
+                Cancel
+              </Button>
+              <Button
+                type="submit"
+                disabled={isProcessing || !submitForm.transactionId.trim()}
+                className="cursor-pointer"
+              >
+                {isProcessing ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Submitting...
+                  </>
+                ) : (
+                  <>
+                    <Send className="mr-2 h-4 w-4" />
+                    Submit for Verification
+                  </>
+                )}
+              </Button>
+            </DialogFooter>
+          </form>
         </DialogContent>
       </Dialog>
     </div>

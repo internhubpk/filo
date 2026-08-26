@@ -58,31 +58,15 @@ export default function PricingPage() {
       return
     }
 
+    // In the manual admin-verified payment flow we don't redirect to a
+    // SafePay checkout anymore. Send the user to /billing where they can
+    // pick a plan and submit their payment transaction details for admin
+    // verification. The ?plan= query preserves their selection.
     setIsRedirecting(planId)
-    const loadingId = toast.loading('Creating your secure checkout...')
-
-    try {
-      const response = await apiClient.createCheckout({
-        planId,
-        isYearly,
-      })
-
-      toast.dismiss(loadingId)
-
-      if (!response.success || !response.data?.checkoutUrl) {
-        toast.error('Checkout failed', response.error || 'Please try again')
-        setIsRedirecting(null)
-        return
-      }
-
-      // Redirect to Safepay checkout
-      toast.success('Redirecting to payment...', `You will be redirected to Safepay to complete your ${isYearly ? 'yearly' : 'monthly'} subscription.`)
-      window.location.href = response.data.checkoutUrl
-    } catch (err) {
-      toast.dismiss(loadingId)
-      toast.error('Something went wrong', 'Please try again or contact support')
-      setIsRedirecting(null)
-    }
+    toast.success('Opening billing...', {
+      description: 'Submit your payment transaction details for admin verification.',
+    })
+    router.push(`/billing?plan=${planId}`)
   }
 
   const handleContactSales = () => {
