@@ -185,7 +185,6 @@ export default function AdminPage() {
     id: string
     name: string
     email: string
-    role: 'admin' | 'user'
     status: 'pending_activation' | 'active' | 'suspended'
     planId: string | null
     activatedAt: number | null
@@ -316,33 +315,6 @@ export default function AdminPage() {
     } finally {
       setIsSaving(false)
       setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
-    }
-  }
-
-  // Toggle user role (admin ↔ user)
-  const handleToggleRole = async (user: AdminUser) => {
-    const newRole = user.role === 'admin' ? 'user' : 'admin'
-    const actionText = newRole === 'admin' ? 'promote to admin' : 'demote from admin'
-    if (!confirm(`Are you sure you want to ${actionText} ${user.name} (${user.email})?`)) return
-
-    setIsSaving(true)
-    try {
-      const resp = await fetch(`/api/admin/users/${user.id}/set-role`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: newRole }),
-      })
-      const data = await resp.json()
-      if (!data.success) {
-        showNotification('error', data.error || `Failed to ${actionText}`)
-      } else {
-        showNotification('success', `${user.name} is now ${newRole}${newRole === 'admin' ? ' (auto-activated)' : ''}`)
-        await refreshVerifications()
-      }
-    } catch (err: any) {
-      showNotification('error', err.message || `Failed to ${actionText}`)
-    } finally {
-      setIsSaving(false)
     }
   }
 
@@ -730,7 +702,7 @@ export default function AdminPage() {
             )}
 
             {/* Stats row */}
-            <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 md:gap-4">
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
               <Card className="p-3 md:p-6">
                 <CardContent className="pt-0 p-0">
                   <div className="flex justify-between items-center">
@@ -778,19 +750,6 @@ export default function AdminPage() {
                       </p>
                     </div>
                     <UserX className="h-6 w-6 md:h-8 md:w-8 text-red-500" />
-                  </div>
-                </CardContent>
-              </Card>
-              <Card className="p-3 md:p-6">
-                <CardContent className="pt-0 p-0">
-                  <div className="flex justify-between items-center">
-                    <div>
-                      <p className="text-xs text-muted-foreground">Admins</p>
-                      <p className="text-xl md:text-2xl font-bold text-purple-600">
-                        {allUsers.filter(u => u.role === 'admin').length}
-                      </p>
-                    </div>
-                    <Shield className="h-6 w-6 md:h-8 md:w-8 text-purple-500" />
                   </div>
                 </CardContent>
               </Card>
@@ -1054,27 +1013,17 @@ export default function AdminPage() {
                         <TableRow>
                           <TableHead className="w-[200px]">Name</TableHead>
                           <TableHead className="w-[220px]">Email</TableHead>
-                          <TableHead className="w-[80px]">Role</TableHead>
                           <TableHead className="w-[120px]">Status</TableHead>
                           <TableHead className="w-[100px]">Plan</TableHead>
                           <TableHead className="w-[120px]">Activated</TableHead>
-                          <TableHead className="w-[250px] text-right">Actions</TableHead>
+                          <TableHead className="w-[180px] text-right">Actions</TableHead>
                         </TableRow>
                       </TableHeader>
                       <TableBody>
                         {allUsers.map((u) => (
-                          <TableRow key={u.id} className={u.role === 'admin' ? 'bg-primary/5' : ''}>
+                          <TableRow key={u.id}>
                             <TableCell className="font-medium text-sm">{u.name}</TableCell>
                             <TableCell className="text-sm text-muted-foreground">{u.email}</TableCell>
-                            <TableCell>
-                              {u.role === 'admin' ? (
-                                <Badge className="bg-purple-600 cursor-default gap-1">
-                                  <Shield className="h-3 w-3" /> admin
-                                </Badge>
-                              ) : (
-                                <Badge variant="outline" className="cursor-default text-xs">user</Badge>
-                              )}
-                            </TableCell>
                             <TableCell>
                               {u.status === 'active' ? (
                                 <Badge className="bg-green-600 cursor-default">active</Badge>
@@ -1089,49 +1038,36 @@ export default function AdminPage() {
                               {u.activatedAt ? new Date(u.activatedAt).toLocaleDateString('en-PK', { month: 'short', day: 'numeric' }) : '—'}
                             </TableCell>
                             <TableCell className="text-right">
-                              <div className="flex justify-end gap-1.5 flex-wrap">
-                                {u.role !== 'admin' ? (
-                                  <Button
-                                    size="sm"
-                                    variant={u.status === 'active' ? 'outline' : 'default'}
-                                    disabled={u.status === 'active' || isSaving}
-                                    className="gap-1.5 cursor-pointer h-8 text-xs"
-                                    onClick={() => setUserActionDialog({
-                                      open: true,
-                                      user: u,
-                                      action: 'activate',
-                                      note: '',
-                                    })}
-                                  >
-                                    <UserCheck className="h-3.5 w-3.5" /> Activate
-                                  </Button>
-                                ) : null}
-                                {u.status !== 'suspended' && u.role !== 'admin' && (
-                                  <Button
-                                    size="sm"
-                                    variant="outline"
-                                    disabled={isSaving}
-                                    className="gap-1.5 cursor-pointer h-8 text-xs ml-1.5 text-red-600 hover:text-red-700 hover:bg-red-50"
-                                    onClick={() => setUserActionDialog({
-                                      open: true,
-                                      user: u,
-                                      action: 'suspend',
-                                      note: '',
-                                    })}
-                                  >
-                                    <UserX className="h-3.5 w-3.5" /> Suspend
-                                  </Button>
-                                )}
+                              <Button
+                                size="sm"
+                                variant={u.status === 'active' ? 'outline' : 'default'}
+                                disabled={u.status === 'active' || isSaving}
+                                className="gap-1.5 cursor-pointer h-8 text-xs"
+                                onClick={() => setUserActionDialog({
+                                  open: true,
+                                  user: u,
+                                  action: 'activate',
+                                  note: '',
+                                })}
+                              >
+                                <UserCheck className="h-3.5 w-3.5" /> Activate
+                              </Button>
+                              {u.status !== 'suspended' && (
                                 <Button
                                   size="sm"
-                                  variant={u.role === 'admin' ? 'outline' : 'default'}
+                                  variant="outline"
                                   disabled={isSaving}
-                                  className={`gap-1.5 cursor-pointer h-8 text-xs ${u.role === 'admin' ? 'text-purple-700 border-purple-300 hover:bg-purple-50' : 'bg-purple-600 hover:bg-purple-700'}`}
-                                  onClick={() => handleToggleRole(u)}
+                                  className="gap-1.5 cursor-pointer h-8 text-xs ml-1.5 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                  onClick={() => setUserActionDialog({
+                                    open: true,
+                                    user: u,
+                                    action: 'suspend',
+                                    note: '',
+                                  })}
                                 >
-                                  <Shield className="h-3.5 w-3.5" /> {u.role === 'admin' ? 'Remove Admin' : 'Make Admin'}
+                                  <UserX className="h-3.5 w-3.5" /> Suspend
                                 </Button>
-                              </div>
+                              )}
                             </TableCell>
                           </TableRow>
                         ))}

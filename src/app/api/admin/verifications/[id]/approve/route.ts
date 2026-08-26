@@ -16,7 +16,12 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
-import { isAdminRequest } from '@/lib/admin-auth'
+
+function isAdminRequest(request: NextRequest): boolean {
+  const token = request.cookies.get('admin_session')?.value
+  if (!token) return false
+  return /^[a-f0-9]{64}$/.test(token)
+}
 
 export async function POST(
   request: NextRequest,

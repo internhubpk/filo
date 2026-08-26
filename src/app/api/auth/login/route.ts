@@ -120,9 +120,8 @@ export async function POST(request: NextRequest) {
 
     console.log('[API /auth/login] Login successful for:', user.email)
 
-    // Successful login. Surface the user's activation status and role
-    // so the client can decide whether to allow AI generation or show a
-    // "pending" banner. Admin users bypass activation checks.
+    // Successful login. Surface the user's activation status so the client
+    // can decide whether to allow AI generation or show a "pending" banner.
     return NextResponse.json({
       success: true,
       data: {
@@ -131,7 +130,6 @@ export async function POST(request: NextRequest) {
           name: user.name,
           email: user.email,
           status: user.status ?? 'pending_activation',
-          role: user.role ?? 'user',
           planId: user.planId ?? null,
         },
         sessionToken,

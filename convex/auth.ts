@@ -19,9 +19,7 @@ interface AuthResult {
     // Manual activation flow: surface the user's status so the client
     // can gate AI generation. New signups are "pending_activation" until
     // an admin verifies payment and flips to "active".
-    // Admin users (role="admin") bypass activation checks.
     status?: "pending_activation" | "active" | "suspended";
-    role?: "admin" | "user";
     planId?: string | null;
   };
   sessionToken?: string;
@@ -120,9 +118,7 @@ export const login = action({
           // Surface activation status. New signups are "pending_activation";
           // admin flips to "active" after verifying payment. The client uses
           // this to decide whether to allow AI generation.
-          // Admin users bypass activation checks.
           status: user.status ?? "pending_activation",
-          role: user.role ?? "user",
           planId: user.planId ?? null,
         },
         sessionToken,
@@ -273,9 +269,7 @@ export const validateSession = query({
             // Surface activation status so the client can gate AI generation.
             // New signups default to "pending_activation"; admin flips to
             // "active" after manually verifying the payment.
-            // Admin users bypass activation checks.
             status: user.status ?? "pending_activation",
-            role: user.role ?? "user",
             planId: user.planId ?? null,
           }
         : null,

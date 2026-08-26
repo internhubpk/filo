@@ -14,14 +14,12 @@ export default defineSchema({
     emailVerified: v.optional(v.boolean()),
     image: v.optional(v.string()),
     passwordHash: v.optional(v.string()), // For email/password auth
-    role: v.optional(v.union(v.literal("admin"), v.literal("user"))), // Admin or regular user
     planId: v.optional(v.id("plans")),
     // Provider-agnostic customer ID (legacy Safepay field, kept for backward compat)
     providerCustomerId: v.optional(v.string()),
     // Manual activation flow: every new signup starts as "pending_activation".
     // Admin must verify payment and flip status to "active" before user can
     // generate artifacts. "suspended" revokes access.
-    // NOTE: Users with role="admin" bypass activation checks.
     status: v.union(
       v.literal("pending_activation"),
       v.literal("active"),
@@ -34,7 +32,6 @@ export default defineSchema({
   })
     .index("by_email", ["email"])
     .index("by_status", ["status"])
-    .index("by_role", ["role"])
     .index("by_providerCustomerId", ["providerCustomerId"]),
 
   // Payment verifications (manual admin-verified payment flow)

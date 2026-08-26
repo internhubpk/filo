@@ -283,25 +283,11 @@ export const reactivateSubscription = mutation({
 /**
  * Check if user can perform AI generation
  * Enforces rate limits based on plan
- * 
- * IMPORTANT: Users with role="admin" always bypass activation and limits.
  */
 export const canGenerateAI = query({
   args: { userId: v.id("users") },
   handler: async (ctx, args) => {
-    // Admin users bypass all checks
-    const user = await ctx.db.get(args.userId);
-    if (user && user.role === "admin") {
-      return {
-        allowed: true,
-        remaining: -1,
-        limit: -1,
-        resetsAt: null,
-        reason: "admin_bypass" as const,
-      };
-    }
-
-    // Check subscription status
+    // First check subscription status
     const subStatus = await ctx.db
       .query("subscriptions")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
