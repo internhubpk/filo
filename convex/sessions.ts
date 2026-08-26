@@ -34,6 +34,45 @@ export const createSession = mutation({
 });
 
 /**
+ * Create a session by email (avoids Convex ID serialization issues).
+ * 
+ * The Next.js server passes a plain email string; Convex looks up the
+ * user internally and creates the session. This avoids the bug where
+ * ConvexHttpClient fails to serialize user._id (from a query result)
+ * back into a v.id("users") for a mutation call.
+ */
+export const createSessionByEmail = mutation({
+  args: {
+    email: v.string(),
+    token: v.string(),
+    expiresAt: v.number(),
+  },
+  handler: async (ctx, args) => {
+    console.log('[SESSIONS] createSessionByEmail for:', args.email);
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .first();
+
+    if (!user) {
+      console.error('[SESSIONS] User not found:', args.email);
+      throw new Error("User not found");
+    }
+
+    const sessionId = await ctx.db.insert("sessions", {
+      userId: user._id,
+      token: args.token,
+      expiresAt: args.expiresAt,
+      createdAt: Date.now(),
+    });
+
+    console.log('[SESSIONS] Session created by email:', sessionId);
+    return sessionId;
+  },
+});
+
+/**
  * Delete a session (logout)
  * Called by auth.ts logout function via ctx.runMutation(api.sessions.deleteSession)
  */

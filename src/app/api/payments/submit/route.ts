@@ -120,15 +120,21 @@ export async function POST(request: NextRequest) {
     }
 
     // ---- Insert verification record ----
+    // NOTE: planId from the frontend is a slug like "pro" (string),
+    // but Convex expects v.id("plans"). We store the plan slug in notes
+    // and omit planId from the Convex mutation. The admin assigns the
+    // correct plan when approving.
+    const planNote = plan ? `Plan: ${plan.name} (${isYearly ? 'Yearly' : 'Monthly'})` : undefined
+    const combinedNotes = [planNote, notes?.trim()].filter(Boolean).join(' | ') || undefined
+
     const verificationId = await convex.mutation(api.paymentVerifications.createVerification, {
       userId,
-      planId: planId ?? undefined,
       amount,
       currency: 'PKR',
       paymentMethod,
       transactionId: transactionId.trim(),
       proofUrl: proofUrl?.trim() || undefined,
-      notes: notes?.trim() || undefined,
+      notes: combinedNotes,
     })
 
     console.log(`[PAYMENTS-SUBMIT] Verification ${verificationId} created for user ${userId}`)

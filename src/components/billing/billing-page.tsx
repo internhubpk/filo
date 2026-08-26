@@ -116,6 +116,10 @@ export function BillingPage() {
   const [accountStatus, setAccountStatus] = useState<'pending_activation' | 'active' | 'suspended' | 'unknown'>('unknown')
   const [latestVerification, setLatestVerification] = useState<VerificationRecord | null>(null)
   const [verificationHistory, setVerificationHistory] = useState<VerificationRecord[]>([])
+  // Real plan data from the subscription API
+  const [planLimit, setPlanLimit] = useState(0)
+  const [planName, setPlanName] = useState('')
+  const [planStorageMb, setPlanStorageMb] = useState(0)
 
   // Reload user's account + verification status from the API.
   const refreshStatus = async () => {
@@ -126,6 +130,9 @@ export function BillingPage() {
         const data = resp.data as any
         setAccountStatus(data.accountStatus ?? 'pending_activation')
         setLatestVerification(data.latestVerification ?? null)
+        setPlanLimit(data.planLimit ?? 0)
+        setPlanName(data.planName ?? '')
+        setPlanStorageMb(data.planStorageMb ?? 0)
       }
 
       const histResp = await apiClient.getPaymentStatus()
@@ -188,18 +195,18 @@ export function BillingPage() {
     }
   }, [user?.id])
 
-  // Calculate usage data - the manual activation model has no per-plan
-  // quota tracking yet, so we show a friendly placeholder for pending
-  // users and "unlimited" for active ones.
+  // Calculate usage data from real plan limits (fetched from API)
+  // Note: actual usage tracking (artifacts created, storage used) requires
+  // a usage records system; for now we show the plan limits accurately.
   const usageData = accountStatus === 'active'
     ? {
-        aiGenerations: { used: 0, limit: -1, percentage: 0 },
-        storage: { used: 0, limit: 5120, percentage: 0, unit: 'MB' },
-        artifacts: { used: 0, limit: -1, percentage: 0 },
+        aiGenerations: { used: 0, limit: planLimit > 0 ? planLimit : 500, percentage: 0 },
+        storage: { used: 0, limit: planStorageMb > 0 ? planStorageMb : 5120, percentage: 0, unit: 'MB' as const },
+        artifacts: { used: 0, limit: planLimit > 0 ? planLimit : 500, percentage: 0 },
       }
     : {
         aiGenerations: { used: 0, limit: 0, percentage: 0 },
-        storage: { used: 0, limit: 0, percentage: 0, unit: 'MB' },
+        storage: { used: 0, limit: 0, percentage: 0, unit: 'MB' as const },
         artifacts: { used: 0, limit: 0, percentage: 0 },
       }
 
@@ -352,7 +359,9 @@ export function BillingPage() {
               <div>
                 <div className="flex items-center gap-2">
                   <span className="text-xl font-semibold">
-                    {accountStatus === 'active' ? 'Verified Account' : 'Pending Verification'}
+                    {accountStatus === 'active'
+                      ? (planName || 'Verified Account')
+                      : 'Pending Verification'}
                   </span>
                   {getStatusBadge(accountStatus === 'active' ? 'active' : 'pending_activation')}
                 </div>
@@ -480,10 +489,10 @@ export function BillingPage() {
           <CardContent>
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>{usageData.aiGenerations.used} / {usageData.aiGenerations.limit === -1 ? 'Unlimited' : usageData.aiGenerations.limit}</span>
-                <span className="text-muted-foreground">{usageData.aiGenerations.limit === -1 ? 'Unlimited' : `${usageData.aiGenerations.percentage}%`}</span>
+                <span>{usageData.aiGenerations.used} / {usageData.aiGenerations.limit >= 999 ? 'Unlimited' : usageData.aiGenerations.limit}</span>
+                <span className="text-muted-foreground">{usageData.aiGenerations.limit >= 999 ? 'Unlimited' : `${usageData.aiGenerations.percentage}%`}</span>
               </div>
-              {usageData.aiGenerations.limit !== -1 && usageData.aiGenerations.limit !== 0 && (
+              {usageData.aiGenerations.limit > 0 && usageData.aiGenerations.limit < 999 && (
                 <div className="h-2 rounded-full bg-secondary overflow-hidden cursor-default">
                   <div
                     className="h-full rounded-full bg-primary transition-all"
@@ -534,8 +543,8 @@ export function BillingPage() {
           <CardContent>
             <div className="space-y-2">
               <div className="flex justify-between text-sm">
-                <span>{usageData.artifacts.used} / {usageData.artifacts.limit === -1 ? 'Unlimited' : usageData.artifacts.limit}</span>
-                <span className="text-muted-foreground">{usageData.artifacts.percentage}%</span>
+                <span>{usageData.artifacts.used} / {usageData.artifacts.limit >= 999 ? 'Unlimited' : usageData.artifacts.limit}</span>
+                <span className="text-muted-foreground">{usageData.artifacts.limit >= 999 ? 'Unlimited' : `${usageData.artifacts.percentage}%`}</span>
               </div>
               <div className="h-2 rounded-full bg-secondary overflow-hidden cursor-default">
                 <div

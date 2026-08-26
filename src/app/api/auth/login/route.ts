@@ -104,20 +104,18 @@ export async function POST(request: NextRequest) {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("")
 
-    // Step 5: Try to create session in Convex (non-fatal — matches signup behavior)
-    // If this fails, the token is still returned to the client and stored in
-    // localStorage, which is sufficient for the app to function.
+    // Step 5: Create session in Convex using email (avoids ID serialization bug)
     let sessionCreated = false
     try {
-      await convexClient.mutation(api.sessions.createSession, {
-        userId: user._id,
+      await convexClient.mutation(api.sessions.createSessionByEmail, {
+        email: normalizedEmail,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
       })
       sessionCreated = true
       console.log('[API /auth/login] Session created successfully')
     } catch (sessionError) {
-      console.warn('[API /auth/login] Session creation failed (non-fatal, matching signup):', sessionError)
+      console.warn('[API /auth/login] Session creation failed (non-fatal):', sessionError)
     }
 
     console.log('[API /auth/login] Login successful for:', user.email)

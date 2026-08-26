@@ -133,11 +133,11 @@ export async function POST(request: NextRequest) {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("")
 
-    // Step 4: Try to create session (optional - don't fail signup if this doesn't work)
+    // Step 4: Create session using email (avoids ID serialization bug)
     let sessionCreated = false
     try {
-      await convexClient.mutation(api.sessions.createSession, {
-        userId,
+      await convexClient.mutation(api.sessions.createSessionByEmail, {
+        email: normalizedEmail,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
       })
@@ -145,7 +145,6 @@ export async function POST(request: NextRequest) {
       console.log('[API /auth/signup] Session created successfully')
     } catch (sessionError) {
       console.warn('[API /auth/signup] Session creation failed (non-fatal):', sessionError)
-      // Continue without session - user can login manually
     }
 
     // Get the created user data
@@ -173,7 +172,7 @@ export async function POST(request: NextRequest) {
           // Always pending_activation here - admin must verify payment
           status: 'pending_activation',
         },
-        sessionToken: sessionCreated ? sessionToken : undefined,
+        sessionToken: sessionToken,
         warning: !sessionCreated
           ? 'Account created but auto-login may not work. Please login manually.'
           : 'Account created. Your access is pending admin verification of your payment.',

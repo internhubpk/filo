@@ -1,10 +1,10 @@
 // =============================================================================
 // GET /api/subscription/status
 // =============================================================================
-// Get current user's activation status.
+// Get current user's activation status and plan details.
 //
 // In the manual admin-verified payment model, access is gated by the
-// `users.status` field rather than a subscription record. The values:
+// `users.status` field. The values:
 //   - "pending_activation" -> user signed up but admin hasn't verified payment
 //   - "active"             -> admin verified payment; AI generation allowed
 //   - "suspended"          -> admin revoked access
@@ -43,6 +43,23 @@ export async function GET(request: NextRequest) {
 
     const userId = session.user.id
     const status = (session.user as any).status ?? 'pending_activation'
+    const userPlanId = (session.user as any).planId ?? null
+
+    // Fetch real plan details if user has a plan assigned
+    let planData: any = null
+    if (userPlanId) {
+      try {
+        planData = await convex.query(api.plans.getPlanById, { planId: userPlanId })
+      } catch (planErr) {
+        console.warn('[API /subscription/status] Could not load plan:', planErr)
+      }
+    }
+
+    // Determine plan name and limits from real data
+    const planName = planData?.name ?? (status === 'active' ? 'Verified' : 'Pending Activation')
+    const maxGenerations = planData?.maxAiGenerations ?? (status === 'active' ? 500 : 0)
+    const maxStorageMb = planData?.maxStorageMb ?? (status === 'active' ? 5120 : 0)
+    const hasActive = status === 'active'
 
     // Try to fetch the latest payment verification for this user so the UI
     // can show a richer status ("pending review", "rejected: <reason>").
@@ -52,23 +69,18 @@ export async function GET(request: NextRequest) {
         userId,
       })
     } catch (verifErr) {
-      // Non-critical - the user simply has no verification history yet
       console.warn('[API /subscription/status] Could not load latest verification:', verifErr)
     }
-
-    // Map the user status to a subscription-style response so the existing
-    // dashboard code (which checks `hasActiveSubscription`) keeps working
-    // without needing a rewrite of every consumer.
-    const hasActive = status === 'active'
 
     return NextResponse.json({
       success: true,
       data: {
         hasActiveSubscription: hasActive,
         accountStatus: status,
-        remainingGenerations: hasActive ? 999 : 0,
-        planLimit: hasActive ? 999 : 0,
-        planName: hasActive ? 'Pro (Verified)' : 'Pending Activation',
+        remainingGenerations: hasActive ? maxGenerations : 0,
+        planLimit: maxGenerations,
+        planName,
+        planStorageMb: maxStorageMb,
         latestVerification: latestVerification
           ? {
               id: latestVerification._id,
