@@ -1,13 +1,20 @@
 // =============================================================================
 // GET /api/subscription/status
 // =============================================================================
-// Get current user's subscription and usage status
+// Get current user's activation status.
+//
+// In the manual admin-verified payment model, access is gated by the
+// `users.status` field rather than a subscription record. The values:
+//   - "pending_activation" -> user signed up but admin hasn't verified payment
+//   - "active"             -> admin verified payment; AI generation allowed
+//   - "suspended"          -> admin revoked access
+//
+// We also surface the latest paymentVerification so the client can show
+// "your payment is being reviewed" or "your payment was rejected: <reason>".
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
-
-const IS_DEV = process.env.NODE_ENV === 'development'
 
 export async function GET(request: NextRequest) {
   try {
@@ -22,23 +29,10 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // ---- DEV MODE: Return unlimited access ----
-    if (IS_DEV || !process.env.NEXT_PUBLIC_CONVEX_URL) {
-      return NextResponse.json({
-        success: true,
-        data: {
-          hasActiveSubscription: true,
-          remainingGenerations: 999,
-          planLimit: 999,
-          planName: 'Pro (Dev)',
-        }
-      })
-    }
-
     // ---- PRODUCTION: Use Convex ----
     const { getConvexClient } = await import('@/lib/convex-server')
     const convex = getConvexClient()
-    
+
     const session = await convex.query(api.auth.validateSession, { token })
     if (!session.valid || !session.user) {
       return NextResponse.json(
@@ -47,24 +41,58 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Get subscription status
-    const status = await convex.query(api.subscriptions.hasActiveSubscription, {
-      userId: session.user.id,
-    })
+    const userId = session.user.id
+    const status = (session.user as any).status ?? 'pending_activation'
+
+    // Try to fetch the latest payment verification for this user so the UI
+    // can show a richer status ("pending review", "rejected: <reason>").
+    let latestVerification: any = null
+    try {
+      latestVerification = await convex.query(api.paymentVerifications.getLatestVerification, {
+        userId,
+      })
+    } catch (verifErr) {
+      // Non-critical - the user simply has no verification history yet
+      console.warn('[API /subscription/status] Could not load latest verification:', verifErr)
+    }
+
+    // Map the user status to a subscription-style response so the existing
+    // dashboard code (which checks `hasActiveSubscription`) keeps working
+    // without needing a rewrite of every consumer.
+    const hasActive = status === 'active'
 
     return NextResponse.json({
       success: true,
-      data: status
+      data: {
+        hasActiveSubscription: hasActive,
+        accountStatus: status,
+        remainingGenerations: hasActive ? 999 : 0,
+        planLimit: hasActive ? 999 : 0,
+        planName: hasActive ? 'Pro (Verified)' : 'Pending Activation',
+        latestVerification: latestVerification
+          ? {
+              id: latestVerification._id,
+              status: latestVerification.status,
+              amount: latestVerification.amount,
+              currency: latestVerification.currency,
+              paymentMethod: latestVerification.paymentMethod,
+              transactionId: latestVerification.transactionId,
+              adminNote: latestVerification.adminNote ?? null,
+              createdAt: latestVerification.createdAt,
+              reviewedAt: latestVerification.reviewedAt ?? null,
+            }
+          : null,
+      }
     })
 
   } catch (error) {
     console.error('[API /subscription/status] Error:', error)
-    
+
     return NextResponse.json(
-      { 
-        success: false, 
+      {
+        success: false,
         error: 'Failed to get subscription status',
-        code: 'FETCH_ERROR' 
+        code: 'FETCH_ERROR'
       },
       { status: 500 }
     )

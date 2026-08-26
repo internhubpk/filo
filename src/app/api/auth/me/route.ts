@@ -1,7 +1,11 @@
 // =============================================================================
 // GET /api/auth/me
 // =============================================================================
-// Get current authenticated user from session token
+// Get current authenticated user from session token.
+// Returns the user's activation status so the client can gate AI generation:
+//   - status === "pending_activation" -> show "pending verification" UI
+//   - status === "active"             -> allow AI generation
+//   - status === "suspended"          -> show "account suspended" UI
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -23,7 +27,7 @@ export async function GET(request: NextRequest) {
 
     // Validate session with Convex
     const convex = getConvexClient()
-    
+
     const result = await convex.query(api.auth.validateSession, { token })
 
     if (!result.valid || !result.user) {
@@ -33,7 +37,7 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Return user data
+    // Return user data with activation status
     return NextResponse.json({
       success: true,
       data: result.user
@@ -41,12 +45,12 @@ export async function GET(request: NextRequest) {
 
   } catch (error) {
     console.error('[API /auth/me] Error:', error)
-    
+
     return NextResponse.json(
-      { 
-        success: false, 
+      {
+        success: false,
         error: 'Failed to validate session',
-        code: 'VALIDATION_ERROR' 
+        code: 'VALIDATION_ERROR'
       },
       { status: 500 }
     )

@@ -1,12 +1,14 @@
 // =============================================================================
 // POST /api/auth/login
 // =============================================================================
-// Proxy route that handles login via Convex auth function
+// Proxy route that handles login via Convex.
+// Login is allowed even when the user's status is "pending_activation" —
+// we return the status to the client so the UI can show the
+// "Your account is pending verification" banner and block AI generation.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
-
-const IS_DEV = process.env.NODE_ENV === 'development'
+import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -32,32 +34,6 @@ export async function POST(request: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    // ---- DEV MODE or NO CONVEX: Bypass backend, create local session ----
-    if (IS_DEV || !process.env.NEXT_PUBLIC_CONVEX_URL) {
-      console.log('[API /auth/login] DEV MODE: Skipping Convex auth')
-      
-      // Generate a dev session token
-      const array = new Uint8Array(32)
-      crypto.getRandomValues(array)
-      const sessionToken = Array.from(array)
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('')
-
-      const name = normalizedEmail.split('@')[0].replace(/[._-]/g, ' ').replace(/\b\w/g, c => c.toUpperCase())
-
-      return NextResponse.json({
-        success: true,
-        data: {
-          user: {
-            id: 'dev-user-' + Date.now(),
-            name,
-            email: normalizedEmail,
-          },
-          sessionToken,
-        }
-      })
-    }
-
     // ---- PRODUCTION: Use Convex ----
     let convexClient: any
     try {
@@ -74,18 +50,18 @@ export async function POST(request: NextRequest) {
         { status: 503 }
       )
     }
-    
+
     // Call Convex auth action
     let result: any
     try {
-      result = await convexClient.action('auth:login', {
+      result = await convexClient.action(api.auth.login, {
         email: normalizedEmail,
         password,
       })
     } catch (actionError) {
       console.error('[API /auth/login] Convex action error:', actionError)
       const msg = actionError instanceof Error ? actionError.message : String(actionError)
-      
+
       // If Convex is unreachable, provide a clear error
       if (msg.includes('fetch') || msg.includes('network') || msg.includes('ECONNREFUSED') || msg.includes('Failed to fetch')) {
         return NextResponse.json(
@@ -97,7 +73,7 @@ export async function POST(request: NextRequest) {
           { status: 503 }
         )
       }
-      
+
       return NextResponse.json(
         {
           success: false,
@@ -112,10 +88,10 @@ export async function POST(request: NextRequest) {
     if (!result || !result.success) {
       const errorCode = result?.code || 'LOGIN_FAILED'
       const errorMsg = result?.error || 'Login failed'
-      
+
       // Use 401 for authentication failures, 404 for missing users
       const status = errorCode === 'USER_NOT_FOUND' ? 404 : 401
-      
+
       return NextResponse.json(
         {
           success: false,
@@ -126,7 +102,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Return successful response with user data and session token
+    // Successful login. Surface the user's activation status so the client
+    // can decide whether to allow AI generation or show a "pending" banner.
     return NextResponse.json({
       success: true,
       data: {
@@ -137,7 +114,7 @@ export async function POST(request: NextRequest) {
 
   } catch (error) {
     console.error('[API /auth/login] Unhandled error:', error)
-    
+
     return NextResponse.json(
       {
         success: false,

@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import Link from 'next/link'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -65,12 +65,18 @@ import {
   Shield,
   Loader2,
   Wifi,
-  WifiOff
+  WifiOff,
+  UserCheck,
+  UserX,
+  Clock,
+  Send,
+  ExternalLink
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useMutation } from 'convex/react'
 import { api } from '@convex/_generated/api'
 import { Id } from '../../../convex/_generated/dataModel'
+import { apiClient } from '@/lib/api-client'
 
 // Icon mapping for plan icons
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -132,15 +138,15 @@ const emptyForm: PlanFormData = {
 
 export default function AdminPage() {
   const { theme, setTheme } = useTheme()
-  
+
   // REAL Convex queries - fetching actual data from database
   const plans = useQuery(api.plans.getAllPlans) as PlanDisplay[] | undefined
-  
+
   // REAL Convex mutations for CRUD operations
   const createPlan = useMutation(api.admin.createPlan)
   const updatePlan = useMutation(api.admin.updatePlan)
   const deletePlan = useMutation(api.admin.deletePlan)
-  
+
   // UI State
   const [isDialogOpen, setIsDialogOpen] = useState(false)
   const [editingPlan, setEditingPlan] = useState<PlanDisplay | null>(null)
@@ -152,10 +158,188 @@ export default function AdminPage() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [planToDelete, setPlanToDelete] = useState<PlanDisplay | null>(null)
 
+  // ===== Manual activation flow state =====
+  // Active tab: "plans" (legacy plan management) or "verifications"
+  // (manual payment verification + user activation).
+  const [activeTab, setActiveTab] = useState<'plans' | 'verifications'>('plans')
+
+  // Verifications data - fetched from /api/admin/verifications (cookie-auth)
+  interface AdminVerification {
+    _id: string
+    userId: string
+    planId?: string
+    amount: number
+    currency: string
+    paymentMethod: string
+    transactionId: string
+    proofUrl?: string
+    notes?: string
+    status: 'pending' | 'approved' | 'rejected'
+    reviewedBy?: string
+    reviewedAt?: number
+    adminNote?: string
+    createdAt: number
+    updatedAt: number
+  }
+  interface AdminUser {
+    id: string
+    name: string
+    email: string
+    status: 'pending_activation' | 'active' | 'suspended'
+    planId: string | null
+    activatedAt: number | null
+    activationNote: string | null
+    createdAt: number
+    updatedAt: number
+  }
+  const [verifications, setVerifications] = useState<AdminVerification[]>([])
+  const [allUsers, setAllUsers] = useState<AdminUser[]>([])
+  const [verificationsLoading, setVerificationsLoading] = useState(false)
+  const [verificationsError, setVerificationsError] = useState<string | null>(null)
+  const [verificationsFilter, setVerificationsFilter] = useState<'pending' | 'all'>('pending')
+
+  // Approve/reject dialog state
+  const [reviewDialog, setReviewDialog] = useState<{
+    open: boolean
+    verification: AdminVerification | null
+    action: 'approve' | 'reject'
+    adminNote: string
+  }>({ open: false, verification: null, action: 'approve', adminNote: '' })
+
+  // Manual activate-by-user dialog state (admin can also bypass verifications
+  // and activate a user directly without a payment submission)
+  const [userActionDialog, setUserActionDialog] = useState<{
+    open: boolean
+    user: AdminUser | null
+    action: 'activate' | 'suspend'
+    note: string
+  }>({ open: false, user: null, action: 'activate', note: '' })
+
+  // Fetch the verifications list + all users list from the admin API.
+  const refreshVerifications = async () => {
+    setVerificationsLoading(true)
+    setVerificationsError(null)
+    try {
+      const [verifResp, usersResp] = await Promise.all([
+        apiClient.adminListVerifications(verificationsFilter),
+        apiClient.adminListUsers(),
+      ])
+      if (verifResp.success && verifResp.data) {
+        setVerifications(verifResp.data as AdminVerification[])
+      } else {
+        setVerificationsError(verifResp.error || 'Failed to load verifications')
+      }
+      if (usersResp.success && usersResp.data) {
+        setAllUsers((usersResp.data as any).all ?? [])
+      }
+    } catch (err: any) {
+      setVerificationsError(err.message || 'Failed to load admin data')
+    } finally {
+      setVerificationsLoading(false)
+    }
+  }
+
+  // Load verifications on first tab open and whenever filter changes
+  useEffect(() => {
+    if (activeTab === 'verifications') {
+      refreshVerifications()
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, verificationsFilter])
+
   // Show notification helper
   const showNotification = (type: 'success' | 'error', message: string) => {
     setNotification({ type, message })
     setTimeout(() => setNotification(null), 4000)
+  }
+
+  // ===== Verification review handlers (manual activation flow) =====
+
+  // Approve a payment verification. This unlocks the user's account
+  // so they can immediately perform AI generation.
+  const handleApproveVerification = async () => {
+    if (!reviewDialog.verification) return
+    setIsSaving(true)
+    try {
+      const v = reviewDialog.verification
+      const resp = await apiClient.adminApproveVerification(
+        v._id,
+        reviewDialog.adminNote.trim() || undefined,
+      )
+      if (!resp.success) {
+        showNotification('error', resp.error || 'Failed to approve verification')
+      } else {
+        showNotification('success', `Approved ${v.transactionId} - user activated`)
+        // Optimistically update the local list
+        setVerifications(prev =>
+          prev.map(x => x._id === v._id ? { ...x, status: 'approved', adminNote: reviewDialog.adminNote, reviewedAt: Date.now() } : x)
+        )
+        // Refresh to pull fresh user status too
+        await refreshVerifications()
+      }
+    } catch (err: any) {
+      showNotification('error', err.message || 'Failed to approve verification')
+    } finally {
+      setIsSaving(false)
+      setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
+    }
+  }
+
+  // Reject a payment verification with a reason. The user remains in
+  // their current status (typically pending_activation) and the reason
+  // is surfaced back to them on /billing so they can re-submit.
+  const handleRejectVerification = async () => {
+    if (!reviewDialog.verification) return
+    if (!reviewDialog.adminNote.trim()) {
+      showNotification('error', 'A reason is required when rejecting a verification')
+      return
+    }
+    setIsSaving(true)
+    try {
+      const v = reviewDialog.verification
+      const resp = await apiClient.adminRejectVerification(
+        v._id,
+        reviewDialog.adminNote.trim(),
+      )
+      if (!resp.success) {
+        showNotification('error', resp.error || 'Failed to reject verification')
+      } else {
+        showNotification('success', `Rejected ${v.transactionId} - reason sent to user`)
+        setVerifications(prev =>
+          prev.map(x => x._id === v._id ? { ...x, status: 'rejected', adminNote: reviewDialog.adminNote, reviewedAt: Date.now() } : x)
+        )
+        await refreshVerifications()
+      }
+    } catch (err: any) {
+      showNotification('error', err.message || 'Failed to reject verification')
+    } finally {
+      setIsSaving(false)
+      setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
+    }
+  }
+
+  // Direct user status management (bypassing the verification flow).
+  // Useful for granting access to internal/team users or revoking access.
+  const handleUserAction = async () => {
+    if (!userActionDialog.user) return
+    setIsSaving(true)
+    try {
+      const u = userActionDialog.user
+      const resp = userActionDialog.action === 'activate'
+        ? await apiClient.adminActivateUser(u.id, { note: userActionDialog.note.trim() || undefined })
+        : await apiClient.adminSuspendUser(u.id, userActionDialog.note.trim() || undefined)
+      if (!resp.success) {
+        showNotification('error', resp.error || `Failed to ${userActionDialog.action} user`)
+      } else {
+        showNotification('success', `${u.email} ${userActionDialog.action === 'activate' ? 'activated' : 'suspended'}`)
+        await refreshVerifications()
+      }
+    } catch (err: any) {
+      showNotification('error', err.message || 'Failed to update user')
+    } finally {
+      setIsSaving(false)
+      setUserActionDialog({ open: false, user: null, action: 'activate', note: '' })
+    }
   }
 
   // Logout handler
@@ -356,8 +540,9 @@ export default function AdminPage() {
     setFormData(prev => ({ ...prev, limitations: prev.limitations?.filter((_, i) => i !== idx) || [] }))
   }
 
-  // Loading state while Convex connects
-  if (plans === undefined) {
+  // Loading state while Convex connects (only required for plans tab;
+  // verifications tab fetches its own data via the admin API).
+  if (activeTab === 'plans' && plans === undefined) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
         <div className="text-center space-y-4">
@@ -440,12 +625,470 @@ export default function AdminPage() {
       )}
 
       <main className="container mx-auto px-4 sm:px-6 lg:px-8 py-6 md:py-8">
+        {/* Tab Switcher */}
+        <div className="flex items-center gap-2 mb-6 border-b">
+          <button
+            onClick={() => setActiveTab('plans')}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-md transition-colors cursor-pointer ${
+              activeTab === 'plans'
+                ? 'bg-background text-foreground border border-b-0'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <Settings2 className="h-4 w-4" />
+            Plans
+          </button>
+          <button
+            onClick={() => setActiveTab('verifications')}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-md transition-colors cursor-pointer ${
+              activeTab === 'verifications'
+                ? 'bg-background text-foreground border border-b-0'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <UserCheck className="h-4 w-4" />
+            User Verifications
+            {verifications.filter(v => v.status === 'pending').length > 0 && (
+              <Badge variant="destructive" className="ml-1 text-xs cursor-default">
+                {verifications.filter(v => v.status === 'pending').length}
+              </Badge>
+            )}
+          </button>
+        </div>
+
+        {/* ===== VERIFICATIONS TAB ===== */}
+        {activeTab === 'verifications' && (
+          <div className="space-y-6">
+            {/* Page Header */}
+            <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div>
+                <h2 className="text-2xl md:text-3xl font-bold tracking-tight">User Verifications</h2>
+                <p className="text-muted-foreground mt-1 text-sm md:text-base">
+                  Review payment submissions and activate user accounts
+                </p>
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Pending / All filter */}
+                <Select
+                  value={verificationsFilter}
+                  onValueChange={(v) => setVerificationsFilter(v as 'pending' | 'all')}
+                >
+                  <SelectTrigger className="w-[140px] cursor-pointer">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="pending" className="cursor-pointer">Pending only</SelectItem>
+                    <SelectItem value="all" className="cursor-pointer">All submissions</SelectItem>
+                  </SelectContent>
+                </Select>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={refreshVerifications}
+                  disabled={verificationsLoading}
+                  className="gap-2 cursor-pointer"
+                >
+                  <RefreshCw className={`h-4 w-4 ${verificationsLoading ? 'animate-spin' : ''}`} />
+                  Refresh
+                </Button>
+              </div>
+            </div>
+
+            {verificationsError && (
+              <div className="bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-lg p-4 text-sm">
+                <AlertCircle className="h-4 w-4 inline mr-2" />
+                {verificationsError}
+              </div>
+            )}
+
+            {/* Stats row */}
+            <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 md:gap-4">
+              <Card className="p-3 md:p-6">
+                <CardContent className="pt-0 p-0">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Total Users</p>
+                      <p className="text-xl md:text-2xl font-bold">{allUsers.length}</p>
+                    </div>
+                    <Users className="h-6 w-6 md:h-8 md:w-8 text-primary/30" />
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="p-3 md:p-6">
+                <CardContent className="pt-0 p-0">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Pending</p>
+                      <p className="text-xl md:text-2xl font-bold text-yellow-600">
+                        {allUsers.filter(u => u.status === 'pending_activation').length}
+                      </p>
+                    </div>
+                    <Clock className="h-6 w-6 md:h-8 md:w-8 text-yellow-500" />
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="p-3 md:p-6">
+                <CardContent className="pt-0 p-0">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Active</p>
+                      <p className="text-xl md:text-2xl font-bold text-green-600">
+                        {allUsers.filter(u => u.status === 'active').length}
+                      </p>
+                    </div>
+                    <Check className="h-6 w-6 md:h-8 md:w-8 text-green-600" />
+                  </div>
+                </CardContent>
+              </Card>
+              <Card className="p-3 md:p-6">
+                <CardContent className="pt-0 p-0">
+                  <div className="flex justify-between items-center">
+                    <div>
+                      <p className="text-xs text-muted-foreground">Suspended</p>
+                      <p className="text-xl md:text-2xl font-bold text-red-600">
+                        {allUsers.filter(u => u.status === 'suspended').length}
+                      </p>
+                    </div>
+                    <UserX className="h-6 w-6 md:h-8 md:w-8 text-red-500" />
+                  </div>
+                </CardContent>
+              </Card>
+            </div>
+
+            {/* Verifications table */}
+            <Card className="overflow-hidden">
+              <CardHeader className="pb-4 px-4 md:px-6">
+                <CardTitle className="text-base md:text-lg flex items-center gap-2">
+                  Payment Verifications
+                  <Badge variant="secondary" className="text-xs ml-2 cursor-default">
+                    {verificationsFilter === 'pending' ? 'Pending' : 'All'}
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  Review each submission and approve (activates user) or reject (with reason)
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="px-0 md:px-6 pb-0 md:pb-6">
+                {verificationsLoading ? (
+                  <div className="text-center py-12">
+                    <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
+                    <p className="text-sm text-muted-foreground mt-3">Loading verifications...</p>
+                  </div>
+                ) : verifications.length === 0 ? (
+                  <div className="text-center py-12 px-4">
+                    <div className="h-16 w-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
+                      <Check className="h-8 w-8 text-muted-foreground" />
+                    </div>
+                    <h3 className="text-lg font-medium mb-2">No {verificationsFilter === 'pending' ? 'pending ' : ''}submissions</h3>
+                    <p className="text-muted-foreground text-sm">
+                      {verificationsFilter === 'pending'
+                        ? 'New payment submissions will appear here for your review.'
+                        : 'No payment verifications have been submitted yet.'}
+                    </p>
+                  </div>
+                ) : (
+                  <div className="hidden md:block overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[180px]">User</TableHead>
+                          <TableHead className="w-[160px]">Transaction</TableHead>
+                          <TableHead className="w-[120px]">Amount</TableHead>
+                          <TableHead className="w-[120px]">Method</TableHead>
+                          <TableHead className="w-[100px]">Status</TableHead>
+                          <TableHead className="w-[120px]">Submitted</TableHead>
+                          <TableHead className="w-[180px] text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {verifications.map((v) => {
+                          const user = allUsers.find(u => u.id === v.userId)
+                          return (
+                            <TableRow key={v._id}>
+                              <TableCell>
+                                <div className="flex flex-col">
+                                  <span className="font-medium text-sm">{user?.name ?? 'Unknown user'}</span>
+                                  <span className="text-xs text-muted-foreground">{user?.email ?? v.userId}</span>
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <div className="flex flex-col">
+                                  <span className="font-mono text-xs">{v.transactionId}</span>
+                                  {v.notes && (
+                                    <span className="text-xs text-muted-foreground truncate max-w-[160px]">
+                                      {v.notes}
+                                    </span>
+                                  )}
+                                </div>
+                              </TableCell>
+                              <TableCell>
+                                <span className="font-medium text-sm">
+                                  {v.currency} {v.amount.toLocaleString()}
+                                </span>
+                              </TableCell>
+                              <TableCell className="capitalize text-sm">
+                                {v.paymentMethod.replace('_', ' ')}
+                              </TableCell>
+                              <TableCell>
+                                {v.status === 'approved' ? (
+                                  <Badge className="bg-green-600 cursor-default">approved</Badge>
+                                ) : v.status === 'rejected' ? (
+                                  <Badge variant="destructive" className="cursor-default">rejected</Badge>
+                                ) : (
+                                  <Badge variant="secondary" className="cursor-default">pending</Badge>
+                                )}
+                              </TableCell>
+                              <TableCell className="text-xs text-muted-foreground">
+                                {new Date(v.createdAt).toLocaleDateString('en-PK', {
+                                  month: 'short',
+                                  day: 'numeric',
+                                  hour: '2-digit',
+                                  minute: '2-digit',
+                                })}
+                              </TableCell>
+                              <TableCell className="text-right">
+                                <div className="flex justify-end gap-1.5">
+                                  {v.proofUrl && (
+                                    <Button
+                                      variant="ghost"
+                                      size="sm"
+                                      asChild
+                                      className="cursor-pointer h-8 w-8 p-0"
+                                      title="View receipt"
+                                    >
+                                      <a href={v.proofUrl} target="_blank" rel="noopener noreferrer">
+                                        <ExternalLink className="h-3.5 w-3.5" />
+                                      </a>
+                                    </Button>
+                                  )}
+                                  {v.status === 'pending' && (
+                                    <>
+                                      <Button
+                                        size="sm"
+                                        className="gap-1.5 cursor-pointer h-8 text-xs"
+                                        onClick={() => setReviewDialog({
+                                          open: true,
+                                          verification: v,
+                                          action: 'approve',
+                                          adminNote: '',
+                                        })}
+                                      >
+                                        <Check className="h-3.5 w-3.5" /> Approve
+                                      </Button>
+                                      <Button
+                                        variant="destructive"
+                                        size="sm"
+                                        className="gap-1.5 cursor-pointer h-8 text-xs"
+                                        onClick={() => setReviewDialog({
+                                          open: true,
+                                          verification: v,
+                                          action: 'reject',
+                                          adminNote: '',
+                                        })}
+                                      >
+                                        <X className="h-3.5 w-3.5" /> Reject
+                                      </Button>
+                                    </>
+                                  )}
+                                  {v.status !== 'pending' && v.adminNote && (
+                                    <span className="text-xs text-muted-foreground italic max-w-[160px] truncate">
+                                      "{v.adminNote}"
+                                    </span>
+                                  )}
+                                </div>
+                              </TableCell>
+                            </TableRow>
+                          )
+                        })}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+
+                {/* Mobile cards view */}
+                {!verificationsLoading && verifications.length > 0 && (
+                  <div className="md:hidden space-y-3 px-4 pb-4">
+                    {verifications.map((v) => {
+                      const user = allUsers.find(u => u.id === v.userId)
+                      return (
+                        <Card key={v._id} className="p-4">
+                          <div className="flex items-start justify-between mb-3">
+                            <div>
+                              <div className="font-medium text-sm">{user?.name ?? 'Unknown user'}</div>
+                              <div className="text-xs text-muted-foreground">{user?.email ?? v.userId}</div>
+                            </div>
+                            {v.status === 'approved' ? (
+                              <Badge className="bg-green-600 cursor-default">approved</Badge>
+                            ) : v.status === 'rejected' ? (
+                              <Badge variant="destructive" className="cursor-default">rejected</Badge>
+                            ) : (
+                              <Badge variant="secondary" className="cursor-default">pending</Badge>
+                            )}
+                          </div>
+                          <div className="grid grid-cols-2 gap-2 mb-3 text-sm">
+                            <div>
+                              <div className="text-muted-foreground text-xs">Transaction</div>
+                              <div className="font-mono text-xs">{v.transactionId}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground text-xs">Amount</div>
+                              <div className="font-medium">{v.currency} {v.amount.toLocaleString()}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground text-xs">Method</div>
+                              <div className="font-medium capitalize">{v.paymentMethod.replace('_', ' ')}</div>
+                            </div>
+                            <div>
+                              <div className="text-muted-foreground text-xs">Submitted</div>
+                              <div className="font-medium text-xs">
+                                {new Date(v.createdAt).toLocaleDateString('en-PK', { month: 'short', day: 'numeric' })}
+                              </div>
+                            </div>
+                          </div>
+                          {v.adminNote && (
+                            <div className="text-xs italic text-muted-foreground bg-muted/50 p-2 rounded mb-3">
+                              "{v.adminNote}"
+                            </div>
+                          )}
+                          {v.status === 'pending' && (
+                            <div className="flex gap-2">
+                              <Button
+                                size="sm"
+                                className="gap-1.5 cursor-pointer flex-1"
+                                onClick={() => setReviewDialog({
+                                  open: true,
+                                  verification: v,
+                                  action: 'approve',
+                                  adminNote: '',
+                                })}
+                              >
+                                <Check className="h-3.5 w-3.5" /> Approve
+                              </Button>
+                              <Button
+                                variant="destructive"
+                                size="sm"
+                                className="gap-1.5 cursor-pointer flex-1"
+                                onClick={() => setReviewDialog({
+                                  open: true,
+                                  verification: v,
+                                  action: 'reject',
+                                  adminNote: '',
+                                })}
+                              >
+                                <X className="h-3.5 w-3.5" /> Reject
+                              </Button>
+                            </div>
+                          )}
+                        </Card>
+                      )
+                    })}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            {/* All users table - direct activate/suspend */}
+            <Card className="overflow-hidden">
+              <CardHeader className="pb-4 px-4 md:px-6">
+                <CardTitle className="text-base md:text-lg flex items-center gap-2">
+                  All Users
+                  <Badge variant="secondary" className="text-xs ml-2 cursor-default">
+                    {allUsers.length} total
+                  </Badge>
+                </CardTitle>
+                <CardDescription>
+                  Direct account management (bypasses the verification flow)
+                </CardDescription>
+              </CardHeader>
+              <CardContent className="px-0 md:px-6 pb-0 md:pb-6">
+                {allUsers.length === 0 ? (
+                  <div className="text-center py-12">
+                    <Users className="h-12 w-12 mx-auto text-muted-foreground opacity-50 mb-3" />
+                    <p className="text-sm text-muted-foreground">No users yet</p>
+                  </div>
+                ) : (
+                  <div className="hidden md:block overflow-x-auto">
+                    <Table>
+                      <TableHeader>
+                        <TableRow>
+                          <TableHead className="w-[200px]">Name</TableHead>
+                          <TableHead className="w-[220px]">Email</TableHead>
+                          <TableHead className="w-[120px]">Status</TableHead>
+                          <TableHead className="w-[100px]">Plan</TableHead>
+                          <TableHead className="w-[120px]">Activated</TableHead>
+                          <TableHead className="w-[180px] text-right">Actions</TableHead>
+                        </TableRow>
+                      </TableHeader>
+                      <TableBody>
+                        {allUsers.map((u) => (
+                          <TableRow key={u.id}>
+                            <TableCell className="font-medium text-sm">{u.name}</TableCell>
+                            <TableCell className="text-sm text-muted-foreground">{u.email}</TableCell>
+                            <TableCell>
+                              {u.status === 'active' ? (
+                                <Badge className="bg-green-600 cursor-default">active</Badge>
+                              ) : u.status === 'suspended' ? (
+                                <Badge variant="destructive" className="cursor-default">suspended</Badge>
+                              ) : (
+                                <Badge variant="secondary" className="cursor-default">pending</Badge>
+                              )}
+                            </TableCell>
+                            <TableCell className="text-xs">{u.planId ?? '—'}</TableCell>
+                            <TableCell className="text-xs text-muted-foreground">
+                              {u.activatedAt ? new Date(u.activatedAt).toLocaleDateString('en-PK', { month: 'short', day: 'numeric' }) : '—'}
+                            </TableCell>
+                            <TableCell className="text-right">
+                              <Button
+                                size="sm"
+                                variant={u.status === 'active' ? 'outline' : 'default'}
+                                disabled={u.status === 'active' || isSaving}
+                                className="gap-1.5 cursor-pointer h-8 text-xs"
+                                onClick={() => setUserActionDialog({
+                                  open: true,
+                                  user: u,
+                                  action: 'activate',
+                                  note: '',
+                                })}
+                              >
+                                <UserCheck className="h-3.5 w-3.5" /> Activate
+                              </Button>
+                              {u.status !== 'suspended' && (
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  disabled={isSaving}
+                                  className="gap-1.5 cursor-pointer h-8 text-xs ml-1.5 text-red-600 hover:text-red-700 hover:bg-red-50"
+                                  onClick={() => setUserActionDialog({
+                                    open: true,
+                                    user: u,
+                                    action: 'suspend',
+                                    note: '',
+                                  })}
+                                >
+                                  <UserX className="h-3.5 w-3.5" /> Suspend
+                                </Button>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        ))}
+                      </TableBody>
+                    </Table>
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+          </div>
+        )}
+
+        {/* ===== PLANS TAB (legacy content) ===== */}
+        {activeTab === 'plans' && (
+          <>
         {/* Page Header */}
         <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4 mb-6">
           <div>
             <h2 className="text-2xl md:text-3xl font-bold tracking-tight">Plan Management</h2>
             <p className="text-muted-foreground mt-1 text-sm md:text-base">
-              {plans.length} plan{plans.length !== 1 ? 's' : ''} configured in database
+              {plans?.length ?? 0} plan{plans && plans.length !== 1 ? 's' : ''} configured in database
             </p>
           </div>
           
@@ -708,7 +1351,7 @@ export default function AdminPage() {
               <div className="flex justify-between items-center">
                 <div>
                   <p className="text-xs text-muted-foreground">Total Plans</p>
-                  <p className="text-xl md:text-2xl font-bold">{plans.length}</p>
+                  <p className="text-xl md:text-2xl font-bold">{plans?.length ?? 0}</p>
                 </div>
                 <Settings2 className="h-6 w-6 md:h-8 md:w-8 text-primary/30" />
               </div>
@@ -721,7 +1364,7 @@ export default function AdminPage() {
                 <div>
                   <p className="text-xs text-muted-foreground">Active</p>
                   <p className="text-xl md:text-2xl font-bold text-green-600">
-                    {plans.filter(p => p.active).length}
+                    {(plans ?? []).filter(p => p.active).length}
                   </p>
                 </div>
                 <Check className="h-6 w-6 md:h-8 md:w-8 text-green-600" />
@@ -735,7 +1378,7 @@ export default function AdminPage() {
                 <div>
                   <p className="text-xs text-muted-foreground">Popular</p>
                   <p className="text-xl md:text-2xl font-bold text-yellow-600">
-                    {plans.find(p => p.popular)?.name || '-'}
+                    {(plans ?? []).find(p => p.popular)?.name || '-'}
                   </p>
                 </div>
                 <Star className="h-6 w-6 md:h-8 md:w-8 text-yellow-500" />
@@ -749,7 +1392,7 @@ export default function AdminPage() {
                 <div>
                   <p className="text-xs text-muted-foreground">Inactive</p>
                   <p className="text-xl md:text-2xl font-bold text-muted-foreground">
-                    {plans.filter(p => !p.active).length}
+                    {(plans ?? []).filter(p => !p.active).length}
                   </p>
                 </div>
                 <AlertCircle className="h-6 w-6 md:h-8 md:w-8 text-muted-foreground/50" />
@@ -774,7 +1417,7 @@ export default function AdminPage() {
           
           <CardContent className="px-0 md:px-6 pb-0 md:pb-6">
             {/* Empty State */}
-            {plans.length === 0 && (
+            {(plans ?? []).length === 0 && (
               <div className="text-center py-12 px-4">
                 <div className="h-16 w-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
                   <Settings2 className="h-8 w-8 text-muted-foreground" />
@@ -791,7 +1434,7 @@ export default function AdminPage() {
 
             {/* Mobile Card View */}
             <div className="md:hidden space-y-3 px-4 pb-4">
-              {plans.map((plan) => {
+              {(plans ?? []).map((plan) => {
                 const IconComp = iconMap[plan.icon] || Crown
                 return (
                   <Card key={plan._id} className={`${!plan.active ? 'opacity-60' : ''}`}>
@@ -905,7 +1548,7 @@ export default function AdminPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {plans.map((plan) => {
+                  {(plans ?? []).map((plan) => {
                     const IconComp = iconMap[plan.icon] || Crown
                     return (
                       <TableRow key={plan._id} className={`${!plan.active ? 'opacity-60' : ''}`}>
@@ -993,6 +1636,206 @@ export default function AdminPage() {
             </div>
           </CardContent>
         </Card>
+          </>
+        )}
+
+        {/* ===== Review Verification Dialog (approve/reject) ===== */}
+        <Dialog open={reviewDialog.open} onOpenChange={(open) => {
+          setReviewDialog(prev => ({ ...prev, open }))
+          if (!open) {
+            setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
+          }
+        }}>
+          <DialogContent className="mx-4 sm:mx-0 max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-xl">
+                {reviewDialog.action === 'approve' ? (
+                  <>
+                    <UserCheck className="h-5 w-5 text-green-600" />
+                    Approve Verification
+                  </>
+                ) : (
+                  <>
+                    <UserX className="h-5 w-5 text-red-600" />
+                    Reject Verification
+                  </>
+                )}
+              </DialogTitle>
+              <DialogDescription>
+                {reviewDialog.action === 'approve'
+                  ? 'This will activate the user account and unlock AI generation immediately.'
+                  : 'Provide a reason for rejection. The user will see this note on their billing page.'}
+              </DialogDescription>
+            </DialogHeader>
+
+            {reviewDialog.verification && (
+              <div className="bg-muted/50 rounded-lg p-4 space-y-2 my-4 border">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Transaction</span>
+                  <span className="font-mono">{reviewDialog.verification.transactionId}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Amount</span>
+                  <span className="font-medium">
+                    {reviewDialog.verification.currency} {reviewDialog.verification.amount.toLocaleString()}
+                  </span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Method</span>
+                  <span className="font-medium capitalize">
+                    {reviewDialog.verification.paymentMethod.replace('_', ' ')}
+                  </span>
+                </div>
+                {reviewDialog.verification.notes && (
+                  <div className="border-t pt-2 mt-2">
+                    <p className="text-xs text-muted-foreground mb-1">User notes:</p>
+                    <p className="text-sm">{reviewDialog.verification.notes}</p>
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="admin-note">
+                {reviewDialog.action === 'approve' ? 'Note (optional)' : 'Reason for rejection *'}
+              </Label>
+              <Textarea
+                id="admin-note"
+                placeholder={
+                  reviewDialog.action === 'approve'
+                    ? 'Optional note for the user (e.g. "Welcome to Filo!")'
+                    : 'Required - e.g. "Transaction ID not found in our records. Please verify and resubmit."'
+                }
+                value={reviewDialog.adminNote}
+                onChange={(e) => setReviewDialog(prev => ({ ...prev, adminNote: e.target.value }))}
+                rows={3}
+                className="cursor-text"
+              />
+            </div>
+
+            <DialogFooter className="flex-col sm:flex-row gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })}
+                disabled={isSaving}
+                className="w-full sm:w-auto cursor-pointer"
+              >
+                Cancel
+              </Button>
+              <Button
+                variant={reviewDialog.action === 'approve' ? 'default' : 'destructive'}
+                onClick={reviewDialog.action === 'approve' ? handleApproveVerification : handleRejectVerification}
+                disabled={isSaving || (reviewDialog.action === 'reject' && !reviewDialog.adminNote.trim())}
+                className="w-full sm:w-auto gap-2 cursor-pointer"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {reviewDialog.action === 'approve' ? 'Approving...' : 'Rejecting...'}
+                  </>
+                ) : (
+                  <>
+                    {reviewDialog.action === 'approve' ? <Check className="h-4 w-4" /> : <X className="h-4 w-4" />}
+                    {reviewDialog.action === 'approve' ? 'Approve & Activate' : 'Reject with Reason'}
+                  </>
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
+
+        {/* ===== User Action Dialog (direct activate/suspend) ===== */}
+        <Dialog open={userActionDialog.open} onOpenChange={(open) => {
+          setUserActionDialog(prev => ({ ...prev, open }))
+          if (!open) {
+            setUserActionDialog({ open: false, user: null, action: 'activate', note: '' })
+          }
+        }}>
+          <DialogContent className="mx-4 sm:mx-0 max-w-md">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2 text-xl">
+                {userActionDialog.action === 'activate' ? (
+                  <>
+                    <UserCheck className="h-5 w-5 text-green-600" />
+                    Activate User
+                  </>
+                ) : (
+                  <>
+                    <UserX className="h-5 w-5 text-red-600" />
+                    Suspend User
+                  </>
+                )}
+              </DialogTitle>
+              <DialogDescription>
+                {userActionDialog.action === 'activate'
+                  ? 'Manually activate this user account. They will be able to perform AI generation immediately.'
+                  : 'Suspend this user account. They will lose access to AI generation until reactivated.'}
+              </DialogDescription>
+            </DialogHeader>
+
+            {userActionDialog.user && (
+              <div className="bg-muted/50 rounded-lg p-4 space-y-2 my-4 border">
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Name</span>
+                  <span className="font-medium">{userActionDialog.user.name}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Email</span>
+                  <span className="font-medium">{userActionDialog.user.email}</span>
+                </div>
+                <div className="flex justify-between text-sm">
+                  <span className="text-muted-foreground">Current status</span>
+                  <span className="font-medium capitalize">{userActionDialog.user.status.replace('_', ' ')}</span>
+                </div>
+              </div>
+            )}
+
+            <div className="space-y-2">
+              <Label htmlFor="user-action-note">Note (optional)</Label>
+              <Textarea
+                id="user-action-note"
+                placeholder={
+                  userActionDialog.action === 'activate'
+                    ? 'Optional note (e.g. "Internal team member")'
+                    : 'Optional reason shown to the user (e.g. "Suspicious activity detected")'
+                }
+                value={userActionDialog.note}
+                onChange={(e) => setUserActionDialog(prev => ({ ...prev, note: e.target.value }))}
+                rows={3}
+                className="cursor-text"
+              />
+            </div>
+
+            <DialogFooter className="flex-col sm:flex-row gap-2">
+              <Button
+                variant="outline"
+                onClick={() => setUserActionDialog({ open: false, user: null, action: 'activate', note: '' })}
+                disabled={isSaving}
+                className="w-full sm:w-auto cursor-pointer"
+              >
+                Cancel
+              </Button>
+              <Button
+                variant={userActionDialog.action === 'activate' ? 'default' : 'destructive'}
+                onClick={handleUserAction}
+                disabled={isSaving}
+                className="w-full sm:w-auto gap-2 cursor-pointer"
+              >
+                {isSaving ? (
+                  <>
+                    <Loader2 className="h-4 w-4 animate-spin" />
+                    {userActionDialog.action === 'activate' ? 'Activating...' : 'Suspending...'}
+                  </>
+                ) : (
+                  <>
+                    {userActionDialog.action === 'activate' ? <UserCheck className="h-4 w-4" /> : <UserX className="h-4 w-4" />}
+                    {userActionDialog.action === 'activate' ? 'Activate Account' : 'Suspend Account'}
+                  </>
+                )}
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </main>
 
       {/* Delete Confirmation Dialog */}

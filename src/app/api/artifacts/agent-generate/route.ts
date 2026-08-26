@@ -8,6 +8,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { agentRouter, type AgentRouterInput } from '@/services/agent-router'
+import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -28,7 +29,7 @@ export async function POST(request: NextRequest) {
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
       convexClient = getConvexClient()
-      session = await convexClient.query('auth:validateSession', { token })
+      session = await convexClient.query(api.auth.validateSession, { token })
     } catch (convexErr) {
       // If Convex is not configured, skip session validation (dev mode)
       console.warn('[AGENT-GENERATE] Convex not available, skipping session check')
@@ -39,6 +40,33 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
         { status: 401 }
+      )
+    }
+
+    // ==================== ACCOUNT ACTIVATION ENFORCEMENT ====================
+    // Manual activation flow: only "active" users can perform chat/generation.
+    // Users with status "pending_activation" or "suspended" are blocked here
+    // (defense-in-depth — the client also gates on user.status).
+    const userStatus = session.user.status
+    if (userStatus && userStatus !== 'active') {
+      const message =
+        userStatus === 'pending_activation'
+          ? 'Your account is pending activation. An administrator will activate it after verifying your payment. Please try again later.'
+          : userStatus === 'suspended'
+            ? 'Your account has been suspended. Please contact support for assistance.'
+            : 'Your account is not active. Please contact support.'
+      return NextResponse.json(
+        {
+          success: false,
+          error: message,
+          code:
+            userStatus === 'pending_activation'
+              ? 'ACCOUNT_PENDING_ACTIVATION'
+              : userStatus === 'suspended'
+                ? 'ACCOUNT_SUSPENDED'
+                : 'ACCOUNT_NOT_ACTIVE',
+        },
+        { status: 403 }
       )
     }
 
@@ -94,7 +122,7 @@ export async function POST(request: NextRequest) {
     // Save artifact record to Convex (non-blocking, best-effort)
     try {
       if (convexClient && session.user.id !== 'dev-user') {
-        await convexClient.mutation('artifacts:saveArtifactRecord', {
+        await convexClient.mutation(api.artifacts.saveArtifactRecord, {
           userId: session.user.id,
           title: result.artifact.title,
           type: result.artifact.type,
@@ -112,7 +140,7 @@ export async function POST(request: NextRequest) {
     // Record usage (non-blocking)
     try {
       if (convexClient && session.user.id !== 'dev-user') {
-        await convexClient.mutation('subscriptions:recordAIGeneration', {
+        await convexClient.mutation(api.subscriptions.recordAIGeneration, {
           userId: session.user.id,
         }).catch(() => {})
       }

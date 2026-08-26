@@ -15,13 +15,53 @@ export default defineSchema({
     image: v.optional(v.string()),
     passwordHash: v.optional(v.string()), // For email/password auth
     planId: v.optional(v.id("plans")),
-    // Provider-agnostic customer ID (Safepay for beta)
+    // Provider-agnostic customer ID (legacy Safepay field, kept for backward compat)
     providerCustomerId: v.optional(v.string()),
+    // Manual activation flow: every new signup starts as "pending_activation".
+    // Admin must verify payment and flip status to "active" before user can
+    // generate artifacts. "suspended" revokes access.
+    status: v.union(
+      v.literal("pending_activation"),
+      v.literal("active"),
+      v.literal("suspended")
+    ),
+    activatedAt: v.optional(v.number()),
+    activationNote: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_email", ["email"])
+    .index("by_status", ["status"])
     .index("by_providerCustomerId", ["providerCustomerId"]),
+
+  // Payment verifications (manual admin-verified payment flow)
+  // Replaces the SafePay automatic checkout flow. A user submits their
+  // payment details (transaction id, method, amount, notes). An admin
+  // reviews and either approves (which activates the user account) or
+  // rejects (with a reason that is surfaced back to the user).
+  paymentVerifications: defineTable({
+    userId: v.id("users"),
+    planId: v.optional(v.id("plans")),
+    amount: v.number(),
+    currency: v.string(), // "PKR"
+    paymentMethod: v.string(), // bank_transfer | easypaisa | jazzcash | other
+    transactionId: v.string(), // user-submitted reference / TRX ID
+    proofUrl: v.optional(v.string()), // optional screenshot / receipt URL
+    notes: v.optional(v.string()), // user-submitted notes
+    status: v.union(
+      v.literal("pending"),
+      v.literal("approved"),
+      v.literal("rejected")
+    ),
+    reviewedBy: v.optional(v.string()),
+    reviewedAt: v.optional(v.number()),
+    adminNote: v.optional(v.string()), // admin feedback shown to user
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_status", ["status"])
+    .index("by_userId_status", ["userId", "status"]),
 
   // Sessions (for authentication)
   sessions: defineTable({
@@ -56,12 +96,15 @@ export default defineSchema({
     .index("by_active", ["active"])
     .index("by_order", ["order"]),
 
-  // Subscriptions (provider-agnostic)
+  // Subscriptions (manual admin-verified flow — SafePay removed)
   subscriptions: defineTable({
     userId: v.id("users"),
     workspaceId: v.optional(v.id("workspaces")),
     planId: v.id("plans"),
-    provider: v.literal("safepay"), // Safepay only for beta
+    // SafePay removed; subscriptions are now created manually by the admin
+    // when activating a user. We accept any string for backward compat with
+    // historical records and to avoid a schema-breaking change.
+    provider: v.string(),
     status: v.union(
       v.literal("active"),
       v.literal("canceled"),
@@ -147,7 +190,7 @@ export default defineSchema({
     .index("by_userId_period", ["userId", "periodStart", "periodEnd"])
     .index("by_type_period", ["type", "periodStart"]),
 
-  // Payments (Safepay for beta)
+  // Payments (manual admin-verified flow — SafePay removed)
   payments: defineTable({
     userId: v.id("users"),
     subscriptionId: v.optional(v.id("subscriptions")),
@@ -160,7 +203,10 @@ export default defineSchema({
       v.literal("refunded"),
       v.literal("cancelled")
     ),
-    provider: v.literal("safepay"),
+    // SafePay removed; payments are now recorded manually by the admin
+    // when approving a payment verification. We accept any string for
+    // backward compat with historical records.
+    provider: v.string(),
     providerPaymentId: v.optional(v.string()),
     invoiceId: v.optional(v.string()),
     description: v.string(),
@@ -172,7 +218,8 @@ export default defineSchema({
     .index("by_status", ["status"])
     .index("by_providerPaymentId", ["providerPaymentId"]),
 
-  // Webhook events (for idempotency - critical for payment security)
+  // Webhook events (legacy, kept for backward compat; SafePay removed so
+  // these will not receive new events, but historical records remain).
   webhookEvents: defineTable({
     provider: v.union(v.literal("safepay"), v.literal("custom")),
     eventId: v.string(),

@@ -46,18 +46,30 @@ export async function GET(request: NextRequest) {
     let artifacts: any[] = []
     
     try {
-      // Try to call a list function if it exists
-      artifacts = await convex.query(api.artifacts.listUserArtifacts, {
+      // listUserArtifacts accepts userId + limit. Search/type filtering is
+      // applied in-memory here (small result sets); move it into the Convex
+      // query with a searchIndex if artifact counts grow.
+      const all = await convex.query(api.artifacts.listUserArtifacts, {
         userId: session.user.id,
-        search,
-        type,
-        limit,
-        offset,
-      }) as any[]
+        limit: Math.max(limit + offset, 50),
+      })
+      let filtered = (all as any[]) || []
+      if (type) {
+        filtered = filtered.filter((a) => a.type === type)
+      }
+      if (search) {
+        const q = search.toLowerCase()
+        filtered = filtered.filter(
+          (a) =>
+            (a.title || '').toLowerCase().includes(q) ||
+            (a.prompt || '').toLowerCase().includes(q)
+        )
+      }
+      artifacts = filtered.slice(offset, offset + limit)
     } catch {
-      // Fallback: If no list function exists, return empty array
-      // In production, implement proper pagination/filtering in Convex
-      console.warn('[API /artifacts] No listUserArtifacts query found, returning empty')
+      // Fallback: If the query fails (e.g. Convex cold start), return empty
+      // rather than throwing — the UI shows an empty state.
+      console.warn('[API /artifacts] listUserArtifacts query failed, returning empty')
       artifacts = []
     }
 

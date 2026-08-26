@@ -118,13 +118,14 @@ export const getSubscriptionByProviderId = query({
 
 /**
  * Create a new subscription record
- * Called after successful payment or when starting trial
+ * Called manually by admin when activating a user account after verifying payment
  */
 export const createSubscription = mutation({
   args: {
     userId: v.id("users"),
     planId: v.id("plans"),
-    provider: v.literal("safepay"),
+    // SafePay removed; subscriptions are now created manually by admin.
+    provider: v.string(),
     providerSubscriptionId: v.optional(v.string()),
     providerCustomerId: v.optional(v.string()),
     status: v.union(

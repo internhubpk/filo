@@ -6,10 +6,15 @@
 // These tests do NOT spin up Next.js or call Convex — they verify that the
 // most critical modules (after the Phase 1 fixes) can be imported and basic
 // invariants hold.
+//
+// NOTE: Updated after the upstream merge that REMOVED SafePay and replaced it
+// with a manual admin-verified payment flow (bank transfer / EasyPaisa /
+// JazzCash + admin approval). Tests now assert the new architecture instead
+// of the old SafePay one.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readFileSync, existsSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -36,43 +41,26 @@ test('next.config.ts has ignoreBuildErrors=false', () => {
   )
 })
 
-test('convex/safepay_internal.ts exists (action mutation/query shim)', () => {
-  const path = resolve(REPO_ROOT, 'convex', 'safepay_internal.ts')
-  const text = readFileSync(path, 'utf8')
-  assert.ok(text.length > 0, 'safepay_internal.ts is empty')
-  // Critical mutations/queries must be present.
-  assert.ok(text.includes('recordWebhookEvent'), 'missing recordWebhookEvent mutation')
-  assert.ok(text.includes('markWebhookProcessed'), 'missing markWebhookProcessed mutation')
-  assert.ok(text.includes('insertPendingPayment'), 'missing insertPendingPayment mutation')
-  assert.ok(text.includes('createSubscription'), 'missing createSubscription mutation')
+test('SafePay files are fully removed (replaced by manual payment flow)', () => {
+  const removedFiles = [
+    'convex/safepay.ts',
+    'convex/safepay-webhook.ts',
+    'src/app/api/webhooks/safepay/route.ts',
+  ]
+  for (const rel of removedFiles) {
+    assert.equal(
+      existsSync(resolve(REPO_ROOT, rel)),
+      false,
+      `${rel} should not exist — SafePay was removed upstream`
+    )
+  }
 })
 
-test('convex/safepay-webhook.ts uses runMutation/runQuery, not ctx.db', () => {
-  const path = resolve(REPO_ROOT, 'convex', 'safepay-webhook.ts')
+test('manual payment flow: paymentVerifications module exists', () => {
+  const path = resolve(REPO_ROOT, 'convex', 'paymentVerifications.ts')
+  assert.ok(existsSync(path), 'convex/paymentVerifications.ts must exist')
   const text = readFileSync(path, 'utf8')
-  // Actions must not use ctx.db directly — that's the bug we fixed in Phase 1.
-  assert.ok(
-    !/^\s*await ctx\.db\./m.test(text),
-    'safepay-webhook.ts action handler still uses ctx.db directly'
-  )
-  // Confirm it dispatches via runQuery/runMutation.
-  assert.ok(
-    text.includes('ctx.runMutation(api.safepayInternal'),
-    'safepay-webhook.ts must dispatch via ctx.runMutation(api.safepayInternal.*)'
-  )
-})
-
-test('convex/safepay.ts uses runMutation/runQuery, not ctx.db', () => {
-  const path = resolve(REPO_ROOT, 'convex', 'safepay.ts')
-  const text = readFileSync(path, 'utf8')
-  assert.ok(
-    !/^\s*await ctx\.db\./m.test(text),
-    'safepay.ts action handler still uses ctx.db directly'
-  )
-  assert.ok(
-    text.includes('ctx.runMutation(api.safepayInternal'),
-    'safepay.ts must dispatch via ctx.runMutation(api.safepayInternal.*)'
-  )
+  assert.ok(text.includes('createVerification'), 'missing createVerification mutation')
 })
 
 test('convex/auth.ts query handlers do not call ctx.db.delete (read-only)', () => {
@@ -86,7 +74,16 @@ test('convex/auth.ts query handlers do not call ctx.db.delete (read-only)', () =
   )
 })
 
-test('all route handlers use @convex/_generated/api alias (no relative paths)', () => {
+test('convex/sessions.ts query handlers do not call ctx.db.delete (read-only)', () => {
+  const path = resolve(REPO_ROOT, 'convex', 'sessions.ts')
+  const text = readFileSync(path, 'utf8')
+  assert.ok(
+    !/validateSessionToken[\s\S]*?ctx\.db\.delete/.test(text),
+    'sessions.ts validateSessionToken query still calls ctx.db.delete (queries are read-only)'
+  )
+})
+
+test('all route handlers use @convex/_generated/api alias (no string refs)', () => {
   const routes = [
     'src/app/api/artifacts/generate/route.ts',
     'src/app/api/artifacts/route.ts',
@@ -96,6 +93,7 @@ test('all route handlers use @convex/_generated/api alias (no relative paths)', 
     'src/app/api/auth/validate/route.ts',
     'src/app/api/payments/create-checkout/route.ts',
     'src/app/api/payments/verify/route.ts',
+    'src/app/api/payments/submit/route.ts',
     'src/app/api/plans/route.ts',
     'src/app/api/subscription/status/route.ts',
   ]
@@ -103,7 +101,30 @@ test('all route handlers use @convex/_generated/api alias (no relative paths)', 
     const text = readFileSync(resolve(REPO_ROOT, rel), 'utf8')
     assert.ok(
       text.includes("from '@convex/_generated/api'"),
-      `${rel} must import api from @convex/_generated/api (was using a broken relative path)`
+      `${rel} must import api from @convex/_generated/api (was using a broken string ref)`
+    )
+    // No colon-style string refs should remain anywhere in the route file.
+    assert.ok(
+      !/\.(query|mutation|action)\(\s*'[a-zA-Z_]+:[a-zA-Z_]+'/.test(text),
+      `${rel} still contains a 'module:function' string ref (broken format)`
+    )
+  }
+})
+
+test('admin routes (new from upstream merge) use api.* references too', () => {
+  const adminRoutes = [
+    'src/app/api/admin/users/route.ts',
+    'src/app/api/admin/users/[userId]/activate/route.ts',
+    'src/app/api/admin/users/[userId]/suspend/route.ts',
+    'src/app/api/admin/verifications/route.ts',
+    'src/app/api/admin/verifications/[id]/approve/route.ts',
+    'src/app/api/admin/verifications/[id]/reject/route.ts',
+  ]
+  for (const rel of adminRoutes) {
+    const text = readFileSync(resolve(REPO_ROOT, rel), 'utf8')
+    assert.ok(
+      !/\.(query|mutation|action)\(\s*'[a-zA-Z_]+:[a-zA-Z_]+'/.test(text),
+      `${rel} still contains a 'module:function' string ref (broken format)`
     )
   }
 })
@@ -117,12 +138,18 @@ test('convex/artifacts.ts exposes listUserArtifacts query', () => {
   )
 })
 
-test('dashboard route no longer uses broken toast-call-with-object pattern', () => {
-  const path = resolve(REPO_ROOT, 'src', 'components', 'dashboard', 'main-dashboard.tsx')
-  const text = readFileSync(path, 'utf8')
-  // Pattern that was broken: `toast.error('msg', { description: '...' })`
-  assert.ok(
-    !/toast\.\w+\([^,)]+,\s*\{\s*description:/.test(text),
-    'dashboard still uses old {description: ...} object arg in toast calls'
-  )
+test('UI pages no longer use broken toast-call-with-object pattern', () => {
+  const pages = [
+    'src/app/pricing/page.tsx',
+    'src/components/billing/billing-page.tsx',
+    'src/components/dashboard/main-dashboard.tsx',
+  ]
+  for (const rel of pages) {
+    const text = readFileSync(resolve(REPO_ROOT, rel), 'utf8')
+    // Pattern that was broken: `toast.error('msg', { description: '...' })`
+    assert.ok(
+      !/toast\.\w+\([^,)]+?,\s*\{\s*description:/.test(text),
+      `${rel} still uses old {description: ...} object arg in toast calls`
+    )
+  }
 })

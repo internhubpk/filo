@@ -79,6 +79,10 @@ export const validateSessionToken = query({
       return { valid: false, user: null, session: null, reason: "not_found" as const };
     }
 
+    // Check expiration
+    // NOTE: queries are read-only in Convex — we cannot delete the session
+    // here. We surface `reason: "expired"` so callers can fire a
+    // `deleteSession` mutation to clean up.
     if (session.expiresAt < Date.now()) {
       return {
         valid: false,
