@@ -1211,47 +1211,56 @@ export function MainDashboard() {
                 title: 'Documents',
                 formats: ['DOCX', 'PDF'],
                 description: 'Reports, proposals, plans, research papers with proper formatting',
+                prompt: 'Create a professional business report with executive summary, findings, and recommendations',
               },
               {
                 icon: Table,
                 title: 'Spreadsheets',
                 formats: ['XLSX', 'CSV'],
                 description: 'Budgets, trackers, schedules with formulas and calculations',
+                prompt: 'Create a professional budget spreadsheet with income, expenses, and summary totals',
               },
               {
                 icon: Presentation,
                 title: 'Presentations',
                 formats: ['PPTX'],
                 description: 'Engaging slides with consistent design and visuals',
+                prompt: 'Create a 10-slide professional presentation about digital marketing strategy for small businesses',
               },
               {
                 icon: BarChart3,
                 title: 'Charts & Diagrams',
                 formats: ['Embedded'],
                 description: 'Data visualizations, flowcharts, org charts, and more',
+                prompt: 'Create a professional bar chart and pie chart visualizing quarterly sales data by region',
               },
             ].map((capability, index) => (
               <Card 
                 key={index} 
-                className="text-center transition-all duration-200 hover:shadow-lg hover:-translate-y-1 cursor-default group"
+                className="text-center transition-all duration-200 hover:shadow-lg hover:-translate-y-1 cursor-pointer group hover:border-primary/50"
+                onClick={() => handleExampleClick(capability.prompt)}
               >
                 <CardContent className="pt-6 pb-6">
                   <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-xl bg-primary/10 transition-transform duration-200 group-hover:scale-110 group-hover:bg-primary/15">
                     <capability.icon className="h-7 w-7 text-primary" />
                   </div>
-                  <h3 className="mb-2 font-semibold text-lg">{capability.title}</h3>
+                  <h3 className="mb-2 font-semibold text-lg group-hover:text-primary transition-colors">{capability.title}</h3>
                   <div className="mb-3 flex justify-center gap-1.5 flex-wrap">
                     {capability.formats.map(format => (
                       <Badge 
                         key={format} 
                         variant="secondary" 
-                        className="text-xs font-mono cursor-default"
+                        className="text-xs font-mono cursor-pointer"
                       >
                         {format}
                       </Badge>
                     ))}
                   </div>
                   <p className="text-sm text-muted-foreground leading-relaxed">{capability.description}</p>
+                  <div className="mt-3 flex items-center justify-center text-sm font-medium text-primary opacity-0 translate-y-2 transition-all duration-200 group-hover:opacity-100 group-hover:translate-y-0">
+                    Try it
+                    <ArrowRight className="ml-1 h-4 w-4" />
+                  </div>
                 </CardContent>
               </Card>
             ))}
