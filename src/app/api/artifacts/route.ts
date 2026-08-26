@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getConvexClient } from '@/lib/convex-server'
+import { api } from '@convex/_generated/api'
 
 export async function GET(request: NextRequest) {
   try {
@@ -23,7 +24,7 @@ export async function GET(request: NextRequest) {
     // Validate session
     const convex = getConvexClient()
     
-    const session = await convex.query('auth:validateSession', { token })
+    const session = await convex.query(api.auth.validateSession, { token })
     if (!session.valid || !session.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
@@ -46,7 +47,7 @@ export async function GET(request: NextRequest) {
     
     try {
       // Try to call a list function if it exists
-      artifacts = await convex.query('artifacts:listUserArtifacts', {
+      artifacts = await convex.query(api.artifacts.listUserArtifacts, {
         userId: session.user.id,
         search,
         type,

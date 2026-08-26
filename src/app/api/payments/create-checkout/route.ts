@@ -6,6 +6,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { api } from '@convex/_generated/api'
 
 const IS_DEV = process.env.NODE_ENV === 'development'
 
@@ -40,7 +41,7 @@ export async function POST(request: NextRequest) {
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
       const convex = getConvexClient()
-      const session = await convex.query('auth:validateSession', { token })
+      const session = await convex.query(api.auth.validateSession, { token })
 
       if (!session?.valid || !session?.user) {
         return NextResponse.json(
@@ -167,7 +168,7 @@ export async function POST(request: NextRequest) {
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
       const convex = getConvexClient()
-      await convex.mutation('payments:createPendingPayment', {
+      await convex.mutation(api.payments.createPendingPayment, {
         userId,
         amount,
         currency: 'PKR',

@@ -212,7 +212,12 @@ export const signup = action({
 });
 
 /**
- * Validate session token - returns user data if valid
+ * Validate session token - returns user data if valid.
+ *
+ * NOTE: This is a `query` (read-only). It cannot delete an expired session —
+ * callers should fire a follow-up `api.sessions.deleteSession` mutation if
+ * `valid=false` and `reason="expired"`. We surface `reason` so the client can
+ * decide whether to clean up.
  */
 export const validateSession = query({
   args: {
@@ -225,25 +230,27 @@ export const validateSession = query({
       .first();
 
     if (!session) {
-      return { valid: false, user: null };
+      return { valid: false, user: null, reason: "not_found" as const };
     }
 
-    // Check expiration
     if (session.expiresAt < Date.now()) {
-      await ctx.db.delete(session._id);
-      return { valid: false, user: null };
+      // Surface expiration so callers can call deleteSession mutation
+      return {
+        valid: false,
+        user: null,
+        reason: "expired" as const,
+        sessionId: session._id,
+      };
     }
 
-    // Get user data
     const user = await ctx.db.get(session.userId);
-    
+
     return {
       valid: true,
-      user: user ? {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-      } : null,
+      user: user
+        ? { id: user._id, name: user.name, email: user.email }
+        : null,
+      reason: "active" as const,
     };
   },
 });

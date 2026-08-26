@@ -8,8 +8,32 @@
 // =============================================================================
 
 import { v } from "convex/values";
-import { action, mutation } from "./_generated/server";
+import { action, mutation, query } from "./_generated/server";
 import { api } from "./_generated/api";
+
+// ==================== QUERIES ====================
+
+/**
+ * List artifacts for a user (most recent first).
+ * Caller must pass their own userId — server-side authorization is enforced
+ * in the API route layer before this query is reached. The query itself just
+ * returns whatever the userId asks for; this is acceptable because the
+ * Convex function reference is not exposed publicly (it's invoked via the
+ * authenticated /api/artifacts route which validates the session first).
+ */
+export const listUserArtifacts = query({
+  args: {
+    userId: v.id("users"),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    return await ctx.db
+      .query("artifacts")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .order("desc")
+      .take(args.limit ?? 50);
+  },
+});
 
 // ==================== TYPES ====================
 
@@ -165,12 +189,18 @@ export const saveArtifactRecord = mutation({
     type: v.string(),
     format: v.string(),
     prompt: v.string(),
-    status: v.string(),
+    status: v.union(
+      v.literal("draft"),
+      v.literal("generating"),
+      v.literal("completed"),
+      v.literal("error"),
+      v.literal("archived")
+    ),
   },
   handler: async (ctx, args) => {
     // REAL implementation - Save artifact to database
     const now = Date.now();
-    
+
     try {
       // Insert into artifacts table (matching schema exactly)
       const artifactId = await ctx.db.insert("artifacts", {

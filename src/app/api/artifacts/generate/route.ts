@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getConvexClient } from '@/lib/convex-server'
+import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -23,7 +24,7 @@ export async function POST(request: NextRequest) {
     // Validate session first
     const convex = getConvexClient()
     
-    const session = await convex.query('auth:validateSession', { token })
+    const session = await convex.query(api.auth.validateSession, { token })
     if (!session.valid || !session.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
@@ -47,7 +48,7 @@ export async function POST(request: NextRequest) {
 
     // Check subscription/usage limits (optional - can be skipped for MVP)
     try {
-      const subscriptionStatus = await convex.query('subscriptions:canGenerateAI', {
+      const subscriptionStatus = await convex.query(api.subscriptions.canGenerateAI, {
         userId: session.user.id,
       })
 
@@ -71,7 +72,7 @@ export async function POST(request: NextRequest) {
     }
 
     // Call Convex action to generate artifact
-    const result = await convex.action('artifacts:generateArtifact', {
+    const result = await convex.action(api.artifacts.generateArtifact, {
       prompt: prompt.trim(),
       artifactType: artifactType || undefined,
       outputFormat: outputFormat || undefined,
@@ -108,7 +109,7 @@ export async function POST(request: NextRequest) {
 
     // Record usage after successful generation
     try {
-      await convex.mutation('subscriptions:recordAIGeneration', {
+      await convex.mutation(api.subscriptions.recordAIGeneration, {
         userId: session.user.id,
       })
     } catch (usageError) {

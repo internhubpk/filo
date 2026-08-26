@@ -5,6 +5,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { api } from '@convex/_generated/api'
 
 const IS_DEV = process.env.NODE_ENV === 'development'
 
@@ -82,7 +83,7 @@ export async function POST(request: NextRequest) {
       
       let existingUser
       try {
-        existingUser = await convex.query('users:getUserByEmail', {
+        existingUser = await convex.query(api.users.getUserByEmail, {
           email: normalizedEmail,
         })
       } catch (queryError) {
@@ -115,7 +116,7 @@ export async function POST(request: NextRequest) {
 
       let userId
       try {
-        userId = await convex.mutation('users:createUserWithPassword', {
+        userId = await convex.mutation(api.users.createUserWithPassword, {
           name: name.trim(),
           email: normalizedEmail,
           passwordHash,
@@ -126,7 +127,7 @@ export async function POST(request: NextRequest) {
         
         // Try alternative mutation name
         try {
-          userId = await convex.mutation('users:create', {
+          userId = await convex.mutation(api.users.create, {
             name: name.trim(),
             email: normalizedEmail,
           })
@@ -157,7 +158,7 @@ export async function POST(request: NextRequest) {
       // Step 4: Try to create session (optional - don't fail if this doesn't work)
       let sessionCreated = false
       try {
-        await convex.mutation('sessions:createSession', {
+        await convex.mutation(api.sessions.createSession, {
           userId,
           token: sessionToken,
           expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -172,7 +173,7 @@ export async function POST(request: NextRequest) {
       // Get the created user data
       let userData
       try {
-        userData = await convex.query('users:getUser', { userId })
+        userData = await convex.query(api.users.getUser, { userId })
       } catch (getUserError) {
         // Use basic user data from input
         userData = {

@@ -44,7 +44,7 @@ import {
   AlertCircle
 } from 'lucide-react'
 import { useQuery, useAction, useMutation } from 'convex/react'
-import { api } from '../../../convex/_generated/api'
+import { api } from '@convex/_generated/api'
 import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans'
 import { ErrorDisplay } from '@/components/ui/error-boundary'
 

@@ -365,9 +365,9 @@ export const recordAIGeneration = mutation({
       amount: 1,
       periodStart: startOfMonth,
       periodEnd: endOfMonth,
-      createdAt: now,
+      createdAt: now.getTime(),
     });
 
-    return { success: true, recordedAt: now };
+    return { success: true, recordedAt: now.getTime() };
   },
 });

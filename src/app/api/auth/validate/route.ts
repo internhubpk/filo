@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getConvexClient } from '@/lib/convex-server'
+import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -22,7 +23,7 @@ export async function POST(request: NextRequest) {
     // Validate with Convex
     const convex = getConvexClient()
     
-    const result = await convex.query('auth:validateSession', { token })
+    const result = await convex.query(api.auth.validateSession, { token })
 
     if (!result.valid) {
       return NextResponse.json(

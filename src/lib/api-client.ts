@@ -24,10 +24,13 @@ interface User {
   planId?: string
 }
 
-interface AuthResponse extends ApiResponse<{
+// Note: AuthResponse mirrors ApiResponse<{ user; sessionToken }> with no
+// additional fields. We declare it as a named type alias instead of an empty
+// interface to satisfy the @typescript-eslint/no-empty-object-type rule.
+type AuthResponse = ApiResponse<{
   user: User
   sessionToken: string
-}> {}
+}>
 
 interface Artifact {
   id: string

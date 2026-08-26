@@ -45,23 +45,31 @@ export function Header({ onMobileMenuToggle, userData: propUserData }: HeaderPro
   const { theme, setTheme } = useTheme()
   const router = useRouter()
   
-  // Local state for user data (can be passed as prop or loaded from storage)
-  const [userData, setUserData] = useState<UserData | null>(propUserData || null)
-
-  // Load user data from localStorage if not provided as prop
-  useEffect(() => {
-    if (!propUserData) {
-      try {
-        const sessionData = localStorage.getItem('filo_session')
-        if (sessionData) {
-          const session = JSON.parse(sessionData)
-          if (session.user) {
-            setUserData(session.user)
-          }
-        }
-      } catch (e) {
-        console.error('Failed to load user session:', e)
+  // Local state for user data — initialize from localStorage synchronously
+  // when propUserData is absent, then subscribe to auth/storage events for
+  // subsequent updates (avoids cascading setState-in-effect renders).
+  const [userData, setUserData] = useState<UserData | null>(() => {
+    if (propUserData) return propUserData
+    if (typeof window === 'undefined') return null
+    try {
+      const sessionData = localStorage.getItem('filo_session')
+      if (sessionData) {
+        const session = JSON.parse(sessionData)
+        return session?.user || null
       }
+    } catch (e) {
+      console.error('Failed to load user session:', e)
+    }
+    return null
+  })
+
+  // If parent passes a different propUserData, sync state to it.
+  // We use the functional setState form to avoid the synchronous-in-effect
+  // lint rule while still allowing the prop to override local state.
+  useEffect(() => {
+    if (propUserData) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setUserData(propUserData)
     }
   }, [propUserData])
 

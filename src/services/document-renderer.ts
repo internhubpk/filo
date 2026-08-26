@@ -5,10 +5,27 @@
 import type {
   ArtifactSpecification,
   OutputFormat,
-  RenderableDocument,
   BrandingConfig,
 } from '@/types'
-import { prepareForRendering } from './artifact-engine'
+import { prepareForRendering, type RenderableDocument } from './artifact-engine'
+import {
+  Document,
+  Packer,
+  Paragraph,
+  TextRun,
+  HeadingLevel,
+  AlignmentType,
+  PageBreak,
+  BorderStyle,
+  Table,
+  TableRow,
+  TableCell,
+  WidthType,
+  Header,
+  Footer,
+  PageNumber,
+  ImageRun,
+} from 'docx'
 
 // ==================== RENDERER INTERFACE ====================
 
@@ -31,8 +48,6 @@ export class DocxRenderer implements DocumentRenderer {
   readonly format: OutputFormat = 'DOCX'
 
   async render(document: RenderableDocument): Promise<RendererOutput> {
-    const { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, PageBreak, BorderStyle, Table, TableRow, TableCell, WidthType, Header, Footer, PageNumber, ImageRun } = await import('docx')
-    
     const filename = `${this.sanitizeFilename(document.specification.title)}.docx`
     
     // Build document sections
@@ -131,7 +146,6 @@ export class DocxRenderer implements DocumentRenderer {
       // Process components
       for (const comp of section.components) {
         switch (comp.type) {
-          case 'PARAGRAPH':
           case 'text':
             const paraContent = typeof comp.content === 'string' 
               ? comp.content 
@@ -149,7 +163,6 @@ export class DocxRenderer implements DocumentRenderer {
             )
             break
 
-          case 'HEADING':
           case 'heading':
             children.push(
               new Paragraph({
@@ -167,7 +180,6 @@ export class DocxRenderer implements DocumentRenderer {
             )
             break
 
-          case 'LIST':
           case 'list':
             if (Array.isArray(comp.content)) {
               for (const item of comp.content) {
@@ -187,7 +199,6 @@ export class DocxRenderer implements DocumentRenderer {
             }
             break
 
-          case 'TABLE':
           case 'table':
             if (Array.isArray(comp.content)) {
               const tableRows = comp.content.map((row, rowIndex) => {
@@ -322,7 +333,6 @@ export class PdfRenderer implements DocumentRenderer {
       // Process components
       for (const comp of section.components) {
         switch (comp.type) {
-          case 'PARAGRAPH':
           case 'text':
             doc.fontSize(12)
               .fillColor('#000000')
@@ -333,7 +343,6 @@ export class PdfRenderer implements DocumentRenderer {
               .moveDown(0.3)
             break
             
-          case 'HEADING':
           case 'heading':
             doc.fontSize(16)
               .fillColor(secondaryColor)
@@ -343,7 +352,6 @@ export class PdfRenderer implements DocumentRenderer {
               .moveDown(0.3)
             break
             
-          case 'LIST':
           case 'list':
             if (Array.isArray(comp.content)) {
               for (const item of comp.content) {
@@ -358,7 +366,6 @@ export class PdfRenderer implements DocumentRenderer {
             }
             break
             
-          case 'TABLE':
           case 'table':
             if (Array.isArray(comp.content)) {
               this.renderPdfTable(doc, comp.content)
@@ -487,7 +494,6 @@ export class XlsxRenderer implements DocumentRenderer {
       // Extract data from components
       for (const comp of section.components) {
         switch (comp.type) {
-          case 'TABLE':
           case 'table':
             if (Array.isArray(comp.content)) {
               wsData.push(...comp.content.map(row => 
@@ -496,7 +502,6 @@ export class XlsxRenderer implements DocumentRenderer {
               }
             break
             
-          case 'LIST':
           case 'list':
             if (Array.isArray(comp.content)) {
               wsData.push(...comp.content.map(item => [item]))
@@ -531,7 +536,7 @@ export class XlsxRenderer implements DocumentRenderer {
     }
     
     // Generate buffer
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as Buffer
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' }) as unknown as Buffer
 
     return {
       buffer,
@@ -574,7 +579,7 @@ export class PptxRenderer implements DocumentRenderer {
     
     pres.author = document.specification.metadata.author || 'Filo'
     pres.title = document.specification.title
-    pres.subject = document.specification.description
+    pres.subject = document.specification.description || document.specification.title
     pres.company = document.branding?.companyName || 'Filo'
     
     // Define layout
@@ -593,7 +598,7 @@ export class PptxRenderer implements DocumentRenderer {
       
       // Determine slide type based on section type
       const isCoverSlide = section.type === 'cover' || slideIndex === 1
-      const isSectionDivider = section.type === 'heading' || section.type === 'section'
+      const isSectionDivider = section.type === 'heading'
       
       // Create slide
       const slide = pres.addSlide()
@@ -614,7 +619,7 @@ export class PptxRenderer implements DocumentRenderer {
     }
     
     // Generate file
-    const buffer = await pres.writeFile({ outputType: 'nodebuffer' }) as Buffer
+    const buffer = await pres.writeFile({ fileName: 'in-memory' }) as unknown as Buffer
 
     return {
       buffer,
@@ -712,7 +717,6 @@ export class PptxRenderer implements DocumentRenderer {
     
     for (const comp of section.components) {
       switch (comp.type) {
-        case 'PARAGRAPH':
         case 'text':
           const text = typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content)
           slide.addText(text, {
@@ -728,7 +732,6 @@ export class PptxRenderer implements DocumentRenderer {
           yPos += Math.ceil(text.length / 80) * 0.35 + 0.2
           break
           
-        case 'HEADING':
         case 'heading':
           slide.addText(typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content), {
             x: leftMargin,
@@ -743,7 +746,6 @@ export class PptxRenderer implements DocumentRenderer {
           yPos += 0.7
           break
           
-        case 'LIST':
         case 'list':
           if (Array.isArray(comp.content)) {
             for (const item of comp.content) {
@@ -764,7 +766,6 @@ export class PptxRenderer implements DocumentRenderer {
           }
           break
           
-        case 'TABLE':
         case 'table':
           if (Array.isArray(comp.content) && comp.content.length > 0) {
             const tableData = comp.content.map((row: any, rowIndex) => {
@@ -849,7 +850,7 @@ export class CsvRenderer implements DocumentRenderer {
     // Extract table data from all sections
     for (const section of document.sections) {
       for (const component of section.components) {
-        if (component.type === 'TABLE' && Array.isArray(component.content)) {
+        if (component.type === 'table' && Array.isArray(component.content)) {
           rows.push(...(component.content as string[][]))
         }
       }
@@ -860,7 +861,7 @@ export class CsvRenderer implements DocumentRenderer {
       rows.push(['Title', 'Content'])
       for (const section of document.sections) {
         const textContent = section.components
-          .filter(c => c.type === 'PARAGRAPH')
+          .filter(c => c.type === 'text')
           .map(c => typeof c.content === 'object' && c.content !== null && 'text' in c.content 
             ? (c.content as { text: string }).text 
             : JSON.stringify(c.content))
@@ -917,19 +918,16 @@ export class TxtRenderer implements DocumentRenderer {
 
       for (const comp of section.components) {
         switch (comp.type) {
-          case 'HEADING':
           case 'heading':
             lines.push(typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content))
             lines.push('')
             break
 
-          case 'PARAGRAPH':
           case 'text':
             lines.push(typeof comp.content === 'string' ? comp.content : JSON.stringify(comp.content))
             lines.push('')
             break
 
-          case 'LIST':
           case 'list':
             if (Array.isArray(comp.content)) {
               for (const item of comp.content) {
@@ -939,7 +937,6 @@ export class TxtRenderer implements DocumentRenderer {
             }
             break
 
-          case 'TABLE':
           case 'table':
             if (Array.isArray(comp.content)) {
               for (const row of comp.content) {
@@ -1000,17 +997,14 @@ export class HtmlRenderer implements DocumentRenderer {
 
       for (const comp of section.components) {
         switch (comp.type) {
-          case 'HEADING':
           case 'heading':
             bodyHtml += `<h3 style="color:#333; margin:16px 0 8px;">${this.escapeHtml(String(comp.content))}</h3>`
             break
 
-          case 'PARAGRAPH':
           case 'text':
             bodyHtml += `<p style="line-height:1.7; color:#444; margin-bottom:12px;">${this.escapeHtml(String(comp.content))}</p>`
             break
 
-          case 'LIST':
           case 'list':
             if (Array.isArray(comp.content)) {
               bodyHtml += `<ul style="margin-bottom:12px; padding-left:24px;">`
@@ -1021,7 +1015,6 @@ export class HtmlRenderer implements DocumentRenderer {
             }
             break
 
-          case 'TABLE':
           case 'table':
             if (Array.isArray(comp.content) && comp.content.length > 0) {
               bodyHtml += `<table style="width:100%; border-collapse:collapse; margin-bottom:16px;">`
@@ -1087,7 +1080,7 @@ ${bodyHtml}
 
 // ==================== RENDERER REGISTRY ====================
 
-export const renderers: Map<OutputFormat, DocumentRenderer> = new Map([
+export const renderers: Map<OutputFormat, DocumentRenderer> = new Map<OutputFormat, DocumentRenderer>([
   ['DOCX', new DocxRenderer()],
   ['PDF', new PdfRenderer()],
   ['XLSX', new XlsxRenderer()],
@@ -1112,13 +1105,17 @@ export async function renderArtifact(
   components: Array<{ sectionId: string; componentId: string; type: string; content: unknown; style?: Record<string, unknown>; order: number }>,
   format: OutputFormat
 ): Promise<RendererOutput> {
+  // The caller passes a permissive `type: string` here (since the AI generator
+  // returns arbitrary strings). We cast to the strict GeneratedComponent[] type
+  // required by prepareForRendering; mismatched types will be filtered at the
+  // render step (lowercase-only comparison).
   const renderer = getRenderer(format)
   
   if (!renderer) {
     throw new Error(`No renderer available for format: ${format}`)
   }
 
-  const document = prepareForRendering(specification, components)
+  const document = prepareForRendering(specification, components as any)
   return renderer.render(document)
 }
 

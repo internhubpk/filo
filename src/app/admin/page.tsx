@@ -69,7 +69,7 @@ import {
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useMutation } from 'convex/react'
-import { api } from '../../../convex/_generated/api'
+import { api } from '@convex/_generated/api'
 import { Id } from '../../../convex/_generated/dataModel'
 
 // Icon mapping for plan icons

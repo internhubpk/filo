@@ -29,13 +29,21 @@ function BillingContent() {
   const searchParams = useSearchParams()
   const plans = getDefaultPlans()
   const [isRedirecting, setIsRedirecting] = useState<string | null>(null)
-  const [paymentResult, setPaymentResult] = useState<'verifying' | 'success' | 'cancelled' | null>(null)
+  // Initialize from search params so we don't trigger setState-in-effect
+  // cascading renders on mount. The useEffect below only kicks off the
+  // async verification work, it doesn't synchronously set state.
+  const [paymentResult, setPaymentResult] = useState<'verifying' | 'success' | 'cancelled' | null>(() => {
+    if (typeof window === 'undefined') return null
+    const sp = new URLSearchParams(window.location.search)
+    const status = sp.get('payment')
+    const reference = sp.get('ref')
+    return status === 'success' && reference ? 'verifying' : null
+  })
 
   useEffect(() => {
     const status = searchParams.get('payment')
     const reference = searchParams.get('ref')
     if (status === 'success' && reference) {
-      setPaymentResult('verifying')
       apiClient.verifyPayment({ reference })
         .then((res) => {
           setPaymentResult(res.data?.subscriptionActivated ? 'success' : 'success')
@@ -45,6 +53,7 @@ function BillingContent() {
         })
         .catch(() => setPaymentResult('success'))
     } else if (status === 'cancelled') {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setPaymentResult('cancelled')
     }
     if (status) {
@@ -67,7 +76,8 @@ function BillingContent() {
         setIsRedirecting(null)
         return
       }
-      window.location.href = response.data.checkoutUrl
+      const redirectUrl = response.data.checkoutUrl
+      setTimeout(() => { window.location.href = redirectUrl }, 0)
     } catch (err) {
       toast.dismiss(loadingId)
       toast.error('Something went wrong', 'Please try again')

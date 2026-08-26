@@ -1,5 +1,7 @@
 import { action } from "./_generated/server";
 import { v } from "convex/values";
+import type { Id } from "./_generated/dataModel";
+import { api } from "./_generated/api";
 
 // Types for Safepay API
 interface SafepayCheckoutRequest {
@@ -29,10 +31,15 @@ interface SafepayCheckoutResponse {
 // ==================== SAFEPAY ACTIONS ====================
 
 /**
- * Create a Safepay checkout session for subscription payment
- * This is an ACTION (not mutation) because it calls external API
- * 
- * IMPORTANT: Safepay API keys are accessed via process.env in actions only!
+ * Create a Safepay checkout session for subscription payment.
+ * This is an ACTION (not mutation) because it calls the external SafePay API.
+ *
+ * ARCHITECTURE:
+ *   - Actions cannot use `ctx.db` directly — they call internal mutations and
+ *     queries via `ctx.runQuery` / `ctx.runMutation`. All DB operations are
+ *     dispatched to `convex/safepay_internal.ts`.
+ *   - SafePay secret key is read from process.env inside the action (never
+ *     shipped to the client).
  */
 export const createSafepayCheckout = action({
   args: {
@@ -43,21 +50,23 @@ export const createSafepayCheckout = action({
   },
   handler: async (ctx, args) => {
     const apiKey = process.env.SAFEPAY_SECRET_KEY;
-    const isSandbox = process.env.SAFEPAY_SANDBOX === 'true' || process.env.NODE_ENV !== 'production';
-    
+    const isSandbox =
+      process.env.SAFEPAY_SANDBOX === "true" ||
+      process.env.NODE_ENV !== "production";
+
     if (!apiKey) {
       throw new Error("SAFEPAY_SECRET_KEY not configured");
     }
 
-    // Get plan details from database
-    const plan = await ctx.db.get(args.planId);
+    // Get plan details via internal query
+    const plan = await ctx.runQuery(api.safepayInternal.getPlanById, {
+      planId: args.planId,
+    });
     if (!plan) {
       throw new Error("Plan not found");
     }
 
-    // Calculate amount based on billing period
     const amount = args.isYearly ? plan.priceYearly : plan.priceMonthly;
-    
     if (amount <= 0) {
       throw new Error("Free plans do not require payment");
     }
@@ -67,51 +76,59 @@ export const createSafepayCheckout = action({
     const random = Math.random().toString(36).substring(2, 8);
     const reference = `FLO-${timestamp}-${random}`.toUpperCase();
 
-    // Determine base URL (sandbox vs production)
-    const baseUrl = isSandbox 
-      ? 'https://sandbox.api.getsafepay.com' 
-      : 'https://api.getsafepay.com';
+    const baseUrl = isSandbox
+      ? "https://sandbox.api.getsafepay.com"
+      : "https://api.getsafepay.com";
 
     try {
-      // Call Safepay API to create checkout
       const response = await fetch(`${baseUrl}/v1/checkouts`, {
-        method: 'POST',
+        method: "POST",
         headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
-          amount: amount,
-          currency: 'PKR',
-          reference: reference,
-          description: `Filo ${plan.name} - ${args.isYearly ? 'Yearly' : 'Monthly'}`,
+          amount,
+          currency: "PKR",
+          reference,
+          description: `Filo ${plan.name} - ${
+            args.isYearly ? "Yearly" : "Monthly"
+          }`,
           metadata: {
             userId: args.userId,
             planId: args.planId,
             email: args.userEmail,
             isYearly: args.isYearly,
-            reference: reference,
+            reference,
           },
-          redirect_url: `${process.env.NEXT_PUBLIC_APP_URL || 'https://filo-ai-ashen.vercel.app'}/billing?payment=success`,
-          cancel_url: `${process.env.NEXT_PUBLIC_APP_URL || 'https://filo-ai-ashen.vercel.app'}/billing?payment=cancelled`,
+          redirect_url: `${
+            process.env.NEXT_PUBLIC_APP_URL || "https://filo-ai-ashen.vercel.app"
+          }/billing?payment=success`,
+          cancel_url: `${
+            process.env.NEXT_PUBLIC_APP_URL || "https://filo-ai-ashen.vercel.app"
+          }/billing?payment=cancelled`,
           webhooks: [
             {
-              url: `${process.env.NEXT_PUBLIC_APP_URL || 'https://filo-ai-ashen.vercel.app'}/api/webhooks/safepay`,
-              events: ['payment.captured', 'payment.failed', 'payment.cancelled'],
-            }
+              url: `${
+                process.env.NEXT_PUBLIC_APP_URL ||
+                "https://filo-ai-ashen.vercel.app"
+              }/api/webhooks/safepay`,
+              events: ["payment.captured", "payment.failed", "payment.cancelled"],
+            },
           ],
         }),
       });
 
       if (!response.ok) {
         const errorData = await response.json();
-        console.error('[SAFEPAY] Checkout creation failed:', errorData);
-        
+        console.error("[SAFEPAY] Checkout creation failed:", errorData);
         return {
           success: false,
           error: {
-            code: 'SAFEPAY_API_ERROR',
-            message: errorData.message || 'Failed to create checkout session',
+            code: "SAFEPAY_API_ERROR",
+            message:
+              (errorData && errorData.message) ||
+              "Failed to create checkout session",
             details: errorData,
           },
           reference,
@@ -119,36 +136,33 @@ export const createSafepayCheckout = action({
       }
 
       const data: SafepayCheckoutResponse = await response.json();
-      
       if (!data.success || !data.data) {
         return {
           success: false,
           error: {
-            code: 'SAFEPAY_CHECKOUT_FAILED',
-            message: data.error?.message || 'Safepay returned unsuccessful response',
+            code: "SAFEPAY_CHECKOUT_FAILED",
+            message: data.error?.message || "Safepay returned unsuccessful response",
             details: data.error,
           },
           reference,
         };
       }
 
-      // Create pending payment record in Convex
-      await ctx.db.insert("payments", {
+      // Persist pending payment via internal mutation
+      await ctx.runMutation(api.safepayInternal.insertPendingPayment, {
         userId: args.userId,
-        amount: amount,
+        amount,
         currency: "PKR",
-        status: "pending",
-        provider: "safepay",
         providerPaymentId: data.data.id,
-        description: `Filo ${plan.name} - ${args.isYearly ? 'Yearly' : 'Monthly'} (${reference})`,
+        description: `Filo ${plan.name} - ${
+          args.isYearly ? "Yearly" : "Monthly"
+        } (${reference})`,
         metadata: {
           reference,
           planId: args.planId,
           isYearly: args.isYearly,
           checkoutToken: data.data.token,
         },
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
       });
 
       return {
@@ -159,20 +173,19 @@ export const createSafepayCheckout = action({
           paymentId: data.data.id,
           reference,
           amount,
-          currency: 'PKR',
+          currency: "PKR",
           planName: plan.name,
           isYearly: args.isYearly,
         },
       };
-
     } catch (error) {
-      console.error('[SAFEPAY] Network error:', error);
-      
+      console.error("[SAFEPAY] Network error:", error);
       return {
         success: false,
         error: {
-          code: 'NETWORK_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to connect to Safepay',
+          code: "NETWORK_ERROR",
+          message:
+            error instanceof Error ? error.message : "Failed to connect to Safepay",
         },
         reference,
       };
@@ -181,8 +194,8 @@ export const createSafepayCheckout = action({
 });
 
 /**
- * Verify a Safepay payment after redirect
- * Called when user returns from Safepay checkout
+ * Verify a Safepay payment after redirect (called when user returns from checkout).
+ * Action because it calls the SafePay REST API.
  */
 export const verifySafepayPayment = action({
   args: {
@@ -191,114 +204,107 @@ export const verifySafepayPayment = action({
   },
   handler: async (ctx, args) => {
     const apiKey = process.env.SAFEPAY_SECRET_KEY;
-    const isSandbox = process.env.SAFEPAY_SANDBOX === 'true' || process.env.NODE_ENV !== 'production';
+    const isSandbox =
+      process.env.SAFEPAY_SANDBOX === "true" ||
+      process.env.NODE_ENV !== "production";
 
     if (!apiKey) {
       throw new Error("SAFEPAY_SECRET_KEY not configured");
     }
 
-    const baseUrl = isSandbox 
-      ? 'https://sandbox.api.getsafepay.com' 
-      : 'https://api.getsafepay.com';
+    const baseUrl = isSandbox
+      ? "https://sandbox.api.getsafepay.com"
+      : "https://api.getsafepay.com";
 
     try {
-      // Query Safepay for payment status
       const response = await fetch(`${baseUrl}/v1/payments/${args.paymentId}`, {
-        method: 'GET',
-        headers: {
-          'Authorization': `Bearer ${apiKey}`,
-        },
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
       });
 
       if (!response.ok) {
         throw new Error(`Safepay API error: ${response.status}`);
       }
 
-      const paymentData = await response.json();
+      const paymentData: { status?: string } = await response.json();
 
-      // Find our payment record
-      const payment = await ctx.db
-        .query("payments")
-        .withIndex("by_providerPaymentId", (q) =>
-          q.eq("providerPaymentId", args.paymentId)
-        )
-        .first();
+      // Find our payment record via internal query
+      const payment = await ctx.runQuery(
+        api.safepayInternal.getPaymentByProviderId,
+        { providerPaymentId: args.paymentId }
+      );
 
       if (!payment) {
         return {
           verified: false,
           error: {
-            code: 'PAYMENT_NOT_FOUND',
-            message: 'Payment record not found in our system',
+            code: "PAYMENT_NOT_FOUND",
+            message: "Payment record not found in our system",
           },
         };
       }
 
-      // Update payment status based on Safepay response
-      let newStatus: "completed" | "failed" | "cancelled" | "refunded" = payment.status;
+      // Map SafePay status → our status
+      let newStatus: "completed" | "failed" | "cancelled" | "refunded" =
+        payment.status as "completed" | "failed" | "cancelled" | "refunded";
 
-      if (paymentData.status === 'CAPTURED' || paymentData.status === 'captured') {
-        newStatus = 'completed';
-        
-        // Activate subscription if this was a subscription payment
-        if (payment.metadata?.planId && payment.metadata?.isYearly !== undefined) {
+      const safepayStatus = paymentData.status?.toLowerCase();
+      if (safepayStatus === "captured") {
+        newStatus = "completed";
+
+        // Activate / extend subscription if we have plan + billing info in metadata
+        const meta = (payment.metadata || {}) as Record<string, unknown>;
+        const planIdRaw = meta.planId;
+        const isYearly = meta.isYearly === true || meta.isYearly === "true";
+        if (planIdRaw) {
+          const planId = planIdRaw as Id<"plans">;
           const now = Date.now();
-          const periodEnd = payment.metadata.isYearly 
-            ? now + 365 * 24 * 60 * 60 * 1000  // 1 year
-            : now + 30 * 24 * 60 * 60 * 1000;   // 1 month
+          const periodEnd = isYearly
+            ? now + 365 * 24 * 60 * 60 * 1000
+            : now + 30 * 24 * 60 * 60 * 1000;
 
-          // Check if subscription already exists
-          const existingSub = await ctx.db
-            .query("subscriptions")
-            .withIndex("by_userId", (q) => q.eq("userId", payment.userId))
-            .filter((q) =>
-              q.or(
-                q.eq(q.field("status"), "active"),
-                q.eq(q.field("status"), "trialing")
-              )
-            )
-            .first();
+          const existingSub = await ctx.runQuery(
+            api.safepayInternal.getActiveSubscriptionByUser,
+            { userId: payment.userId }
+          );
 
           if (existingSub) {
-            // Extend existing subscription
-            await ctx.db.patch(existingSub._id, {
-              currentPeriodEnd: periodEnd,
-              status: "active",
-              updatedAt: now,
+            await ctx.runMutation(api.safepayInternal.updateSubscription, {
+              subscriptionId: existingSub._id,
+              patch: {
+                currentPeriodEnd: periodEnd,
+                status: "active",
+              },
             });
           } else {
-            // Create new subscription
-            await ctx.db.insert("subscriptions", {
+            await ctx.runMutation(api.safepayInternal.createSubscription, {
               userId: payment.userId,
-              planId: payment.metadata.planId,
+              planId,
               provider: "safepay",
               providerSubscriptionId: args.paymentId,
               status: "active",
               currentPeriodStart: now,
               currentPeriodEnd: periodEnd,
               cancelAtPeriodEnd: false,
-              createdAt: now,
-              updatedAt: now,
             });
           }
 
-          // Update user's plan reference
-          await ctx.db.patch(payment.userId, {
-            planId: payment.metadata.planId,
-            updatedAt: now,
+          await ctx.runMutation(api.safepayInternal.updateUserPlan, {
+            userId: payment.userId,
+            planId,
           });
         }
-      } else if (paymentData.status === 'FAILED' || paymentData.status === 'failed') {
-        newStatus = 'failed';
-      } else if (paymentData.status === 'CANCELLED' || paymentData.status === 'cancelled') {
-        newStatus = 'cancelled';
+      } else if (safepayStatus === "failed") {
+        newStatus = "failed";
+      } else if (safepayStatus === "cancelled") {
+        newStatus = "cancelled";
       }
 
-      // Update payment record
+      // Persist updated status
       if (newStatus !== payment.status) {
-        await ctx.db.patch(payment._id, {
+        await ctx.runMutation(api.safepayInternal.patchPayment, {
+          paymentId: payment._id,
           status: newStatus,
-          updatedAt: Date.now(),
         });
       }
 
@@ -307,17 +313,16 @@ export const verifySafepayPayment = action({
         paymentStatus: newStatus,
         safepayStatus: paymentData.status,
         paymentId: payment._id,
-        subscriptionActivated: newStatus === 'completed',
+        subscriptionActivated: newStatus === "completed",
       };
-
     } catch (error) {
-      console.error('[SAFEPAY] Verification error:', error);
-      
+      console.error("[SAFEPAY] Verification error:", error);
       return {
         verified: false,
         error: {
-          code: 'VERIFICATION_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to verify payment',
+          code: "VERIFICATION_ERROR",
+          message:
+            error instanceof Error ? error.message : "Failed to verify payment",
         },
       };
     }
@@ -325,7 +330,7 @@ export const verifySafepayPayment = action({
 });
 
 /**
- * Process refund through Safepay (admin only)
+ * Process refund through Safepay (admin only).
  */
 export const processRefund = action({
   args: {
@@ -334,72 +339,72 @@ export const processRefund = action({
   },
   handler: async (ctx, args) => {
     const apiKey = process.env.SAFEPAY_SECRET_KEY;
-    const isSandbox = process.env.SAFEPAY_SANDBOX === 'true' || process.env.NODE_ENV !== 'production';
+    const isSandbox =
+      process.env.SAFEPAY_SANDBOX === "true" ||
+      process.env.NODE_ENV !== "production";
 
     if (!apiKey) {
       throw new Error("SAFEPAY_SECRET_KEY not configured");
     }
 
-    // Get payment record
-    const payment = await ctx.db.get(args.paymentId);
+    const payment = await ctx.runQuery(api.safepayInternal.getPaymentById, {
+      paymentId: args.paymentId,
+    });
     if (!payment) {
       throw new Error("Payment not found");
     }
-
     if (payment.status !== "completed") {
       throw new Error("Only completed payments can be refunded");
     }
-
     if (!payment.providerPaymentId) {
       throw new Error("No provider payment ID found");
     }
 
-    const baseUrl = isSandbox 
-      ? 'https://sandbox.api.getsafepay.com' 
-      : 'https://api.getsafepay.com';
+    const baseUrl = isSandbox
+      ? "https://sandbox.api.getsafepay.com"
+      : "https://api.getsafepay.com";
 
     try {
-      const response = await fetch(`${baseUrl}/v1/payments/${payment.providerPaymentId}/refund`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify({
-          reason: args.reason || 'Customer request',
-        }),
-      });
+      const response = await fetch(
+        `${baseUrl}/v1/payments/${payment.providerPaymentId}/refund`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({ reason: args.reason || "Customer request" }),
+        }
+      );
 
       if (!response.ok) {
         const errorData = await response.json();
         return {
           success: false,
           error: {
-            code: 'REFUND_FAILED',
-            message: errorData.message || 'Refund processing failed',
+            code: "REFUND_FAILED",
+            message: errorData.message || "Refund processing failed",
           },
         };
       }
 
-      const refundData = await response.json();
+      const refundData: { id?: string } = await response.json();
 
-      // Update payment status
-      await ctx.db.patch(args.paymentId, {
+      await ctx.runMutation(api.safepayInternal.patchPayment, {
+        paymentId: args.paymentId,
         status: "refunded",
-        updatedAt: Date.now(),
         metadata: {
-          ...payment.metadata,
+          ...(payment.metadata as Record<string, unknown>),
           refundId: refundData.id,
           refundReason: args.reason,
           refundedAt: Date.now(),
         },
       });
 
-      // Cancel associated subscription if exists
       if (payment.subscriptionId) {
-        await ctx.db.patch(payment.subscriptionId, {
-          status: "canceled",
-          updatedAt: Date.now(),
+        await ctx.runMutation(api.safepayInternal.updateSubscription, {
+          subscriptionId: payment.subscriptionId,
+          patch: { status: "canceled" },
         });
       }
 
@@ -408,17 +413,19 @@ export const processRefund = action({
         refundId: refundData.id,
         refundedAt: Date.now(),
       };
-
     } catch (error) {
-      console.error('[SAFEPAY] Refund error:', error);
-      
+      console.error("[SAFEPAY] Refund error:", error);
       return {
         success: false,
         error: {
-          code: 'REFUND_ERROR',
-          message: error instanceof Error ? error.message : 'Failed to process refund',
+          code: "REFUND_ERROR",
+          message:
+            error instanceof Error ? error.message : "Failed to process refund",
         },
       };
     }
   },
 });
+
+// Re-export the SafepayCheckoutRequest type for callers who need it
+export type { SafepayCheckoutRequest };

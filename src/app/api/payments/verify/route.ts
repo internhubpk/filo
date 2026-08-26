@@ -6,6 +6,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { api } from '@convex/_generated/api'
 
 const IS_DEV = process.env.NODE_ENV === 'development'
 
@@ -36,7 +37,7 @@ export async function POST(request: NextRequest) {
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
       const convex = getConvexClient()
-      const session = await convex.query('auth:validateSession', { token })
+      const session = await convex.query(api.auth.validateSession, { token })
       if (!session?.valid || !session?.user) {
         return NextResponse.json(
           { success: false, error: 'Invalid session', code: 'INVALID_SESSION' },
@@ -77,7 +78,7 @@ export async function POST(request: NextRequest) {
       try {
         const { getConvexClient } = await import('@/lib/convex-server')
         const convex = getConvexClient()
-        const payment = await convex.query('payments:getByReference', { reference })
+        const payment = await convex.query(api.payments.getByReference, { reference })
         safepayPaymentId = payment?.providerPaymentId
       } catch {
         // Continue without it
@@ -130,7 +131,7 @@ export async function POST(request: NextRequest) {
       try {
         const { getConvexClient } = await import('@/lib/convex-server')
         const convex = getConvexClient()
-        await convex.mutation('payments:updatePaymentStatus', {
+        await convex.mutation(api.payments.updatePaymentStatus, {
           providerPaymentId: safepayPaymentId,
           status: internalStatus,
           userId,

@@ -259,22 +259,28 @@ export function Sidebar({ className, userData: propUserData }: SidebarProps) {
   const pathname = usePathname()
   const [collapsed, setCollapsed] = useState(false)
   const [mobileOpen, setMobileOpen] = useState(false)
-  const [userData, setUserData] = useState<UserData | null>(propUserData || null)
-
-  // Load user data from localStorage if not provided as prop
-  useEffect(() => {
-    if (!propUserData) {
-      try {
-        const sessionData = localStorage.getItem('filo_session')
-        if (sessionData) {
-          const session = JSON.parse(sessionData)
-          if (session.user) {
-            setUserData(session.user)
-          }
-        }
-      } catch (e) {
-        console.error('Failed to load user session:', e)
+  // Initialize from localStorage synchronously (avoids setState-in-effect
+  // cascading renders while still hydrating from persisted session on mount).
+  const [userData, setUserData] = useState<UserData | null>(() => {
+    if (propUserData) return propUserData
+    if (typeof window === 'undefined') return null
+    try {
+      const sessionData = localStorage.getItem('filo_session')
+      if (sessionData) {
+        const session = JSON.parse(sessionData)
+        return session?.user || null
       }
+    } catch (e) {
+      console.error('Failed to load user session:', e)
+    }
+    return null
+  })
+
+  // Sync from prop when parent passes a new value
+  useEffect(() => {
+    if (propUserData) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setUserData(propUserData)
     }
   }, [propUserData])
 

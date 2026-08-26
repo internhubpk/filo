@@ -6,6 +6,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { getConvexClient } from '@/lib/convex-server'
+import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,7 +31,7 @@ export async function POST(request: NextRequest) {
     if (token) {
       try {
         const convex = getConvexClient()
-        await convex.action('auth:logout', { token })
+        await convex.action(api.auth.logout, { token })
       } catch (error) {
         // Log but don't fail - client-side cleanup is what matters
         console.warn('[API /auth/logout] Failed to invalidate session on backend:', error)

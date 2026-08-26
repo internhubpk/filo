@@ -6,13 +6,14 @@
 
 import { NextResponse } from 'next/server'
 import { getConvexClient } from '@/lib/convex-server'
+import { api } from '@convex/_generated/api'
 
 export async function GET() {
   try {
     const convex = getConvexClient()
     
     // Fetch active plans from Convex
-    const plans = await convex.query('plans:getActivePlans')
+    const plans = await convex.query(api.plans.getActivePlans)
 
     return NextResponse.json({
       success: true,

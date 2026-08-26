@@ -1,3 +1,4 @@
+// eslint-disable-next-line @typescript-eslint/no-require-imports
 const fs = require('fs')
 const path = '/home/z/my-project/filo/src/components/dashboard/main-dashboard.tsx'
 

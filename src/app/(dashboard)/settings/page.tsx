@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect } from 'react'
 import { useAction, useMutation } from 'convex/react'
-import { api } from '../../../convex/_generated/api'
+import { api } from '@convex/_generated/api'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -30,12 +30,27 @@ import {
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('profile')
   
-  // Profile state
-  const [profile, setProfile] = useState({
-    name: '',
-    email: '',
-    bio: '',
-    company: ''
+  // Profile state — initialize from localStorage synchronously so we don't
+  // trip the setState-in-effect lint rule on mount.
+  const [profile, setProfile] = useState(() => {
+    const initial = { name: '', email: '', bio: '', company: '' }
+    if (typeof window === 'undefined') return initial
+    try {
+      const sessionData = localStorage.getItem('filo_session')
+      if (sessionData) {
+        const session = JSON.parse(sessionData)
+        if (session?.user) {
+          return {
+            ...initial,
+            name: session.user.name || '',
+            email: session.user.email || '',
+          }
+        }
+      }
+    } catch (e) {
+      console.error('Failed to load user session:', e)
+    }
+    return initial
   })
   const [profileSaved, setProfileSaved] = useState(false)
   const [saving, setSaving] = useState(false)
@@ -66,25 +81,10 @@ export default function SettingsPage() {
     marketing: false
   })
 
-  // Load user data on mount
-  useEffect(() => {
-    // Try to get user from localStorage (from auth)
-    try {
-      const sessionData = localStorage.getItem('filo_session')
-      if (sessionData) {
-        const session = JSON.parse(sessionData)
-        if (session.user) {
-          setProfile(prev => ({
-            ...prev,
-            name: session.user.name || '',
-            email: session.user.email || ''
-          }))
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load session:', e)
-    }
-  }, [])
+  // User data is loaded synchronously during state initialization above
+  // (no useEffect needed for initial load). This avoids the
+  // react-hooks/set-state-in-effect anti-pattern of calling setState
+  // synchronously inside an effect body.
 
   const handleSaveProfile = async () => {
     setSaving(true)

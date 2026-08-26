@@ -683,7 +683,9 @@ export interface ModelRoutingRule {
 export interface RoutingCondition {
   field: RoutingField
   operator: RoutingOperator
-  value: string | number | boolean
+  // `value` is a single scalar for `equals`/`notEquals`/`greaterThan`/etc.,
+  // or an array of scalars for the `in`/`notIn` operators.
+  value: string | number | boolean | string[] | number[]
 }
 
 export type RoutingField = 

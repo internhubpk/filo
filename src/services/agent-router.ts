@@ -414,7 +414,7 @@ RESPOND WITH JSON:
 
 Section Title: ${section.title}
 Section Type: ${section.type}
-${section.components.length > 0 ? `Component Notes: ${section.components.map(c => c.data?.note || '').filter(Boolean).join('; ')}` : ''}
+${section.components.length > 0 ? `Component Notes: ${section.components.map(c => { const d = c.data as { note?: string } | null | undefined; return d?.note || ''; }).filter(Boolean).join('; ')}` : ''}
 
 Original Request: ${originalPrompt}
 
@@ -541,7 +541,7 @@ Generate the actual content now. Be thorough and professional.`
         if (typeof comp.content === 'string') {
           text += comp.content + '\n\n'
         } else if (Array.isArray(comp.content)) {
-          if (comp.type === 'TABLE') {
+          if (comp.type === 'table') {
             for (const row of comp.content) {
               text += (Array.isArray(row) ? row.join(' | ') : String(row)) + '\n'
             }

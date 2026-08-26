@@ -67,7 +67,7 @@ You must respond with a JSON object containing:
       ],
       options: {
         model: getBestModelForTask(
-          input.artifactType || 'DOCUMENT',
+          input.artifactType || 'document',
           input.outputFormat || 'DOCX',
           {
             hasFiles: (input.files?.length || 0) > 0,
@@ -97,7 +97,7 @@ You must respond with a JSON object containing:
 }
 
 function formatPlannerPrompt(input: PlannerInput): string {
-  let prompt = `Create an artifact based on this request:\n\n${input.request}\n\n`
+  let prompt = `Create an artifact based on this request:\n\n${input.userRequest}\n\n`
 
   if (input.artifactType) {
     prompt += `Requested Type: ${input.artifactType}\n`
@@ -152,7 +152,7 @@ function parseArtifactResponse(content: string): {
     return {
       specification: {
         title: 'Generated Artifact',
-        type: 'DOCUMENT',
+        type: 'document',
         outputFormat: 'DOCX',
         sections: [],
         design: getDefaultDesign(),
@@ -180,7 +180,7 @@ function applyDefaults(
 ): ArtifactSpecification {
   return {
     id: spec.id || crypto.randomUUID(),
-    type: spec.type || input.artifactType || 'DOCUMENT',
+    type: spec.type || input.artifactType || 'document',
     title: spec.title || 'Untitled Artifact',
     description: spec.description,
     outputFormat: spec.outputFormat || input.outputFormat || 'DOCX',
@@ -299,6 +299,7 @@ interface GeneratedComponent {
   type: ComponentType
   content: unknown
   style?: Record<string, unknown>
+  data?: unknown
   order: number
 }
 
@@ -474,7 +475,7 @@ Respond with JSON containing the generated components array.`
       components: [{
         sectionId: section.id,
         componentId: crypto.randomUUID(),
-        type: 'PARAGRAPH',
+        type: 'text',
         content: { text: `[Content generation failed for: ${section.title}]` },
         order: 0,
       }],
@@ -594,8 +595,8 @@ async function runQualityChecks(
   }
 
   // Check 8: Formatting consistency (basic)
-  const hasHeadings = components.some(c => c.type === 'HEADING')
-  const hasParagraphs = components.some(c => c.type === 'PARAGRAPH')
+  const hasHeadings = components.some(c => c.type === 'heading')
+  const hasParagraphs = components.some(c => c.type === 'text')
   if (hasHeadings && hasParagraphs) {
     passedChecks.push('Has structure with headings and paragraphs')
   }
@@ -691,23 +692,29 @@ export function prepareForRendering(
   specification: ArtifactSpecification,
   components: GeneratedComponent[]
 ): RenderableDocument {
-  // Normalize component types to uppercase for consistent rendering
-  const normalizedComponents = components.map(c => ({
-    ...c,
-    type: (c.type?.toUpperCase?.() || 'PARAGRAPH') as ComponentType,
+  // Normalize component types to lowercase for consistent rendering
+  const normalizedComponents = components.map((c, idx) => ({
+    id: c.componentId || `comp-${idx}`,
+    type: ((c.type || 'text').toLowerCase()) as ComponentType,
+    order: c.order ?? idx,
+    content: c.content,
+    style: c.style,
+    data: c.data,
   }))
 
   // Group components by section
   const sections: RenderableSection[] = specification.sections.map(section => ({
     ...section,
     components: normalizedComponents
-      .filter(c => c.sectionId === section.id)
+      .filter(c => (c as { sectionId?: string }).sectionId === section.id)
       .sort((a, b) => a.order - b.order)
-      .map(c => ({
-        id: c.componentId,
+      .map((c, idx) => ({
+        id: c.id || `comp-${idx}`,
         type: c.type,
+        order: c.order,
         content: c.content,
         style: c.style,
+        data: c.data,
       })),
   }))
 
@@ -731,6 +738,8 @@ export interface RenderableSection extends ArtifactSection {
 export interface RenderableComponent {
   id: string
   type: ComponentType
+  order: number
   content: unknown
   style?: Record<string, unknown>
+  data?: unknown
 }

@@ -659,9 +659,9 @@ function evaluateConditions(
       case 'notContains':
         return typeof value === 'string' && !String(condition.value).includes(value)
       case 'in':
-        return Array.isArray(condition.value) && condition.value.includes(value)
+        return Array.isArray(condition.value) && (condition.value as (string | number)[]).includes(value as never)
       case 'notIn':
-        return Array.isArray(condition.value) && !condition.value.includes(value)
+        return Array.isArray(condition.value) && !(condition.value as (string | number)[]).includes(value as never)
       case 'exists':
         return value !== undefined && value !== null
       case 'notExists':

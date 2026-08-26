@@ -16,22 +16,26 @@ export default function DashboardLayout({
 }: {
   children: React.ReactNode
 }) {
-  const [userData, setUserData] = useState<UserData | null>(null)
-  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
-
-  // Load user data from localStorage on mount
-  useEffect(() => {
+  // Read initial session from localStorage synchronously during state
+  // initialization so we don't trigger a cascading setState-in-effect render.
+  // The useEffect below subscribes to auth/storage events for subsequent updates.
+  const [userData, setUserData] = useState<UserData | null>(() => {
+    if (typeof window === 'undefined') return null
     try {
       const sessionData = localStorage.getItem('filo_session')
       if (sessionData) {
         const session = JSON.parse(sessionData)
-        if (session.user) {
-          setUserData(session.user)
-        }
+        return session?.user || null
       }
     } catch (e) {
       console.error('Failed to load user session:', e)
     }
+    return null
+  })
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
+
+  // Subscribe to auth state changes (after mount)
+  useEffect(() => {
 
     // Listen for auth state changes
     const handleStorageChange = () => {

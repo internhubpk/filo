@@ -495,7 +495,7 @@ class AiService {
   private currentProvider: AiProviderInterface
 
   constructor() {
-    this.providers = new Map([
+    this.providers = new Map<AiProvider, AiProviderInterface>([
       ['OPENROUTER', new OpenRouterProvider()],
       ['OPENAI', new OpenAiProvider()],
     ])

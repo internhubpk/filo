@@ -59,8 +59,11 @@ export const deleteSession = mutation({
 });
 
 /**
- * Validate session token and return full data
- * Alternative to auth.validateSession if needed
+ * Validate session token and return full data.
+ *
+ * NOTE: This is a `query` (read-only). It cannot delete an expired session
+ * directly — it surfaces `reason: "expired"` so callers can fire a
+ * `deleteSession` mutation to clean up.
  */
 export const validateSessionToken = query({
   args: {
@@ -73,30 +76,30 @@ export const validateSessionToken = query({
       .first();
 
     if (!session) {
-      return { valid: false, user: null, session: null };
+      return { valid: false, user: null, session: null, reason: "not_found" as const };
     }
 
-    // Check expiration
     if (session.expiresAt < Date.now()) {
-      await ctx.db.delete(session._id);
-      return { valid: false, user: null, session: null };
+      return {
+        valid: false,
+        user: null,
+        session: { id: session._id, expiresAt: session.expiresAt, createdAt: session.createdAt },
+        reason: "expired" as const,
+        sessionId: session._id,
+      };
     }
 
-    // Get user data
     const user = await ctx.db.get(session.userId);
-    
+
     return {
       valid: true,
-      user: user ? {
-        id: user._id,
-        name: user.name,
-        email: user.email,
-      } : null,
+      user: user ? { id: user._id, name: user.name, email: user.email } : null,
       session: {
         id: session._id,
         expiresAt: session.expiresAt,
         createdAt: session.createdAt,
       },
+      reason: "active" as const,
     };
   },
 });

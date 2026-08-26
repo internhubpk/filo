@@ -326,9 +326,7 @@ export function MainDashboard() {
     clearError()
     
     if (!loginEmail.trim() || !loginPassword.trim()) {
-      toast.error('Please fill in all fields', {
-        description: 'Email and password are required'
-      })
+      toast.error('Please fill in all fields', 'Email and password are required')
       setError(ErrorCode.AUTH_MISSING_FIELDS)
       return
     }
@@ -395,17 +393,13 @@ export function MainDashboard() {
     clearError()
     
     if (!signupName.trim() || !signupEmail.trim() || !signupPassword.trim()) {
-      toast.error('Please fill in all fields', {
-        description: 'Name, email, and password are required'
-      })
+      toast.error('Please fill in all fields', 'Name, email, and password are required')
       setError(ErrorCode.AUTH_MISSING_FIELDS)
       return
     }
 
     if (signupPassword.length < 6) {
-      toast.error('Password too short', {
-        description: 'Password must be at least 6 characters'
-      })
+      toast.error('Password too short', 'Password must be at least 6 characters')
       setError(ErrorCode.AUTH_PASSWORD_TOO_SHORT)
       return
     }
@@ -492,9 +486,7 @@ export function MainDashboard() {
   // Handle generation
   const handleGenerate = async () => {
     if (!prompt.trim()) {
-      toast.warning('Please enter a prompt', {
-        description: 'Describe what you want to create'
-      })
+      toast.warning('Please enter a prompt', 'Describe what you want to create')
       return
     }
     
@@ -620,8 +612,8 @@ export function MainDashboard() {
       }
       
       try {
-        const safeData = data && typeof data === 'object' ? data : {}
-        const safeArtifact = safeData.artifact && typeof safeData.artifact === 'object' ? safeData.artifact : {}
+        const safeData = (data && typeof data === 'object' ? data : {}) as Record<string, unknown>
+        const safeArtifact = (safeData.artifact && typeof safeData.artifact === 'object' ? safeData.artifact : {}) as Record<string, unknown>
         
         artifact = {
           id: (safeArtifact.id && typeof safeArtifact.id === 'string') ? safeArtifact.id : crypto.randomUUID(),
@@ -689,9 +681,7 @@ export function MainDashboard() {
   // Handle file download from base64 data
   const handleDownload = () => {
     if (!currentArtifact?.fileData) {
-      toast.warning('No file data available', {
-        description: 'The file could not be downloaded. Please try regenerating.'
-      })
+      toast.warning('No file data available', 'The file could not be downloaded. Please try regenerating.')
       return
     }
 
@@ -714,14 +704,10 @@ export function MainDashboard() {
       document.body.removeChild(link)
       URL.revokeObjectURL(url)
 
-      toast.success('Download started!', {
-        description: `${link.download} (${currentArtifact.fileSize ? `${(currentArtifact.fileSize / 1024).toFixed(1)} KB` : 'unknown size'})`
-      })
+      toast.success('Download started!', `${link.download} (${currentArtifact.fileSize ? `${(currentArtifact.fileSize / 1024).toFixed(1)} KB` : 'unknown size'})`)
     } catch (err) {
       console.error('Download failed:', err)
-      toast.error('Download failed', {
-        description: 'Could not process the file. Please try again.'
-      })
+      toast.error('Download failed', 'Could not process the file. Please try again.')
     }
   }
 
@@ -754,7 +740,7 @@ export function MainDashboard() {
 
   const switchToSignup = () => {
     setShowLoginModal(false)
-    setError(null)
+    clearError()
     // Delay opening signup dialog to avoid Radix UI Dialog ref race condition
     // ("r.title is undefined" when two dialogs toggle in the same tick)
     setTimeout(() => setShowSignupModal(true), 150)
@@ -762,7 +748,7 @@ export function MainDashboard() {
 
   const switchToLogin = () => {
     setShowSignupModal(false)
-    setError(null)
+    clearError()
     // Delay opening login dialog to avoid Radix UI Dialog ref race condition
     setTimeout(() => setShowLoginModal(true), 150)
   }
@@ -1322,7 +1308,7 @@ export function MainDashboard() {
       </Dialog>
 
       {/* Login Modal */}
-      <Dialog open={showLoginModal} onOpenChange={(open) => { setShowLoginModal(open); setError(null); }}>
+      <Dialog open={showLoginModal} onOpenChange={(open) => { setShowLoginModal(open); clearError(); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-xl flex items-center gap-2">
@@ -1409,7 +1395,7 @@ export function MainDashboard() {
       </Dialog>
 
       {/* Signup Modal */}
-      <Dialog open={showSignupModal} onOpenChange={(open) => { setShowSignupModal(open); setError(null); }}>
+      <Dialog open={showSignupModal} onOpenChange={(open) => { setShowSignupModal(open); clearError(); }}>
         <DialogContent className="sm:max-w-md">
           <DialogHeader>
             <DialogTitle className="text-xl flex items-center gap-2">
@@ -1510,7 +1496,7 @@ export function MainDashboard() {
       </Dialog>
 
       {/* Upgrade to Pro Modal */}
-      <Dialog open={showUpgradeModal} onOpenChange={(open) => { setShowUpgradeModal(open); setError(null); }}>
+      <Dialog open={showUpgradeModal} onOpenChange={(open) => { setShowUpgradeModal(open); clearError(); }}>
         <DialogContent className="sm:max-w-lg">
           <DialogHeader>
             <DialogTitle className="text-2xl flex items-center gap-3">
@@ -1524,7 +1510,7 @@ export function MainDashboard() {
             </DialogDescription>
           </DialogHeader>
 
-          {appError?.code === 'SUBSCRIPTION_REQUIRED' && (
+          {appError?.code === ErrorCode.SUBSCRIPTION_REQUIRED && (
             <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4 mb-4">
               <div className="flex items-start gap-3">
                 <AlertCircle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
