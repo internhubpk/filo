@@ -11,6 +11,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
@@ -26,9 +27,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const { getConvexClient } = await import('@/lib/convex-server')
-    const convex = getConvexClient()
-    const session = await convex.query(api.auth.validateSession, { token })
+    // Validate session locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
 
     if (!session?.valid || !session?.user) {
       return NextResponse.json(
@@ -40,8 +40,10 @@ export async function POST(request: NextRequest) {
     const userId = session.user.id
 
     // Fetch the user's latest verification so we can surface its state.
+    const { getConvexClient } = await import('@/lib/convex-server')
+    const convex = getConvexClient()
     const latest = await convex.query(api.paymentVerifications.getLatestVerification, {
-      userId,
+      userId: userId as any,
     })
 
     if (!latest) {

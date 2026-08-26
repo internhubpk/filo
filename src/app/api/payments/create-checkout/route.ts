@@ -11,6 +11,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 
 export async function POST(request: NextRequest) {
@@ -49,10 +50,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ---- Validate User Session ----
-    const { getConvexClient } = await import('@/lib/convex-server')
-    const convex = getConvexClient()
-    const session = await convex.query(api.auth.validateSession, { token })
+    // ---- Validate User Session (HMAC, no DB lookup) ----
+    const session = validateSessionToken(token)
 
     if (!session?.valid || !session?.user) {
       return NextResponse.json(
@@ -85,8 +84,11 @@ export async function POST(request: NextRequest) {
     }
 
     // ---- Insert verification record ----
+    const { getConvexClient } = await import('@/lib/convex-server')
+    const convex = getConvexClient()
+
     const verificationId = await convex.mutation(api.paymentVerifications.createVerification, {
-      userId,
+      userId: userId as any,
       planId: planId ?? undefined,
       amount,
       currency: 'PKR',

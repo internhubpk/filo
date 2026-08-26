@@ -5,6 +5,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { getConvexClient } from '@/lib/convex-server'
 import { api } from '@convex/_generated/api'
 
@@ -21,16 +22,16 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate session first
-    const convex = getConvexClient()
-    
-    const session = await convex.query(api.auth.validateSession, { token })
+    // Validate session locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
     if (!session.valid || !session.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
         { status: 401 }
       )
     }
+
+    const userId = session.user.id
 
     // Parse request body
     const body = await request.json()
@@ -44,12 +45,13 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    console.log('[API /artifacts/generate] Starting generation for user:', session.user.id)
+    console.log('[API /artifacts/generate] Starting generation for user:', userId)
 
-    // Check subscription/usage limits (optional - can be skipped for MVP)
+    // Check subscription/usage limits
+    const convex = getConvexClient()
     try {
       const subscriptionStatus = await convex.query(api.subscriptions.canGenerateAI, {
-        userId: session.user.id,
+        userId: userId as any,
       })
 
       if (!subscriptionStatus.allowed) {
@@ -110,7 +112,7 @@ export async function POST(request: NextRequest) {
     // Record usage after successful generation
     try {
       await convex.mutation(api.subscriptions.recordAIGeneration, {
-        userId: session.user.id,
+        userId: userId as any,
       })
     } catch (usageError) {
       console.warn('[API /artifacts/generate] Failed to record usage:', usageError)

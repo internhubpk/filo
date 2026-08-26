@@ -14,6 +14,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 
 export async function GET(request: NextRequest) {
@@ -29,11 +30,8 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // ---- PRODUCTION: Use Convex ----
-    const { getConvexClient } = await import('@/lib/convex-server')
-    const convex = getConvexClient()
-
-    const session = await convex.query(api.auth.validateSession, { token })
+    // Validate session locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
     if (!session.valid || !session.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
@@ -42,14 +40,16 @@ export async function GET(request: NextRequest) {
     }
 
     const userId = session.user.id
-    const status = (session.user as any).status ?? 'pending_activation'
-    const userPlanId = (session.user as any).planId ?? null
+    const status = session.user.status ?? 'pending_activation'
+    const userPlanId = session.user.planId ?? null
 
-    // Fetch real plan details if user has a plan assigned
+    // Fetch plan details if user has one assigned
+    const { getConvexClient } = await import('@/lib/convex-server')
+    const convex = getConvexClient()
     let planData: any = null
     if (userPlanId) {
       try {
-        planData = await convex.query(api.plans.getPlanById, { planId: userPlanId })
+        planData = await convex.query(api.plans.getPlanById, { planId: userPlanId as any })
       } catch (planErr) {
         console.warn('[API /subscription/status] Could not load plan:', planErr)
       }
@@ -66,7 +66,7 @@ export async function GET(request: NextRequest) {
     let latestVerification: any = null
     try {
       latestVerification = await convex.query(api.paymentVerifications.getLatestVerification, {
-        userId,
+        userId: userId as any,
       })
     } catch (verifErr) {
       console.warn('[API /subscription/status] Could not load latest verification:', verifErr)

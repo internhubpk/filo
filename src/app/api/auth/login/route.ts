@@ -6,12 +6,14 @@
 // we return the status to the client so the UI can show the
 // "Your account is pending verification" banner and block AI generation.
 //
-// Password hashing & verification is done HERE (Node.js) to match the
-// signup flow and avoid relying on crypto.subtle inside Convex actions.
+// Session tokens are now self-contained (HMAC-signed). They do NOT
+// depend on the Convex "sessions" table. This eliminates the bug where
+// silent session-creation failures left the client with an orphaned token.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
+import { createSessionToken } from '@/lib/session'
 
 export async function POST(request: NextRequest) {
   try {
@@ -37,7 +39,7 @@ export async function POST(request: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    // ---- PRODUCTION: Use Convex ----
+    // ---- Look up user in Convex ----
     let convexClient: any
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
@@ -54,7 +56,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Step 1: Look up user by email (same as signup checks)
     console.log('[API /auth/login] Looking up user:', normalizedEmail)
     let user: any = null
     try {
@@ -77,8 +78,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Step 2: Hash the password on the Next.js server (same method as signup)
-    // This avoids relying on crypto.subtle inside Convex actions.
+    // ---- Verify password (SHA-256, same as signup) ----
     const encoder = new TextEncoder()
     const data = encoder.encode(password + "filo_salt_2024_secret")
     const hashBuffer = await crypto.subtle.digest('SHA-256', data)
@@ -86,7 +86,6 @@ export async function POST(request: NextRequest) {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("")
 
-    // Step 3: Compare hashes
     if (passwordHash !== (user.passwordHash || '')) {
       console.log('[API /auth/login] Invalid password for:', normalizedEmail)
       return NextResponse.json(
@@ -95,33 +94,38 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    console.log('[API /auth/login] Password valid, creating session for user:', user._id)
+    console.log('[API /auth/login] Password valid for:', user.email)
 
-    // Step 4: Generate session token
-    const array = new Uint8Array(32)
-    crypto.getRandomValues(array)
-    const sessionToken = Array.from(array)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
+    // ---- Create self-contained session token (HMAC-signed) ----
+    // This token encodes the user payload and is validated locally
+    // without needing a Convex session lookup.
+    const sessionToken = createSessionToken({
+      id: user._id,
+      name: user.name,
+      email: user.email,
+      status: user.status ?? 'pending_activation',
+      planId: user.planId ?? null,
+    })
 
-    // Step 5: Create session in Convex using email (avoids ID serialization bug)
-    let sessionCreated = false
+    // Best-effort: also store in Convex sessions table for backward compat
+    // (e.g. if other parts of the system still query it). Failure is non-fatal.
     try {
+      const array = new Uint8Array(32)
+      crypto.getRandomValues(array)
+      const convexToken = Array.from(array)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")
       await convexClient.mutation(api.sessions.createSessionByEmail, {
         email: normalizedEmail,
-        token: sessionToken,
-        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+        token: convexToken,
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
       })
-      sessionCreated = true
-      console.log('[API /auth/login] Session created successfully')
-    } catch (sessionError) {
-      console.warn('[API /auth/login] Session creation failed (non-fatal):', sessionError)
+    } catch (e) {
+      console.warn('[API /auth/login] Convex session creation skipped (non-fatal):', e)
     }
 
     console.log('[API /auth/login] Login successful for:', user.email)
 
-    // Successful login. Surface the user's activation status so the client
-    // can decide whether to allow AI generation or show a "pending" banner.
     return NextResponse.json({
       success: true,
       data: {
@@ -133,9 +137,6 @@ export async function POST(request: NextRequest) {
           planId: user.planId ?? null,
         },
         sessionToken,
-        warning: !sessionCreated
-          ? 'Session storage had an issue, but you are logged in. If problems persist, try logging in again.'
-          : undefined,
       }
     })
 

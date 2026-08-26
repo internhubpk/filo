@@ -4,11 +4,9 @@
 // Manual payment submission endpoint. Replaces the SafePay automatic
 // checkout flow.
 //
-// The user pays externally (bank transfer, EasyPaisa, JazzCash, etc.) and
-// submits their transaction details here. A `paymentVerification` record is
-// created in Convex with status="pending". An admin reviews it in /admin
-// and either approves (which activates the user account) or rejects (with
-// a reason that gets surfaced back to the user).
+// Session validation uses self-contained HMAC tokens (no Convex DB lookup),
+// which eliminates the "Invalid or expired session" bug caused by silent
+// session-creation failures in the Convex sessions table.
 //
 // Body:
 //   {
@@ -24,6 +22,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
+import { validateSessionToken } from '@/lib/session'
 
 export async function POST(request: NextRequest) {
   try {
@@ -37,6 +36,23 @@ export async function POST(request: NextRequest) {
         { status: 401 }
       )
     }
+
+    // ---- Validate Session (self-contained HMAC token, no DB lookup) ----
+    const session = validateSessionToken(token)
+
+    if (!session.valid || !session.user) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Invalid or expired session. Please log out and log in again.',
+          code: 'INVALID_SESSION',
+          reason: session.reason, // 'expired' | 'tampered' | 'malformed'
+        },
+        { status: 401 }
+      )
+    }
+
+    const userId = session.user.id
 
     // ---- Parse Body ----
     const body = await request.json()
@@ -84,20 +100,6 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ---- Validate User Session ----
-    const { getConvexClient } = await import('@/lib/convex-server')
-    const convex = getConvexClient()
-    const session = await convex.query(api.auth.validateSession, { token })
-
-    if (!session?.valid || !session?.user) {
-      return NextResponse.json(
-        { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
-        { status: 401 }
-      )
-    }
-
-    const userId = session.user.id
-
     // ---- Resolve amount based on plan + billing period ----
     const plans: Record<string, { name: string; priceMonthly: number; priceYearly: number }> = {
       pro: { name: 'Pro', priceMonthly: 1900, priceYearly: 19000 },
@@ -120,6 +122,9 @@ export async function POST(request: NextRequest) {
     }
 
     // ---- Insert verification record ----
+    const { getConvexClient } = await import('@/lib/convex-server')
+    const convex = getConvexClient()
+
     // NOTE: planId from the frontend is a slug like "pro" (string),
     // but Convex expects v.id("plans"). We store the plan slug in notes
     // and omit planId from the Convex mutation. The admin assigns the
@@ -128,7 +133,7 @@ export async function POST(request: NextRequest) {
     const combinedNotes = [planNote, notes?.trim()].filter(Boolean).join(' | ') || undefined
 
     const verificationId = await convex.mutation(api.paymentVerifications.createVerification, {
-      userId,
+      userId: userId as any,
       amount,
       currency: 'PKR',
       paymentMethod,

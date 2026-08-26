@@ -7,6 +7,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { agentRouter, type AgentRouterInput } from '@/services/agent-router'
 import { api } from '@convex/_generated/api'
 
@@ -23,18 +24,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate session with Convex
-    let convexClient: any
-    let session: any
-    try {
-      const { getConvexClient } = await import('@/lib/convex-server')
-      convexClient = getConvexClient()
-      session = await convexClient.query(api.auth.validateSession, { token })
-    } catch (convexErr) {
-      // If Convex is not configured, skip session validation (dev mode)
-      console.warn('[AGENT-GENERATE] Convex not available, skipping session check')
-      session = { valid: true, user: { id: 'dev-user' } }
-    }
+    // Validate session locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
 
     if (!session?.valid || !session?.user) {
       return NextResponse.json(
@@ -121,9 +112,11 @@ export async function POST(request: NextRequest) {
 
     // Save artifact record to Convex (non-blocking, best-effort)
     try {
-      if (convexClient && session.user.id !== 'dev-user') {
+      const { getConvexClient } = await import('@/lib/convex-server')
+      const convexClient = getConvexClient()
+      if (session.user.id !== 'dev-user') {
         await convexClient.mutation(api.artifacts.saveArtifactRecord, {
-          userId: session.user.id,
+          userId: session.user.id as any,
           title: result.artifact.title,
           type: result.artifact.type,
           format: result.artifact.format,
@@ -139,9 +132,11 @@ export async function POST(request: NextRequest) {
 
     // Record usage (non-blocking)
     try {
-      if (convexClient && session.user.id !== 'dev-user') {
+      const { getConvexClient } = await import('@/lib/convex-server')
+      const convexClient = getConvexClient()
+      if (session.user.id !== 'dev-user') {
         await convexClient.mutation(api.subscriptions.recordAIGeneration, {
-          userId: session.user.id,
+          userId: session.user.id as any,
         }).catch(() => {})
       }
     } catch {

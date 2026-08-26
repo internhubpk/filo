@@ -2,15 +2,12 @@
 // GET /api/auth/me
 // =============================================================================
 // Get current authenticated user from session token.
-// Returns the user's activation status so the client can gate AI generation:
-//   - status === "pending_activation" -> show "pending verification" UI
-//   - status === "active"             -> allow AI generation
-//   - status === "suspended"          -> show "account suspended" UI
+// Uses self-contained HMAC tokens — no Convex DB lookup needed.
+// Returns the user's activation status so the client can gate AI generation.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getConvexClient } from '@/lib/convex-server'
-import { api } from '@convex/_generated/api'
+import { validateSessionToken } from '@/lib/session'
 
 export async function GET(request: NextRequest) {
   try {
@@ -25,12 +22,10 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Validate session with Convex
-    const convex = getConvexClient()
+    // Validate session locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
 
-    const result = await convex.query(api.auth.validateSession, { token })
-
-    if (!result.valid || !result.user) {
+    if (!session.valid || !session.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
         { status: 401 }
@@ -40,7 +35,7 @@ export async function GET(request: NextRequest) {
     // Return user data with activation status
     return NextResponse.json({
       success: true,
-      data: result.user
+      data: session.user
     })
 
   } catch (error) {

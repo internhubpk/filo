@@ -4,10 +4,14 @@
 // Proxy route that handles signup via Convex.
 // New signups always start with status="pending_activation" — the user must
 // submit a payment and an admin must verify it before they can generate.
+//
+// Session tokens are now self-contained (HMAC-signed). They do NOT
+// depend on the Convex "sessions" table.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
+import { createSessionToken } from '@/lib/session'
 
 export async function POST(request: NextRequest) {
   try {
@@ -50,7 +54,7 @@ export async function POST(request: NextRequest) {
     const normalizedEmail = email.toLowerCase().trim()
     console.log('[API /auth/signup] Creating account for:', normalizedEmail)
 
-    // ---- PRODUCTION: Use Convex ----
+    // ---- Initialize Convex client ----
     let convexClient: any
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
@@ -76,7 +80,6 @@ export async function POST(request: NextRequest) {
         email: normalizedEmail,
       })
     } catch (queryError) {
-      // Log and continue - might be a new user
       console.warn('[API /auth/signup] Existing-user check failed (continuing):', queryError)
     }
 
@@ -92,8 +95,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Step 2: Create the user with password hash.
-    // The Convex mutation defaults status to "pending_activation".
+    // Step 2: Hash password & create user
     console.log('[API /auth/signup] Step 2: Creating user...')
 
     const encoder = new TextEncoder()
@@ -124,40 +126,34 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Step 3: Generate session token
-    console.log('[API /auth/signup] Step 3: Creating session...')
+    // Step 3: Create self-contained session token (HMAC-signed)
+    // This token encodes the user payload and is validated locally
+    // without needing a Convex session lookup.
+    console.log('[API /auth/signup] Step 3: Creating session token...')
 
-    const array = new Uint8Array(32)
-    crypto.getRandomValues(array)
-    const sessionToken = Array.from(array)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
+    const sessionToken = createSessionToken({
+      id: userId,
+      name: name.trim(),
+      email: normalizedEmail,
+      status: 'pending_activation',
+      planId: null,
+    })
 
-    // Step 4: Create session using email (avoids ID serialization bug)
-    let sessionCreated = false
+    // Best-effort: also store in Convex sessions table for backward compat.
+    // Failure is non-fatal — the HMAC token works independently.
     try {
+      const array = new Uint8Array(32)
+      crypto.getRandomValues(array)
+      const convexToken = Array.from(array)
+        .map((b) => b.toString(16).padStart(2, "0"))
+        .join("")
       await convexClient.mutation(api.sessions.createSessionByEmail, {
         email: normalizedEmail,
-        token: sessionToken,
-        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+        token: convexToken,
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
       })
-      sessionCreated = true
-      console.log('[API /auth/signup] Session created successfully')
-    } catch (sessionError) {
-      console.warn('[API /auth/signup] Session creation failed (non-fatal):', sessionError)
-    }
-
-    // Get the created user data
-    let userData: any
-    try {
-      userData = await convexClient.query(api.users.getUser, { userId })
-    } catch (getUserError) {
-      // Use basic user data from input
-      userData = {
-        id: userId,
-        name: name.trim(),
-        email: normalizedEmail,
-      }
+    } catch (e) {
+      console.warn('[API /auth/signup] Convex session creation skipped (non-fatal):', e)
     }
 
     console.log('[API /auth/signup] ✅ Account created successfully (pending activation)')
@@ -169,13 +165,9 @@ export async function POST(request: NextRequest) {
           id: userId,
           name: name.trim(),
           email: normalizedEmail,
-          // Always pending_activation here - admin must verify payment
           status: 'pending_activation',
         },
-        sessionToken: sessionToken,
-        warning: !sessionCreated
-          ? 'Account created but auto-login may not work. Please login manually.'
-          : 'Account created. Your access is pending admin verification of your payment.',
+        sessionToken,
       }
     })
 

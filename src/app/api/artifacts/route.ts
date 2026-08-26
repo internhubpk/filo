@@ -5,6 +5,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { getConvexClient } from '@/lib/convex-server'
 import { api } from '@convex/_generated/api'
 
@@ -21,16 +22,16 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    // Validate session
-    const convex = getConvexClient()
-    
-    const session = await convex.query(api.auth.validateSession, { token })
+    // Validate session locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
     if (!session.valid || !session.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
         { status: 401 }
       )
     }
+
+    const userId = session.user.id
 
     // Get query parameters
     const { searchParams } = new URL(request.url)
@@ -40,9 +41,7 @@ export async function GET(request: NextRequest) {
     const offset = parseInt(searchParams.get('offset') || '0')
 
     // Query artifacts from Convex
-    // Note: You may need to add a proper query function in convex/artifacts.ts
-    // For now, we'll use a basic approach
-    
+    const convex = getConvexClient()
     let artifacts: any[] = []
     
     try {
@@ -50,7 +49,7 @@ export async function GET(request: NextRequest) {
       // applied in-memory here (small result sets); move it into the Convex
       // query with a searchIndex if artifact counts grow.
       const all = await convex.query(api.artifacts.listUserArtifacts, {
-        userId: session.user.id,
+        userId: userId as any,
         limit: Math.max(limit + offset, 50),
       })
       let filtered = (all as any[]) || []

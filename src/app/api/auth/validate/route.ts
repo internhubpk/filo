@@ -1,12 +1,12 @@
 // =============================================================================
 // POST /api/auth/validate
 // =============================================================================
-// Explicitly validate a session token
+// Explicitly validate a session token.
+// Uses self-contained HMAC tokens — no Convex DB lookup needed.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
-import { getConvexClient } from '@/lib/convex-server'
-import { api } from '@convex/_generated/api'
+import { validateSessionToken } from '@/lib/session'
 
 export async function POST(request: NextRequest) {
   try {
@@ -20,18 +20,16 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate with Convex
-    const convex = getConvexClient()
-    
-    const result = await convex.query(api.auth.validateSession, { token })
+    // Validate locally (HMAC, no DB lookup)
+    const session = validateSessionToken(token)
 
-    if (!result.valid) {
+    if (!session.valid) {
       return NextResponse.json(
         { 
           success: false, 
           error: 'Invalid or expired token',
           code: 'INVALID_TOKEN',
-          data: { valid: false, user: null }
+          data: { valid: false, user: null, reason: session.reason }
         },
         { status: 401 }
       )
@@ -41,7 +39,7 @@ export async function POST(request: NextRequest) {
       success: true,
       data: {
         valid: true,
-        user: result.user
+        user: session.user
       }
     })
 
