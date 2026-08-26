@@ -296,4 +296,93 @@ export default defineSchema({
   })
     .index("by_userId", ["userId"])
     .index("by_workspaceId", ["workspaceId"]),
+
+  // =============================================================================
+  // DURABLE GENERATION PIPELINE (Phase 3)
+  // Long-document generation runs as a Convex-backed job composed of units.
+  // The job document is the single source of truth for progress; the client
+  // subscribes to it reactively (no polling loops needed).
+  // =============================================================================
+
+  // Generation jobs — one per user "generate" request.
+  generationJobs: defineTable({
+    userId: v.id("users"),
+    workspaceId: v.optional(v.id("workspaces")),
+    artifactId: v.optional(v.id("artifacts")),
+    prompt: v.string(),
+    artifactType: v.optional(v.string()),
+    outputFormat: v.optional(v.string()),
+
+    // Lifecycle: queued → planning → generating → validating → rendering
+    //            → uploading → completed | failed | cancelled
+    status: v.union(
+      v.literal("queued"),
+      v.literal("planning"),
+      v.literal("generating"),
+      v.literal("validating"),
+      v.literal("rendering"),
+      v.literal("uploading"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("cancelled")
+    ),
+    currentStage: v.optional(v.string()), // human-readable stage label
+    progress: v.number(), // 0-100
+
+    // Unit accounting
+    totalUnits: v.number(),
+    completedUnits: v.number(),
+    failedUnits: v.number(),
+
+    // Observability / billing
+    model: v.optional(v.string()),
+    provider: v.optional(v.string()),
+    inputTokens: v.number(),
+    outputTokens: v.number(),
+    estimatedCost: v.optional(v.number()),
+    actualCost: v.optional(v.number()),
+    retryCount: v.number(),
+
+    // Blueprint (the plan) persisted so units can be generated/resumed
+    // independently, and so a resumed job doesn't re-plan.
+    blueprint: v.optional(v.object({})),
+
+    // Failure info
+    error: v.optional(v.string()),
+
+    createdAt: v.number(),
+    startedAt: v.optional(v.number()),
+    completedAt: v.optional(v.number()),
+    updatedAt: v.number(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_userId_status", ["userId", "status"])
+    .index("by_status", ["status"])
+    .index("by_artifactId", ["artifactId"]),
+
+  // Generation units — one per section/chunk of the document.
+  generationUnits: defineTable({
+    jobId: v.id("generationJobs"),
+    sequence: v.number(), // order within the job
+    title: v.string(),
+    type: v.string(), // e.g. 'section' | 'intro' | 'conclusion' | 'table'
+    status: v.union(
+      v.literal("pending"),
+      v.literal("in_progress"),
+      v.literal("completed"),
+      v.literal("failed"),
+      v.literal("skipped")
+    ),
+    content: v.optional(v.object({})), // structured GeneratedSection JSON
+    metadata: v.optional(v.object({})),
+    attempts: v.number(),
+    error: v.optional(v.string()),
+    inputTokens: v.optional(v.number()),
+    outputTokens: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_jobId", ["jobId"])
+    .index("by_jobId_status", ["jobId", "status"])
+    .index("by_jobId_sequence", ["jobId", "sequence"]),
 });
