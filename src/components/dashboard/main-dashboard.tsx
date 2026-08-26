@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useCallback, useEffect } from 'react'
+import React, { useState, useCallback, useEffect, useRef } from 'react'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
 import { Textarea } from '@/components/ui/textarea'
@@ -791,8 +791,19 @@ export function MainDashboard() {
     return 'Document'
   }
 
+  const textareaRef = useRef<HTMLTextAreaElement>(null)
+
   const handleExampleClick = (examplePrompt: string) => {
     setPrompt(examplePrompt)
+    // Scroll to the textarea and focus it so the user sees the prompt was set
+    setTimeout(() => {
+      textareaRef.current?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      textareaRef.current?.focus()
+    }, 100)
+    // Auto-generate after a brief delay so the user sees the prompt first
+    setTimeout(() => {
+      handleGenerate()
+    }, 400)
   }
 
   const switchToSignup = () => {
@@ -928,6 +939,7 @@ export function MainDashboard() {
             <div className="mx-auto max-w-3xl">
               <div className="rounded-xl border bg-card p-2 shadow-lg">
                 <Textarea
+                  ref={textareaRef}
                   placeholder="What do you want to create? Be specific about what you need..."
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
