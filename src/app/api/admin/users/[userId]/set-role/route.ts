@@ -1,12 +1,11 @@
 // =============================================================================
-// POST /api/admin/users/[userId]/suspend
+// POST /api/admin/users/[userId]/set-role
 // =============================================================================
-// Admin-only endpoint. Suspends a user account, revoking AI generation
-// access. Typically called when a user has been flagged for abuse or has
-// requested cancellation past a refund window.
+// Admin-only endpoint. Sets a user's role to "admin" or "user".
+// Promoting to admin also auto-activates the account.
 //
-// Body (optional):
-//   { note?: string }   // admin reason shown to the user
+// Body:
+//   { role: "admin" | "user" }
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -33,39 +32,42 @@ export async function POST(
       )
     }
 
-    let body: any = {}
-    try {
-      body = await request.json()
-    } catch {
-      // No body is fine
+    const body = await request.json()
+    const { role } = body
+
+    if (role !== 'admin' && role !== 'user') {
+      return NextResponse.json(
+        { success: false, error: 'role must be "admin" or "user"', code: 'INVALID_ROLE' },
+        { status: 400 }
+      )
     }
-    const { note } = body
 
     const { getConvexClient } = await import('@/lib/convex-server')
     const convex = getConvexClient()
 
-    const updated = await convex.mutation(api.users.suspendUser, {
+    const updated = await convex.mutation(api.users.setUserRole, {
       userId: userId as any,
-      note: note ?? undefined,
+      role,
     })
 
-    console.log(`[ADMIN SUSPEND] User ${userId} suspended`)
+    console.log(`[ADMIN SET-ROLE] User ${userId} role set to ${role}`)
 
     return NextResponse.json({
       success: true,
       data: {
         userId: (updated as any)?._id ?? userId,
-        status: (updated as any)?.status ?? 'suspended',
+        role: (updated as any)?.role ?? role,
+        status: (updated as any)?.status,
       },
     })
 
   } catch (error) {
-    console.error('[ADMIN SUSPEND] Error:', error)
+    console.error('[ADMIN SET-ROLE] Error:', error)
     return NextResponse.json(
       {
         success: false,
-        error: error instanceof Error ? error.message : 'Failed to suspend user',
-        code: 'SUSPEND_FAILED',
+        error: error instanceof Error ? error.message : 'Failed to set user role',
+        code: 'SET_ROLE_FAILED',
       },
       { status: 500 }
     )

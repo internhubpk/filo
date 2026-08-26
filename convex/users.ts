@@ -293,3 +293,77 @@ export const resetUserToPending = mutation({
     return await ctx.db.get(args.userId);
   },
 });
+
+// Admin: set a user's role (admin or user)
+export const setUserRole = mutation({
+  args: {
+    userId: v.id("users"),
+    role: v.union(v.literal("admin"), v.literal("user")),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    const updates: Record<string, unknown> = {
+      role: args.role,
+      updatedAt: Date.now(),
+    };
+
+    // When promoting to admin, also activate the account
+    if (args.role === "admin") {
+      updates.status = "active";
+      updates.activatedAt = Date.now();
+      updates.activationNote = "Admin account - auto-activated";
+    }
+
+    await ctx.db.patch(args.userId, updates);
+    return await ctx.db.get(args.userId);
+  },
+});
+
+// Admin: create a user with admin role (for seeding)
+export const createAdminUser = mutation({
+  args: {
+    name: v.string(),
+    email: v.string(),
+    passwordHash: v.string(),
+  },
+  handler: async (ctx, args) => {
+    // Check if user already exists
+    const existing = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .first();
+
+    if (existing) {
+      // Update existing user to admin if not already
+      if (existing.role !== "admin") {
+        await ctx.db.patch(existing._id, {
+          role: "admin",
+          status: "active",
+          activatedAt: Date.now(),
+          activationNote: "Promoted to admin",
+          updatedAt: Date.now(),
+        });
+      }
+      return await ctx.db.get(existing._id);
+    }
+
+    // Create new admin user - always active, no activation needed
+    const userId = await ctx.db.insert("users", {
+      name: args.name,
+      email: args.email,
+      passwordHash: args.passwordHash,
+      role: "admin",
+      status: "active",
+      activatedAt: Date.now(),
+      activationNote: "Admin account - auto-created and activated",
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    });
+
+    return await ctx.db.get(userId);
+  },
+});

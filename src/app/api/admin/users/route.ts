@@ -11,14 +11,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
-
-// Admin session token validation (cookie-based, set by /api/auth/admin/login)
-function isAdminRequest(request: NextRequest): boolean {
-  const token = request.cookies.get('admin_session')?.value
-  if (!token) return false
-  // Basic format check (SHA-256 hex string of length 64)
-  return /^[a-f0-9]{64}$/.test(token)
-}
+import { isAdminRequest } from '@/lib/admin-auth'
 
 export async function GET(request: NextRequest) {
   try {
@@ -44,6 +37,7 @@ export async function GET(request: NextRequest) {
         id: u._id,
         name: u.name,
         email: u.email,
+        role: u.role ?? 'user',
         status: u.status ?? 'pending_activation',
         planId: u.planId ?? null,
         activatedAt: u.activatedAt ?? null,
@@ -63,6 +57,7 @@ export async function GET(request: NextRequest) {
           pending: pending.length,
           active: active.length,
           suspended: all.filter((u: any) => u.status === 'suspended').length,
+          admins: all.filter((u: any) => u.role === 'admin').length,
         },
       },
     })

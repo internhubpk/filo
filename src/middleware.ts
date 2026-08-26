@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSession } from '@/lib/admin-auth'
 
 // Paths that require admin authentication
 const ADMIN_PATHS = ['/admin']
@@ -35,7 +36,7 @@ export function middleware(request: NextRequest) {
     return NextResponse.next()
   }
 
-  // For admin routes, check for session cookie
+  // For admin routes, check for session cookie and validate it properly
   const sessionToken = request.cookies.get('admin_session')?.value
 
   if (!sessionToken) {
@@ -45,9 +46,11 @@ export function middleware(request: NextRequest) {
     return NextResponse.redirect(loginUrl)
   }
 
-  // Validate session token format
-  if (!isValidSessionToken(sessionToken)) {
-    // Invalid session - redirect to login
+  // Validate session using the secure HMAC-based validator
+  const session = validateSession(sessionToken)
+
+  if (!session) {
+    // Invalid or expired session - redirect to login
     const loginUrl = new URL('/admin/login', request.url)
     loginUrl.searchParams.set('redirect', pathname)
     loginUrl.searchParams.set('error', 'session_expired')
@@ -60,16 +63,6 @@ export function middleware(request: NextRequest) {
 
   // Valid session, allow access
   return NextResponse.next()
-}
-
-function isValidSessionToken(token: string): boolean {
-  // Basic validation of token format (SHA-256 hex string)
-  if (!token || token.length !== 64) {
-    return false
-  }
-
-  // Check if it's a valid hex string
-  return /^[a-f0-9]{64}$/.test(token)
 }
 
 // Configure middleware to run on specific paths
