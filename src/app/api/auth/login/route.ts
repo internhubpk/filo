@@ -104,19 +104,20 @@ export async function POST(request: NextRequest) {
       .map((b) => b.toString(16).padStart(2, "0"))
       .join("")
 
-    // Step 5: Create session in Convex
+    // Step 5: Try to create session in Convex (non-fatal — matches signup behavior)
+    // If this fails, the token is still returned to the client and stored in
+    // localStorage, which is sufficient for the app to function.
+    let sessionCreated = false
     try {
       await convexClient.mutation(api.sessions.createSession, {
         userId: user._id,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
       })
+      sessionCreated = true
+      console.log('[API /auth/login] Session created successfully')
     } catch (sessionError) {
-      console.error('[API /auth/login] Session creation failed:', sessionError)
-      return NextResponse.json(
-        { success: false, error: 'Login succeeded but session creation failed. Please try again.', code: 'SESSION_FAILED' },
-        { status: 500 }
-      )
+      console.warn('[API /auth/login] Session creation failed (non-fatal, matching signup):', sessionError)
     }
 
     console.log('[API /auth/login] Login successful for:', user.email)
@@ -134,6 +135,9 @@ export async function POST(request: NextRequest) {
           planId: user.planId ?? null,
         },
         sessionToken,
+        warning: !sessionCreated
+          ? 'Session storage had an issue, but you are logged in. If problems persist, try logging in again.'
+          : undefined,
       }
     })
 
