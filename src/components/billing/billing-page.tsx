@@ -58,6 +58,7 @@ import { getDefaultPlans, currencyConfig, type PlanConfig } from '@/config/plans
 import { ErrorDisplay } from '@/components/ui/error-boundary'
 import { apiClient } from '@/lib/api-client'
 import { toast } from '@/lib/toast'
+import { useRouter } from 'next/navigation'
 
 // Icon mapping
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -99,6 +100,7 @@ export function BillingPage() {
   const [isProcessing, setIsProcessing] = useState(false)
   const [isYearly, setIsYearly] = useState(false)
   const [paymentError, setPaymentError] = useState<string | null>(null)
+  const [sessionInvalid, setSessionInvalid] = useState(false)
 
   // Manual payment submission dialog state
   const [showSubmitDialog, setShowSubmitDialog] = useState(false)
@@ -112,6 +114,7 @@ export function BillingPage() {
 
   // Get user session from localStorage (same as dashboard)
   const [user, setUser] = useState<{ id: string; email: string; name: string; status?: string } | null>(null)
+  const router = useRouter()
 
   // Account status fetched from /api/subscription/status (manual activation model)
   const [accountStatus, setAccountStatus] = useState<'pending_activation' | 'active' | 'suspended' | 'unknown'>('unknown')
@@ -171,10 +174,23 @@ export function BillingPage() {
         const sessionData = JSON.parse(savedSession)
         if (sessionData.user) {
           setUser(sessionData.user)
+          // Validate the session token against the server
+          if (sessionData.token) {
+            apiClient.validateSession(sessionData.token).then((resp) => {
+              if (!resp.success || !resp.data) {
+                // Session is invalid/expired in Convex
+                setSessionInvalid(true)
+              }
+            }).catch(() => {
+              // Network error - don't flag as invalid yet
+            })
+          }
         }
       } catch {
-        // Invalid session
+        setSessionInvalid(true)
       }
+    } else {
+      setSessionInvalid(true)
     }
 
     // Check URL params for legacy ?payment=success/cancelled and surface a
@@ -273,6 +289,11 @@ export function BillingPage() {
       const msg = error.message || 'Failed to submit payment. Please try again.'
       setPaymentError(msg)
       setSubmitDialogError(msg)
+
+      // If session is invalid, prompt re-login
+      if (error.message?.includes('session') || error.message?.includes('Session') || error.message?.includes('401')) {
+        setSessionInvalid(true)
+      }
     } finally {
       setIsProcessing(false)
     }
@@ -331,8 +352,36 @@ export function BillingPage() {
         </p>
       </div>
 
+      {/* Session Invalid Warning */}
+      {sessionInvalid && (
+        <Card className="border-yellow-500/50 bg-yellow-500/5">
+          <CardContent className="pt-6">
+            <div className="flex items-start gap-3">
+              <AlertTriangle className="h-5 w-5 text-yellow-600 mt-0.5 shrink-0" />
+              <div className="flex-1">
+                <p className="font-medium">Session expired</p>
+                <p className="text-sm text-muted-foreground mt-1">
+                  Your login session has expired or is invalid. Please log in again to submit payments.
+                </p>
+                <Button
+                  onClick={() => {
+                    localStorage.removeItem('filo_session')
+                    window.dispatchEvent(new CustomEvent('authStateChanged', { detail: 'logout' }))
+                    router.push('/')
+                }}
+                  className="mt-3 cursor-pointer"
+                  size="sm"
+                >
+                  Log In Again
+                </Button>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      )}
+
       {/* Error Display */}
-      {paymentError && (
+      {paymentError && !sessionInvalid && (
         <ErrorDisplay
           error={paymentError}
           onDismiss={() => setPaymentError(null)}
@@ -388,7 +437,7 @@ export function BillingPage() {
                     setShowSubmitDialog(true)
                   }
                 }}
-                disabled={isProcessing || accountStatus === 'active'}
+                disabled={isProcessing || accountStatus === 'active' || sessionInvalid}
                 className="cursor-pointer"
               >
                 {accountStatus === 'active' ? 'Active' : 'Submit Payment'}
