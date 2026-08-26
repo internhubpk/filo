@@ -5,6 +5,9 @@
 // Login is allowed even when the user's status is "pending_activation" —
 // we return the status to the client so the UI can show the
 // "Your account is pending verification" banner and block AI generation.
+//
+// Password hashing & verification is done HERE (Node.js) to match the
+// signup flow and avoid relying on crypto.subtle inside Convex actions.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -51,64 +54,86 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Call Convex auth action
-    let result: any
+    // Step 1: Look up user by email (same as signup checks)
+    console.log('[API /auth/login] Looking up user:', normalizedEmail)
+    let user: any = null
     try {
-      result = await convexClient.action(api.auth.login, {
+      user = await convexClient.query(api.users.getUserByEmail, {
         email: normalizedEmail,
-        password,
       })
-    } catch (actionError) {
-      console.error('[API /auth/login] Convex action error:', actionError)
-      const msg = actionError instanceof Error ? actionError.message : String(actionError)
-
-      // If Convex is unreachable, provide a clear error
-      if (msg.includes('fetch') || msg.includes('network') || msg.includes('ECONNREFUSED') || msg.includes('Failed to fetch')) {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'Unable to reach authentication server. Please check your connection and try again.',
-            code: 'SERVICE_UNAVAILABLE'
-          },
-          { status: 503 }
-        )
-      }
-
+    } catch (queryError) {
+      console.error('[API /auth/login] User lookup failed:', queryError)
       return NextResponse.json(
-        {
-          success: false,
-          error: 'Login failed. Please try again.',
-          code: 'LOGIN_FAILED'
-        },
+        { success: false, error: 'Login failed. Please try again.', code: 'LOGIN_FAILED' },
         { status: 500 }
       )
     }
 
-    // Check Convex action result
-    if (!result || !result.success) {
-      const errorCode = result?.code || 'LOGIN_FAILED'
-      const errorMsg = result?.error || 'Login failed'
-
-      // Use 401 for authentication failures, 404 for missing users
-      const status = errorCode === 'USER_NOT_FOUND' ? 404 : 401
-
+    if (!user) {
+      console.log('[API /auth/login] User not found:', normalizedEmail)
       return NextResponse.json(
-        {
-          success: false,
-          error: errorMsg,
-          code: errorCode
-        },
-        { status }
+        { success: false, error: 'No account found with this email', code: 'USER_NOT_FOUND' },
+        { status: 404 }
       )
     }
+
+    // Step 2: Hash the password on the Next.js server (same method as signup)
+    // This avoids relying on crypto.subtle inside Convex actions.
+    const encoder = new TextEncoder()
+    const data = encoder.encode(password + "filo_salt_2024_secret")
+    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
+    const passwordHash = Array.from(new Uint8Array(hashBuffer))
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+
+    // Step 3: Compare hashes
+    if (passwordHash !== (user.passwordHash || '')) {
+      console.log('[API /auth/login] Invalid password for:', normalizedEmail)
+      return NextResponse.json(
+        { success: false, error: 'Incorrect password', code: 'INVALID_PASSWORD' },
+        { status: 401 }
+      )
+    }
+
+    console.log('[API /auth/login] Password valid, creating session for user:', user._id)
+
+    // Step 4: Generate session token
+    const array = new Uint8Array(32)
+    crypto.getRandomValues(array)
+    const sessionToken = Array.from(array)
+      .map((b) => b.toString(16).padStart(2, "0"))
+      .join("")
+
+    // Step 5: Create session in Convex
+    try {
+      await convexClient.mutation(api.sessions.createSession, {
+        userId: user._id,
+        token: sessionToken,
+        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
+      })
+    } catch (sessionError) {
+      console.error('[API /auth/login] Session creation failed:', sessionError)
+      return NextResponse.json(
+        { success: false, error: 'Login succeeded but session creation failed. Please try again.', code: 'SESSION_FAILED' },
+        { status: 500 }
+      )
+    }
+
+    console.log('[API /auth/login] Login successful for:', user.email)
 
     // Successful login. Surface the user's activation status so the client
     // can decide whether to allow AI generation or show a "pending" banner.
     return NextResponse.json({
       success: true,
       data: {
-        user: result.user,
-        sessionToken: result.sessionToken,
+        user: {
+          id: user._id,
+          name: user.name,
+          email: user.email,
+          status: user.status ?? 'pending_activation',
+          planId: user.planId ?? null,
+        },
+        sessionToken,
       }
     })
 
