@@ -61,7 +61,11 @@ export default function DocumentsPage() {
   useEffect(() => {
     // Seed demo data only on the client, so server and client initial
     // renders agree (both render the empty list, then the client fills in).
+    // NOTE: the synchronous setState below is intentional — it is the
+    // documented fix for a hydration mismatch (see comment above) and runs
+    // exactly once on mount, so it cannot cascade.
     const now = Date.now()
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setArtifacts([
       {
         _id: '1',
