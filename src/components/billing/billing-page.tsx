@@ -108,6 +108,7 @@ export function BillingPage() {
     proofUrl: '',
     notes: '',
   })
+  const [submitDialogError, setSubmitDialogError] = useState<string | null>(null)
 
   // Get user session from localStorage (same as dashboard)
   const [user, setUser] = useState<{ id: string; email: string; name: string; status?: string } | null>(null)
@@ -228,6 +229,7 @@ export function BillingPage() {
 
     setIsProcessing(true)
     setPaymentError(null)
+    setSubmitDialogError(null)
 
     try {
       const plan = selectedPlan
@@ -268,7 +270,9 @@ export function BillingPage() {
       await refreshStatus()
     } catch (error: any) {
       console.error('Payment submission error:', error)
-      setPaymentError(error.message || 'Failed to submit payment. Please try again.')
+      const msg = error.message || 'Failed to submit payment. Please try again.'
+      setPaymentError(msg)
+      setSubmitDialogError(msg)
     } finally {
       setIsProcessing(false)
     }
@@ -829,6 +833,7 @@ export function BillingPage() {
             notes: '',
           })
           setSelectedPlan(null)
+          setSubmitDialogError(null)
         }
       }}>
         <DialogContent className="sm:max-w-lg">
@@ -841,6 +846,19 @@ export function BillingPage() {
               Pay externally (bank transfer, EasyPaisa, JazzCash) then submit your transaction details below. An admin will review and activate your account shortly.
             </DialogDescription>
           </DialogHeader>
+
+          {submitDialogError && (
+            <div className="rounded-lg border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive flex items-start gap-2">
+              <AlertCircle className="h-4 w-4 mt-0.5 shrink-0" />
+              <div className="flex-1">
+                <p className="font-medium">Submission failed</p>
+                <p className="mt-1 text-xs opacity-80">{submitDialogError}</p>
+              </div>
+              <button type="button" onClick={() => setSubmitDialogError(null)} className="shrink-0 cursor-pointer">
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+          )}
 
           <form onSubmit={handleSubmitPayment} className="space-y-4 mt-2">
             {/* Plan summary */}
