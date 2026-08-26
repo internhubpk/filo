@@ -39,41 +39,62 @@ export default function DocumentsPage() {
   const [searchQuery, setSearchQuery] = useState('')
   const [filterType, setFilterType] = useState<string>('all')
   const [filterStatus, setFilterStatus] = useState<string>('all')
-  
+
   // TODO: Replace with actual Convex query when ready
   // const artifacts = useQuery(api.artifacts.getUserArtifacts)
-  const [artifacts, setArtifacts] = useState<Artifact[]>([
-    {
-      _id: '1',
-      title: 'Business Proposal Template',
-      type: 'document',
-      format: 'DOCX',
-      status: 'completed',
-      createdAt: Date.now() - 86400000,
-      updatedAt: Date.now() - 3600000,
-      versionCount: 3
-    },
-    {
-      _id: '2',
-      title: 'Q4 Financial Report',
-      type: 'spreadsheet',
-      format: 'XLSX',
-      status: 'completed',
-      createdAt: Date.now() - 172800000,
-      updatedAt: Date.now() - 7200000,
-      versionCount: 1
-    },
-    {
-      _id: '3',
-      title: 'Product Launch Deck',
-      type: 'presentation',
-      format: 'PPTX',
-      status: 'generating',
-      createdAt: Date.now() - 3600000,
-      updatedAt: Date.now() - 3600000,
-      versionCount: 1
-    }
-  ])
+  //
+  // HYDRATION-SAFE INITIALIZATION:
+  //   We must NOT call `Date.now()` inside `useState`'s initial value, because
+  //   that value is computed on the server during SSR and re-computed on the
+  //   client during hydration — with a different timestamp. The formatted
+  //   output (especially the minute/hour granularity in `formatDate` below)
+  //   then differs between server and client, and React throws the
+  //   "Minified React error #418" hydration mismatch, which on a production
+  //   Vercel build surfaces as the
+  //   "Application error: a client-side exception has occurred" page.
+  //
+  //   Fix: start with an empty list and populate it inside `useEffect` (which
+  //   only runs on the client, after hydration). The server-rendered HTML
+  //   and the first client render both produce an empty list → no mismatch.
+  const [artifacts, setArtifacts] = useState<Artifact[]>([])
+
+  useEffect(() => {
+    // Seed demo data only on the client, so server and client initial
+    // renders agree (both render the empty list, then the client fills in).
+    const now = Date.now()
+    setArtifacts([
+      {
+        _id: '1',
+        title: 'Business Proposal Template',
+        type: 'document',
+        format: 'DOCX',
+        status: 'completed',
+        createdAt: now - 86400000,
+        updatedAt: now - 3600000,
+        versionCount: 3
+      },
+      {
+        _id: '2',
+        title: 'Q4 Financial Report',
+        type: 'spreadsheet',
+        format: 'XLSX',
+        status: 'completed',
+        createdAt: now - 172800000,
+        updatedAt: now - 7200000,
+        versionCount: 1
+      },
+      {
+        _id: '3',
+        title: 'Product Launch Deck',
+        type: 'presentation',
+        format: 'PPTX',
+        status: 'generating',
+        createdAt: now - 3600000,
+        updatedAt: now - 3600000,
+        versionCount: 1
+      }
+    ])
+  }, [])
 
   // Filter artifacts
   const filteredArtifacts = artifacts.filter(artifact => {

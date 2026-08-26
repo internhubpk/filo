@@ -3,8 +3,20 @@ import { NextRequest, NextResponse } from 'next/server'
 // Paths that require admin authentication
 const ADMIN_PATHS = ['/admin']
 
+// Admin routes that should NOT be auth-gated — they handle their own auth
+// or are the destination of unauthenticated redirects. Without this list,
+// the middleware would redirect /admin/login → /admin/login → ... forever
+// (ERR_TOO_MANY_REDIRECTS in the browser).
+const ADMIN_PUBLIC_PATHS = [
+  '/admin/login',
+]
+
 // Public paths that don't require auth
 const PUBLIC_PATHS = ['/pricing', '/login', '/api/auth']
+
+function isAdminPublicPath(pathname: string): boolean {
+  return ADMIN_PUBLIC_PATHS.some((p) => pathname === p || pathname.startsWith(p + '/'))
+}
 
 export function middleware(request: NextRequest) {
   const { pathname } = request.nextUrl
@@ -14,6 +26,12 @@ export function middleware(request: NextRequest) {
 
   if (!isAdminRoute) {
     // Not an admin route, allow through
+    return NextResponse.next()
+  }
+
+  // Allow /admin/login and any nested sub-paths we declared public to pass
+  // through without a session check (otherwise we redirect to ourselves).
+  if (isAdminPublicPath(pathname)) {
     return NextResponse.next()
   }
 
@@ -33,7 +51,7 @@ export function middleware(request: NextRequest) {
     const loginUrl = new URL('/admin/login', request.url)
     loginUrl.searchParams.set('redirect', pathname)
     loginUrl.searchParams.set('error', 'session_expired')
-    
+
     const response = NextResponse.redirect(loginUrl)
     // Clear invalid cookie
     response.cookies.delete({ name: 'admin_session', path: '/admin' })
@@ -49,7 +67,7 @@ function isValidSessionToken(token: string): boolean {
   if (!token || token.length !== 64) {
     return false
   }
-  
+
   // Check if it's a valid hex string
   return /^[a-f0-9]{64}$/.test(token)
 }
