@@ -1,20 +1,54 @@
 // =============================================================================
 // FILO Toast Notifications - Using react-hot-toast
 // =============================================================================
-// Clean, beautiful toasts with proper backgrounds
+// Clean, beautiful toasts with proper backgrounds.
+//
+// COMPATIBILITY NOTE — second argument ("description"):
+//   The original API was `toast.error(message, description?: string)`, but
+//   several call sites pass an options object: `toast.error('msg', { description: 'desc' })`.
+//   To stay backward compatible with BOTH forms, the second argument is
+//   now typed as `string | { description?: string } | undefined` and
+//   normalized internally via `normalizeDescription()` before rendering.
+//   Rendering a plain object as a React child would otherwise throw
+//   "Objects are not valid as a React child" → which on Vercel surfaces as
+//   the "Application error: a client-side exception" page.
 // =============================================================================
 
 import hotToast from 'react-hot-toast'
 
 // ==================== CLEAN TOAST API ====================
 
+/**
+ * Normalize the second argument of toast.success/error/etc. into a string.
+ * Accepts either a plain string OR an object `{ description?: string }`.
+ */
+function normalizeDescription(desc: unknown): string | undefined {
+  if (desc == null) return undefined
+  if (typeof desc === 'string') return desc
+  if (typeof desc === 'object' && desc !== null) {
+    const obj = desc as { description?: unknown }
+    if (typeof obj.description === 'string') return obj.description
+  }
+  return undefined
+}
+
+// Build the inner content for react-hot-toast. Avoids rendering a plain
+// object as a React child (which would throw "Objects are not valid as a
+// React child").
+function renderContent(message: string, desc: unknown) {
+  const description = normalizeDescription(desc)
+  return (
+    <div className="flex flex-col">
+      <span className="font-semibold text-sm">{message}</span>
+      {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
+    </div>
+  )
+}
+
 export const toast = {
-  success(message: string, description?: string) {
+  success(message: string, description?: string | { description?: string }) {
     return hotToast.success(
-      <div className="flex flex-col">
-        <span className="font-semibold text-sm">{message}</span>
-        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
-      </div>,
+      renderContent(message, description),
       {
         icon: (
           <svg className="w-4 h-4 text-green-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -35,12 +69,9 @@ export const toast = {
     )
   },
 
-  error(message: string, description?: string) {
+  error(message: string, description?: string | { description?: string }) {
     return hotToast.error(
-      <div className="flex flex-col">
-        <span className="font-semibold text-sm">{message}</span>
-        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
-      </div>,
+      renderContent(message, description),
       {
         icon: (
           <svg className="w-4 h-4 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -61,12 +92,9 @@ export const toast = {
     )
   },
 
-  warning(message: string, description?: string) {
+  warning(message: string, description?: string | { description?: string }) {
     return hotToast(
-      <div className="flex flex-col">
-        <span className="font-semibold text-sm">{message}</span>
-        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
-      </div>,
+      renderContent(message, description),
       {
         icon: (
           <svg className="w-4 h-4 text-yellow-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
@@ -87,12 +115,9 @@ export const toast = {
     )
   },
 
-  info(message: string, description?: string) {
+  info(message: string, description?: string | { description?: string }) {
     return hotToast(
-      <div className="flex flex-col">
-        <span className="font-semibold text-sm">{message}</span>
-        {description && <span className="text-xs opacity-70 mt-0.5">{description}</span>}
-      </div>,
+      renderContent(message, description),
       {
         icon: (
           <svg className="w-4 h-4 text-blue-500" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
