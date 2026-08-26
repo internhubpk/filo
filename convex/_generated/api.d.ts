@@ -15,7 +15,6 @@ import type * as files from "../files.js";
 import type * as payments from "../payments.js";
 import type * as paymentVerifications from "../paymentVerifications.js";
 import type * as plans from "../plans.js";
-import type * as safepay from "../safepay.js";
 import type * as sessions from "../sessions.js";
 import type * as subscriptions from "../subscriptions.js";
 import type * as users from "../users.js";
@@ -34,7 +33,6 @@ declare const fullApi: ApiFromModules<{
   payments: typeof payments;
   paymentVerifications: typeof paymentVerifications;
   plans: typeof plans;
-  safepay: typeof safepay;
   sessions: typeof sessions;
   subscriptions: typeof subscriptions;
   users: typeof users;

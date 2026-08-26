@@ -1,7 +1,7 @@
 import { mutation, query } from "./_generated/server";
 import { v } from "convex/values";
 
-// Create payment record (Safepay)
+// Create payment record (manual — SafePay removed)
 export const createPayment = mutation({
   args: {
     userId: v.id("users"),
@@ -18,7 +18,8 @@ export const createPayment = mutation({
       amount: args.amount,
       currency: args.currency,
       status: "pending",
-      provider: "safepay",
+      // SafePay removed; payments are now manual (admin-recorded)
+      provider: "manual",
       providerPaymentId: args.providerPaymentId,
       description: args.description,
       createdAt: Date.now(),
@@ -29,7 +30,7 @@ export const createPayment = mutation({
   },
 });
 
-// Update payment status (called by Safepay webhook)
+// Update payment status (called manually by admin after verifying payment)
 export const updatePaymentStatus = mutation({
   args: {
     paymentId: v.id("payments"),

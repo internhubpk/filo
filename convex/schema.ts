@@ -96,12 +96,15 @@ export default defineSchema({
     .index("by_active", ["active"])
     .index("by_order", ["order"]),
 
-  // Subscriptions (provider-agnostic)
+  // Subscriptions (manual admin-verified flow — SafePay removed)
   subscriptions: defineTable({
     userId: v.id("users"),
     workspaceId: v.optional(v.id("workspaces")),
     planId: v.id("plans"),
-    provider: v.literal("safepay"), // Safepay only for beta
+    // SafePay removed; subscriptions are now created manually by the admin
+    // when activating a user. We accept any string for backward compat with
+    // historical records and to avoid a schema-breaking change.
+    provider: v.string(),
     status: v.union(
       v.literal("active"),
       v.literal("canceled"),
@@ -187,7 +190,7 @@ export default defineSchema({
     .index("by_userId_period", ["userId", "periodStart", "periodEnd"])
     .index("by_type_period", ["type", "periodStart"]),
 
-  // Payments (Safepay for beta)
+  // Payments (manual admin-verified flow — SafePay removed)
   payments: defineTable({
     userId: v.id("users"),
     subscriptionId: v.optional(v.id("subscriptions")),
@@ -200,7 +203,10 @@ export default defineSchema({
       v.literal("refunded"),
       v.literal("cancelled")
     ),
-    provider: v.literal("safepay"),
+    // SafePay removed; payments are now recorded manually by the admin
+    // when approving a payment verification. We accept any string for
+    // backward compat with historical records.
+    provider: v.string(),
     providerPaymentId: v.optional(v.string()),
     invoiceId: v.optional(v.string()),
     description: v.string(),
@@ -212,7 +218,8 @@ export default defineSchema({
     .index("by_status", ["status"])
     .index("by_providerPaymentId", ["providerPaymentId"]),
 
-  // Webhook events (for idempotency - critical for payment security)
+  // Webhook events (legacy, kept for backward compat; SafePay removed so
+  // these will not receive new events, but historical records remain).
   webhookEvents: defineTable({
     provider: v.union(v.literal("safepay"), v.literal("custom")),
     eventId: v.string(),

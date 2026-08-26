@@ -241,8 +241,11 @@ export const validateSession = query({
     }
 
     // Check expiration
+    // NOTE: queries are read-only in Convex — we cannot delete the session
+    // here. We just return invalid; a separate cleanup mutation can sweep
+    // expired sessions later. (Previously this called ctx.db.delete which
+    // throws at runtime and breaks login for users with expired sessions.)
     if (session.expiresAt < Date.now()) {
-      await ctx.db.delete(session._id);
       return { valid: false, user: null };
     }
 

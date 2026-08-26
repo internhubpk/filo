@@ -42,6 +42,33 @@ export async function POST(request: NextRequest) {
       )
     }
 
+    // ==================== ACCOUNT ACTIVATION ENFORCEMENT ====================
+    // Manual activation flow: only "active" users can perform chat/generation.
+    // Users with status "pending_activation" or "suspended" are blocked here
+    // (defense-in-depth — the client also gates on user.status).
+    const userStatus = session.user.status
+    if (userStatus && userStatus !== 'active') {
+      const message =
+        userStatus === 'pending_activation'
+          ? 'Your account is pending activation. An administrator will activate it after verifying your payment. Please try again later.'
+          : userStatus === 'suspended'
+            ? 'Your account has been suspended. Please contact support for assistance.'
+            : 'Your account is not active. Please contact support.'
+      return NextResponse.json(
+        {
+          success: false,
+          error: message,
+          code:
+            userStatus === 'pending_activation'
+              ? 'ACCOUNT_PENDING_ACTIVATION'
+              : userStatus === 'suspended'
+                ? 'ACCOUNT_SUSPENDED'
+                : 'ACCOUNT_NOT_ACTIVE',
+        },
+        { status: 403 }
+      )
+    }
+
     // Parse request body
     const body = await request.json()
     const { prompt, artifactType, outputFormat, workspaceId, brandConfig, files } = body
