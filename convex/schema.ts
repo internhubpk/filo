@@ -401,6 +401,7 @@ export default defineSchema({
     .index("by_status", ["status"])
     .index("by_subscriptionId", ["subscriptionId"])
     .index("by_safepayTrackingId", ["safepayTrackingId"])
+    .index("by_safepayPaymentToken", ["safepayPaymentToken"])
     .index("by_createdAt", ["createdAt"]),
 
   // Webhook events — idempotency ledger + debug monitor for the admin UI.

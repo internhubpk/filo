@@ -253,13 +253,107 @@ async function createOneTimeCheckout(
 
 /**
  * Verify the signature Safepay POSTs (form-encoded) to our redirect_url:
- * HMAC-SHA256 over the tracker token using the merchant secret key.
+ * HMAC-SHA256 over the tracker token.
+ *
+ * Which secret signs the redirect differs across Safepay integrations:
+ *   - official integration gist: the merchant SECRET KEY (beacon secret)
+ *   - @sfpy/node-sdk Verify.signature(): the v1 secret
+ *   - official WooCommerce plugin: the webhook shared secret
+ * All three are server-only secrets, so accepting a match against ANY of the
+ * configured ones preserves the security model while staying compatible with
+ * however the merchant's dashboard is wired.
  */
 export function verifyReturnSignature(tracker: string, signature: string | null | undefined): boolean {
-  const secret = process.env.SAFEPAY_BEACON_SECRET;
-  if (!secret || !tracker || !signature) return false;
-  const expected = createHmac("sha256", secret).update(tracker, "utf8").digest("hex");
-  return safeCompare(signature.trim().toLowerCase(), expected);
+  if (!tracker || !signature) return false;
+  const secrets = [
+    process.env.SAFEPAY_BEACON_SECRET,
+    process.env.SAFEPAY_V1_SECRET,
+    process.env.SAFEPAY_WEBHOOK_SECRET,
+  ].filter((s): s is string => Boolean(s));
+  if (secrets.length === 0) return false;
+  const provided = signature.trim().toLowerCase();
+  return secrets.some((secret) => {
+    const expected = createHmac("sha256", secret).update(tracker, "utf8").digest("hex");
+    return safeCompare(provided, expected);
+  });
+}
+
+// -----------------------------------------------------------------------------
+// Tracker state — server-to-server payment verification (Fetch Tracker API)
+// -----------------------------------------------------------------------------
+// GET {api}/reporter/api/v1/payments/{tracker} returns the live state of a
+// payment tracker. This is the reconciliation path that unblocks customers
+// when webhook delivery is delayed or misconfigured:
+//   https://safepay-docs.netlify.app/concepts/fetch-tracker
+
+export type TrackerOutcome =
+  | { kind: "paid"; state: string }
+  | { kind: "pending"; state: string }
+  | { kind: "failed"; state: string }
+  | { kind: "refunded"; state: string }
+  | { kind: "disputed"; state: string }
+  | { kind: "unknown"; state?: string };
+
+export interface TrackerFetchResult {
+  /** True when Safepay answered with a parseable tracker document. */
+  ok: boolean;
+  outcome: TrackerOutcome;
+  error?: string;
+}
+
+const PAID_STATES = new Set(["TRACKER_ENDED"]);
+const PENDING_STATES = new Set(["TRACKER_STARTED", "TRACKER_AUTHORIZED", "TRACKER_ENROLLED"]);
+const FAILED_STATES = new Set([
+  "TRACKER_CANCELLED",
+  "TRACKER_EXPIRED",
+  "TRACKER_VOIDED",
+  "TRACKER_REVERSED",
+]);
+
+export function classifyTrackerState(state: string | undefined | null): TrackerOutcome {
+  const s = (state ?? "").toUpperCase();
+  if (PAID_STATES.has(s)) return { kind: "paid", state: s };
+  if (PENDING_STATES.has(s)) return { kind: "pending", state: s || "UNKNOWN" };
+  if (FAILED_STATES.has(s)) return { kind: "failed", state: s || "UNKNOWN" };
+  if (s === "TRACKER_REFUNDED" || s === "TRACKER_PARTIAL_REFUND") return { kind: "refunded", state: s };
+  if (s === "TRACKER_DISPUTED") return { kind: "disputed", state: s };
+  return { kind: "unknown", state: s || undefined };
+}
+
+/**
+ * Ask Safepay (server-to-server) for the current state of a payment tracker.
+ * The reporter endpoint authenticates by the unguessable tracker UUID; if the
+ * deployment requires auth we retry with the merchant secret as a bearer.
+ */
+export async function fetchTrackerState(tracker: string): Promise<TrackerFetchResult> {
+  if (!tracker || !tracker.startsWith("track_")) {
+    return { ok: false, outcome: { kind: "unknown" }, error: "invalid tracker token" };
+  }
+  const url = `${apiBase()}/reporter/api/v1/payments/${encodeURIComponent(tracker)}`;
+
+  const attempts: Array<Record<string, string>> = [{}, { Authorization: `Bearer ${process.env.SAFEPAY_BEACON_SECRET ?? ""}` }];
+  let lastError = "unreachable";
+
+  for (const headers of attempts) {
+    try {
+      const res = await fetch(url, { headers, cache: "no-store" });
+      if (!res.ok) {
+        lastError = `HTTP ${res.status}`;
+        continue; // try the next auth variant
+      }
+      const json = (await res.json().catch(() => null)) as
+        | { ok?: boolean; data?: { state?: string } ; state?: string; error?: unknown }
+        | null;
+      const state = json?.data?.state ?? json?.state;
+      if (!state) {
+        return { ok: false, outcome: { kind: "unknown" }, error: "no state in Safepay response" };
+      }
+      return { ok: true, outcome: classifyTrackerState(state) };
+    } catch (err) {
+      lastError = err instanceof Error ? err.message : "fetch failed";
+    }
+  }
+  return { ok: false, outcome: { kind: "unknown" }, error: lastError };
 }
 
 // -----------------------------------------------------------------------------
@@ -292,9 +386,15 @@ function safeCompare(a: string, b: string): boolean {
 }
 
 /**
- * Verify a Safepay webhook request. Signatures are HMAC-SHA256 over the raw
- * body bytes, compared against every known Safepay signature header. Accepts
- * hex or base64 encodings, with or without a `v1=`/`sha256=` prefix.
+ * Verify a Safepay webhook request.
+ *
+ * Scheme A (OFFICIAL @sfpy/node-sdk v3 — Verify.webhook()):
+ *   hex(HMAC-SHA512(webhookSecret, JSON.stringify(parsedBody.data)))
+ *   sent in the `x-sfpy-signature` header.
+ *
+ * Scheme B (legacy/fallback):
+ *   HMAC-SHA256 over the raw body bytes vs any known signature header,
+ *   hex or base64, with or without a `v1=`/`sha256=` prefix.
  *
  * Returns { verified: true } or { verified: false, reason }.
  */
@@ -314,16 +414,37 @@ export function verifyWebhookSignature(rawBody: string, headers: Headers): { ver
     return { verified: false, reason: "missing signature header" };
   }
 
-  const expectedHex = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
-  const expectedB64 = createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
-
   const candidates = provided
     .split(",")
     .map((part) => part.trim())
     .flatMap((part) => {
-      const stripped = part.replace(/^(v1|sha256|hmac-sha256)\s*=\s*/i, "");
+      const stripped = part.replace(/^(v1|sha256|hmac-sha256|hmac-sha512)\s*=\s*/i, "");
       return [part, stripped];
     });
+
+  // ---- Scheme A: official SDK (SHA-512 over JSON.stringify(body.data)) ----
+  try {
+    const parsed = JSON.parse(rawBody) as { data?: unknown };
+    if (parsed && typeof parsed === "object" && "data" in parsed) {
+      const dataJson = JSON.stringify(parsed.data);
+      const expectedSha512Hex = createHmac("sha512", secret).update(dataJson, "utf8").digest("hex");
+      const expectedSha512B64 = createHmac("sha512", secret).update(dataJson, "utf8").digest("base64");
+      for (const candidate of candidates) {
+        if (
+          safeCompare(candidate.toLowerCase(), expectedSha512Hex.toLowerCase()) ||
+          safeCompare(candidate, expectedSha512B64)
+        ) {
+          return { verified: true };
+        }
+      }
+    }
+  } catch {
+    // body is not JSON — scheme A cannot apply
+  }
+
+  // ---- Scheme B: HMAC-SHA256 over the raw body ----
+  const expectedHex = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
+  const expectedB64 = createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
 
   for (const candidate of candidates) {
     if (safeCompare(candidate.toLowerCase(), expectedHex) || safeCompare(candidate, expectedB64)) {

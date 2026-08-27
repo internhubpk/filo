@@ -449,6 +449,24 @@ class ApiClient {
   }
 
   /**
+   * Ask the server to re-check the latest pending payment against Safepay
+   * (server-to-server Fetch Tracker API) and activate the plan if it is
+   * confirmed. Used while the billing page shows "waiting for confirmation".
+   */
+  async verifyPendingPayment(): Promise<ApiResponse<{
+    status: 'confirmed' | 'pending' | 'failed' | 'none'
+    reason?: string
+    state?: string
+    detail?: string
+    subscriptionStatus?: string | null
+  }>> {
+    return this.request('/billing/verify', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  }
+
+  /**
    * Cancel (or revert cancellation of) the active subscription at period end.
    */
   async cancelSubscription(cancel = true): Promise<ApiResponse<{ message: string; cancelAtPeriodEnd: boolean }>> {

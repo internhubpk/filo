@@ -151,14 +151,18 @@ export function UsageBar({
   label,
   hint,
   className,
+  formatValue,
 }: {
   used: number;
   limit: number;
   label?: string;
   hint?: string;
   className?: string;
+  /** Custom formatter (e.g. formatBytes for storage) — defaults to locale digits. */
+  formatValue?: (n: number) => string;
 }) {
   const unlimited = limit === -1 || limit === 0 && used === 0 ? false : limit === -1;
+  const fmt = formatValue ?? ((n: number) => n.toLocaleString());
   const pct = unlimited ? 0 : Math.min(100, limit > 0 ? (used / limit) * 100 : 0);
   const tone =
     pct >= 95 ? "bg-destructive" : pct >= 80 ? "bg-warning" : "bg-primary";
@@ -168,7 +172,7 @@ export function UsageBar({
         <div className="mb-1.5 flex items-baseline justify-between gap-2 text-sm">
           {label ? <span className="text-muted-foreground">{label}</span> : <span />}
           <span className="font-medium tabular-nums">
-            {unlimited ? "Unlimited" : `${used.toLocaleString()} / ${limit.toLocaleString()}`}
+            {unlimited ? "Unlimited" : `${fmt(used)} / ${fmt(limit)}`}
           </span>
         </div>
       ) : null}

@@ -8,8 +8,10 @@
 //   /api/billing/checkout which creates the pending subscription + Safepay
 //   session server-side and returns the hosted payment URL.
 // - The UI NEVER marks a payment successful. After returning from Safepay
-//   the page polls the live subscription state and shows PENDING until the
-//   verified webhook flips it to ACTIVE.
+//   the page ACTIVELY VERIFIES the payment server-to-server (Safepay Fetch
+//   Tracker API via /api/billing/verify, every 5s) and flips to ACTIVE the
+//   moment it is confirmed — webhook delivery is no longer a single point
+//   of failure. Signed return POSTs confirm instantly as well.
 // - Cancel at period end with confirmation; revert any time before end.
 // =============================================================================
 
@@ -142,27 +144,84 @@ function BillingContent() {
   const currentTier = billing.data?.planTier ?? "free";
   const billingEnabled = billing.data?.billingEnabled !== false;
 
-  // Poll aggressively for up to ~90s after returning from checkout.
-  const [returnPolls, setReturnPolls] = useState(0);
+  const pendingCheckout = sub?.status === "pending";
+
+  // ---- Active payment verification ----
+  // While a checkout is pending we don't just wait for the webhook: every 5s
+  // the server asks Safepay directly (Fetch Tracker API) whether the payment
+  // completed and activates the plan the moment it is confirmed. This works
+  // even if webhook delivery is delayed or not configured yet.
+  const [verifyBusy, setVerifyBusy] = useState(false);
+  const [verifyPolls, setVerifyPolls] = useState(0);
+  // Toast-once guard, keyed by the pending subscription id (resets for new checkouts).
+  const [confirmedForSub, setConfirmedForSub] = useState<string | null>(null);
+  const subId = sub?._id ?? null;
   useEffect(() => {
-    if (!returnedFromCheckout) return;
-    if (returnPolls > 22) return;
-    const t = setTimeout(() => {
-      setReturnPolls((p) => p + 1);
-      void billing.refresh();
-    }, 4000);
+    if (!pendingCheckout || confirmedForSub === subId) return;
+    if (verifyPolls > 240) return; // keep trying for ~20 minutes of tab time
+    const t = setTimeout(async () => {
+      setVerifyPolls((p) => p + 1);
+      try {
+        const res = await apiClient.verifyPendingPayment();
+        if (res.success && res.data?.status === "confirmed" && confirmedForSub !== subId) {
+          setConfirmedForSub(subId);
+          toast.success("Payment confirmed", { description: "Your new plan is now active. Enjoy!" });
+          await billing.refresh();
+        } else if (res.success && res.data?.status === "failed") {
+          setConfirmedForSub(subId);
+          toast.error("Payment did not complete", {
+            description: "Safepay reported the payment as cancelled or expired. You can start checkout again any time.",
+          });
+          await billing.refresh();
+        }
+      } catch {
+        /* transient — keep polling */
+      }
+    }, 5_000);
     return () => clearTimeout(t);
+  }, [pendingCheckout, verifyPolls, confirmedForSub, subId]);
 
-  }, [returnedFromCheckout, returnPolls]);
+  async function manualVerify() {
+    setVerifyBusy(true);
+    try {
+      const res = await apiClient.verifyPendingPayment();
+      if (res.success && res.data?.status === "confirmed") {
+        if (confirmedForSub !== subId) {
+          setConfirmedForSub(subId);
+          toast.success("Payment confirmed", { description: "Your new plan is now active. Enjoy!" });
+        }
+        await billing.refresh();
+      } else if (res.success && res.data?.status === "failed") {
+        toast.error("Payment did not complete", {
+          description: "Safepay reported the payment as cancelled or expired. You can start checkout again any time.",
+        });
+        await billing.refresh();
+      } else {
+        toast.info("Still processing", {
+          description: "Safepay hasn't confirmed this payment yet. The page keeps checking automatically.",
+        });
+      }
+    } catch {
+      toast.error("Could not reach the payment verification service — it will retry automatically.");
+    } finally {
+      setVerifyBusy(false);
+    }
+  }
 
-  // Post-checkout status toasts (cancelled / bad return signature).
+  // Post-checkout status toasts.
   const checkoutOutcome = search.get("checkout");
   useEffect(() => {
-    if (checkoutOutcome === "cancelled") {
+    if (checkoutOutcome === "confirmed") {
+      toast.success("Payment confirmed", { description: "Your new plan is now active. Enjoy!" });
+    } else if (checkoutOutcome === "cancelled") {
       toast.info("Checkout cancelled", { description: "No charge was made. You can pick a plan any time." });
+    } else if (checkoutOutcome === "failed") {
+      toast.error("Payment did not complete", {
+        description: "Safepay reported the payment as cancelled or expired. You can start checkout again any time.",
+      });
     } else if (checkoutOutcome === "invalid_signature") {
       toast.warning("Payment could not be verified on return", {
-        description: "If you completed the payment, it will still activate automatically via the payment webhook.",
+        description: "If you completed the payment, this page will detect and activate it automatically.",
       });
     }
   }, [checkoutOutcome]);
@@ -228,17 +287,28 @@ function BillingContent() {
         description="Manage your subscription, payment method history, and usage."
       />
 
-      {/* Post-checkout status banner (honest, webhook-driven) */}
+      {/* Post-checkout status banner — actively verified against Safepay */}
       {showPendingHint && sub?.status !== "active" && (
         <FadeIn>
           <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
             <Loader2 className="mt-0.5 size-4.5 shrink-0 animate-spin text-amber-500" />
-            <div className="text-sm">
+            <div className="flex-1 text-sm">
               <p className="font-medium">Waiting for payment confirmation</p>
               <p className="mt-0.5 text-muted-foreground">
-                Safepay is processing your payment. Your plan activates automatically the moment our
-                system verifies it — this usually takes a few seconds. This page refreshes itself.
+                We check your payment directly with Safepay every few seconds — your plan
+                activates the moment the payment is confirmed, even if you close this page
+                and come back later.
               </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                disabled={verifyBusy}
+                onClick={() => void manualVerify()}
+              >
+                {verifyBusy ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <ShieldCheck className="mr-1.5 size-3.5" />}
+                Check payment status now
+              </Button>
             </div>
           </div>
         </FadeIn>
@@ -331,11 +401,16 @@ function BillingContent() {
                 limit={genLimit}
                 hint="Resets monthly"
               />
-              <UsageBar label="Storage" used={storageBytes} limit={storageLimitBytes} />
+              <UsageBar
+                label="Storage"
+                used={storageBytes}
+                limit={storageLimitBytes}
+                formatValue={formatBytes}
+              />
               <div className="flex items-center gap-2 rounded-lg bg-muted/60 p-3 text-xs text-muted-foreground">
                 <ShieldCheck className="size-4 shrink-0 text-emerald-500" />
-                Subscription state is verified through Safepay webhooks — the browser can never
-                change your plan.
+                Plans activate only after Safepay-verified signals (webhooks, signed payment
+                returns, or Safepay&apos;s payment API) — the browser can never change your plan.
               </div>
             </CardContent>
           </Card>
@@ -414,7 +489,7 @@ function BillingContent() {
                 </div>
                 <p className="mt-1 text-[11px] text-muted-foreground">
                   {plan.maxAiGenerations >= 1000000 ? "Unlimited" : plan.maxAiGenerations.toLocaleString()} generations ·{" "}
-                  {formatBytes(plan.maxStorageMb * 1024 * 1024)} storage
+                  {plan.maxStorageMb >= 1000000 ? "Unlimited" : formatBytes(plan.maxStorageMb * 1024 * 1024)} storage
                 </p>
                 <ul className="mt-3 flex-1 space-y-1.5">
                   {plan.features.slice(0, 4).map((f) => (

@@ -12,9 +12,11 @@
 //   5. Create the Safepay checkout session (server-side secret only).
 //   6. Return the hosted payment URL. The browser is redirected to it.
 //
-// The subscription becomes ACTIVE only when Safepay's webhook is verified
-// and processed by POST /api/webhooks/safepay. This endpoint NEVER marks a
-// payment successful.
+// The subscription becomes ACTIVE when Safepay confirms the payment through
+// ANY server-verified channel: the webhook (POST /api/webhooks/safepay), the
+// signed redirect POST to /api/billing/return, or the Fetch Tracker API
+// polled by POST /api/billing/verify. This endpoint NEVER marks a payment
+// successful.
 // =============================================================================
 
 import { NextRequest, NextResponse } from "next/server";

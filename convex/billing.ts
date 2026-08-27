@@ -791,12 +791,29 @@ export const applySubscriptionTransition = mutation({
     if (args.nextStatus === "active") {
       await ctx.db.patch(sub.userId, { planId: sub.planId, updatedAt: now });
     } else if (args.nextStatus === "ended" || args.nextStatus === "failed") {
-      // Downgrade to the Free plan if one exists.
-      const freePlan = await ctx.db
-        .query("plans")
-        .withIndex("by_tier", (q: any) => q.eq("tier", "free"))
-        .first();
-      if (freePlan) await ctx.db.patch(sub.userId, { planId: freePlan._id, updatedAt: now });
+      // Downgrade to the Free plan ONLY when the user has no other live
+      // subscription. A pending checkout that fails must never strip the
+      // entitlement of a still-active earlier subscription.
+      const liveSubs = await ctx.db
+        .query("subscriptions")
+        .withIndex("by_userId", (q: any) => q.eq("userId", sub.userId))
+        .filter((q: any) =>
+          q.and(
+            q.neq(q.field("_id"), sub._id),
+            q.or(
+              q.eq(q.field("status"), "active"),
+              q.eq(q.field("status"), "past_due")
+            )
+          )
+        )
+        .collect();
+      if ((liveSubs as any[]).length === 0) {
+        const freePlan = await ctx.db
+          .query("plans")
+          .withIndex("by_tier", (q: any) => q.eq("tier", "free"))
+          .first();
+        if (freePlan) await ctx.db.patch(sub.userId, { planId: freePlan._id, updatedAt: now });
+      }
     }
 
     await ctx.db.insert("auditLogs", {
@@ -899,5 +916,201 @@ export const upsertPaymentFromWebhook = mutation({
       createdAt: now,
     });
     return id;
+  },
+});
+
+// -----------------------------------------------------------------------------
+// PAYMENT RECONCILIATION — unblocks stuck "pending" checkouts
+// -----------------------------------------------------------------------------
+// Webhook-only activation is fragile: until the merchant configures the
+// webhook URL + secret in the Safepay dashboard, confirmation events never
+// arrive and customers sit on "Pending" forever. Safepay's official
+// integrations confirm payments through TWO additional server-verifiable
+// channels:
+//   1. The signed redirect POST to our redirect_url
+//      (sig = HMAC-SHA256(tracker, secret)) — official WooCommerce flow.
+//   2. The Fetch Tracker API: GET /reporter/api/v1/payments/{tracker}
+//      returns the live tracker state (TRACKER_ENDED = paid).
+// The API routes verify those signals server-side and then call the
+// mutations below. The BROWSER still can never flip state — only a valid
+// Safepay signature or a Safepay API answer reaches these functions, and
+// every call carries the server token.
+
+type ReconcileOutcome = "paid" | "failed" | "refunded" | "disputed";
+
+async function findPaymentByTracker(ctx: any, tracker: string) {
+  // Primary: dedicated index (requires the by_safepayPaymentToken index in
+  // the deployed schema). Fallback: linear filter so reconciliation still
+  // works on deployments that have not pushed the new schema yet.
+  try {
+    return await ctx.db
+      .query("payments")
+      .withIndex("by_safepayPaymentToken", (q: any) => q.eq("safepayPaymentToken", tracker))
+      .first();
+  } catch {
+    return await ctx.db
+      .query("payments")
+      .filter((q: any) => q.eq(q.field("safepayPaymentToken"), tracker))
+      .first();
+  }
+}
+
+/**
+ * Latest pending checkout payment for a user (with its subscription), used by
+ * POST /api/billing/verify to poll Safepay for the tracker state.
+ */
+export const getPendingCheckoutForUser = query({
+  args: { serverToken: v.string(), userId: v.id("users") },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    const payment = await ctx.db
+      .query("payments")
+      .withIndex("by_userId", (q: any) => q.eq("userId", args.userId))
+      .order("desc")
+      .first();
+    if (!payment || payment.status !== "pending") return null;
+    const subscription = payment.subscriptionId
+      ? await ctx.db.get(payment.subscriptionId)
+      : null;
+    return {
+      paymentId: payment._id,
+      tracker: payment.safepayPaymentToken ?? payment.safepayTrackingId ?? null,
+      paymentStatus: payment.status,
+      subscriptionStatus: subscription ? subscription.status : null,
+      subscriptionId: subscription ? subscription._id : null,
+      createdAt: payment.createdAt,
+    };
+  },
+});
+
+/**
+ * Apply a SERVER-VERIFIED checkout outcome to the pending payment +
+ * subscription created at checkout time. Idempotent: an already-processed
+ * payment is never re-applied.
+ */
+export const reconcileCheckoutFromTracker = mutation({
+  args: {
+    serverToken: v.string(),
+    tracker: v.string(),
+    outcome: v.union(
+      v.literal("paid"),
+      v.literal("failed"),
+      v.literal("refunded"),
+      v.literal("disputed")
+    ),
+    /** Where the verification came from — audit trail only. */
+    source: v.union(
+      v.literal("signed_return"),
+      v.literal("tracker_api"),
+      v.literal("manual_admin")
+    ),
+    safepayState: v.optional(v.string()),
+    paymentMethod: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    const now = Date.now();
+
+    const payment: any = await findPaymentByTracker(ctx, args.tracker);
+    if (!payment) {
+      return { applied: false, reason: "no_matching_payment" as const };
+    }
+
+    const sub: any = payment.subscriptionId ? await ctx.db.get(payment.subscriptionId) : null;
+
+    // ----- Idempotency: only a pending payment can transition -----
+    if (payment.status !== "pending") {
+      return {
+        applied: false,
+        reason: "already_processed" as const,
+        paymentStatus: payment.status,
+        subscriptionStatus: sub ? sub.status : null,
+      };
+    }
+
+    const audit = (action: string, metadata: Record<string, unknown>) =>
+      ctx.db.insert("auditLogs", {
+        actorType: "webhook",
+        action,
+        targetType: "payment",
+        targetId: payment._id,
+        metadata,
+        createdAt: now,
+      });
+
+    // ----- Terminal non-success outcomes -----
+    if (args.outcome !== "paid") {
+      const paymentStatus =
+        args.outcome === "failed" ? "failed" : args.outcome === "refunded" ? "refunded" : "disputed";
+      await ctx.db.patch(payment._id, {
+        status: paymentStatus,
+        failureReason: args.safepayState ? `Safepay state: ${args.safepayState}` : undefined,
+        updatedAt: now,
+      });
+      if (sub && sub.status === "pending") {
+        await ctx.db.patch(sub._id, { status: "failed", updatedAt: now });
+      }
+      await audit(`billing.checkout_${paymentStatus}`, {
+        tracker: args.tracker,
+        source: args.source,
+        safepayState: args.safepayState,
+        userId: payment.userId,
+      });
+      return {
+        applied: true,
+        paymentStatus,
+        subscriptionStatus: sub && sub.status === "pending" ? "failed" : sub ? sub.status : null,
+      };
+    }
+
+    // ----- PAID: mark payment succeeded + activate the subscription -----
+    await ctx.db.patch(payment._id, {
+      status: "succeeded",
+      paymentMethod: args.paymentMethod ?? payment.paymentMethod,
+      updatedAt: now,
+    });
+
+    let subscriptionStatus: string | null = sub ? sub.status : null;
+    if (sub && sub.status === "pending") {
+      // Supersede any other ACTIVE subscription the user still holds — the
+      // newest confirmed checkout wins (plan switches handled cleanly).
+      const others = await ctx.db
+        .query("subscriptions")
+        .withIndex("by_userId", (q: any) => q.eq("userId", sub.userId))
+        .filter((q: any) =>
+          q.and(
+            q.neq(q.field("_id"), sub._id),
+            q.eq(q.field("status"), "active")
+          )
+        )
+        .collect();
+      for (const other of others as any[]) {
+        await ctx.db.patch(other._id, { status: "ended", endedAt: now, updatedAt: now });
+      }
+
+      const periodEnd =
+        sub.interval === "yearly" ? now + 365 * 24 * 60 * 60 * 1000 : now + 30 * 24 * 60 * 60 * 1000;
+      await ctx.db.patch(sub._id, {
+        status: "active",
+        currentPeriodStart: now,
+        currentPeriodEnd: periodEnd,
+        activatedAt: now,
+        updatedAt: now,
+      });
+      subscriptionStatus = "active";
+
+      // Entitlement sync — same rule as the webhook state machine.
+      await ctx.db.patch(sub.userId, { planId: sub.planId, updatedAt: now });
+    }
+
+    await audit("billing.checkout_confirmed", {
+      tracker: args.tracker,
+      source: args.source,
+      safepayState: args.safepayState,
+      userId: payment.userId,
+      subscriptionId: sub ? sub._id : null,
+    });
+
+    return { applied: true, paymentStatus: "succeeded" as const, subscriptionStatus };
   },
 });
