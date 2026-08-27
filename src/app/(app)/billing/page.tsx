@@ -119,6 +119,61 @@ const PLAN_ICONS: Record<string, typeof Sparkles> = {
   department: Building2,
 };
 
+interface VerifyPayload {
+  status: "confirmed" | "pending" | "failed" | "none";
+  reason?: string;
+  state?: string;
+  detail?: string;
+  subscriptionStatus?: string | null;
+  mode?: "sandbox" | "production";
+  subscriptionFlowConfigured?: boolean;
+}
+
+/**
+ * Turn Safepay's raw verification answer into one human sentence so the
+ * waiting state is never a black box ("still processing" forever helps
+ * nobody — if Safepay says the payment never finished, say exactly that).
+ */
+function describeVerify(v: VerifyPayload | null): { line: string; tone: "info" | "warn" } {
+  if (!v) return { line: "Checking your payment with Safepay…", tone: "info" };
+  if (v.status === "confirmed") return { line: "Payment confirmed — your plan is active.", tone: "info" };
+  if (v.status === "failed") {
+    return { line: `Safepay reported this payment as ${v.state ?? "cancelled or expired"}. You can start checkout again any time — you were not charged for a failed payment.`, tone: "warn" };
+  }
+  const state = (v.state ?? "").toUpperCase();
+  if (state === "TRACKER_STARTED") {
+    return {
+      line: "Safepay's latest status: payment STARTED but not completed. If you didn't finish Safepay's payment page (including the final 3-D Secure / confirm step), the plan cannot activate — pick the plan again to retry.",
+      tone: "warn",
+    };
+  }
+  if (state === "TRACKER_AUTHORIZED" || state === "TRACKER_ENROLLED") {
+    return { line: `Safepay's latest status: ${state} — the payment is still in progress on Safepay's side.`, tone: "info" };
+  }
+  if (v.reason === "no_tracker") {
+    return {
+      line: "This checkout has no Safepay payment tracker attached, so only Safepay's webhook or its signed redirect can confirm it. Set up the webhook (guide below), or start a new checkout.",
+      tone: "warn",
+    };
+  }
+  if (v.reason === "tracker_unavailable") {
+    return {
+      line: `We couldn't read this payment from Safepay right now${v.detail ? ` (${v.detail})` : ""}. We'll keep retrying automatically — if this persists, check that SAFEPAY_MODE on the server matches where you paid.`,
+      tone: "warn",
+    };
+  }
+  if (v.reason === "stale") {
+    return {
+      line: "This checkout is more than 24 hours old — Safepay has likely expired it. Please start the checkout again.",
+      tone: "warn",
+    };
+  }
+  if (state) {
+    return { line: `Safepay's latest status: ${state}.`, tone: "info" };
+  }
+  return { line: "Safepay hasn't confirmed this payment yet. The page keeps checking automatically.", tone: "info" };
+}
+
 function BillingContent() {
   const { user, ready } = useFiloSession();
   const router = useRouter();
@@ -155,6 +210,9 @@ function BillingContent() {
   const [verifyPolls, setVerifyPolls] = useState(0);
   // Toast-once guard, keyed by the pending subscription id (resets for new checkouts).
   const [confirmedForSub, setConfirmedForSub] = useState<string | null>(null);
+  // Last raw answer from /api/billing/verify — rendered in the waiting banner
+  // so the user sees WHAT Safepay actually reports instead of a black box.
+  const [lastVerify, setLastVerify] = useState<VerifyPayload | null>(null);
   const subId = sub?._id ?? null;
   useEffect(() => {
     if (!pendingCheckout || confirmedForSub === subId) return;
@@ -163,6 +221,7 @@ function BillingContent() {
       setVerifyPolls((p) => p + 1);
       try {
         const res = await apiClient.verifyPendingPayment();
+        if (res.success && res.data) setLastVerify(res.data as VerifyPayload);
         if (res.success && res.data?.status === "confirmed" && confirmedForSub !== subId) {
           setConfirmedForSub(subId);
           toast.success("Payment confirmed", { description: "Your new plan is now active. Enjoy!" });
@@ -185,6 +244,7 @@ function BillingContent() {
     setVerifyBusy(true);
     try {
       const res = await apiClient.verifyPendingPayment();
+      if (res.success && res.data) setLastVerify(res.data as VerifyPayload);
       if (res.success && res.data?.status === "confirmed") {
         if (confirmedForSub !== subId) {
           setConfirmedForSub(subId);
@@ -196,6 +256,9 @@ function BillingContent() {
           description: "Safepay reported the payment as cancelled or expired. You can start checkout again any time.",
         });
         await billing.refresh();
+      } else if (res.success && res.data) {
+        const { line } = describeVerify(res.data as VerifyPayload);
+        toast.info("Still processing", { description: line });
       } else {
         toast.info("Still processing", {
           description: "Safepay hasn't confirmed this payment yet. The page keeps checking automatically.",
@@ -288,31 +351,67 @@ function BillingContent() {
       />
 
       {/* Post-checkout status banner — actively verified against Safepay */}
-      {showPendingHint && sub?.status !== "active" && (
-        <FadeIn>
-          <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
-            <Loader2 className="mt-0.5 size-4.5 shrink-0 animate-spin text-amber-500" />
-            <div className="flex-1 text-sm">
-              <p className="font-medium">Waiting for payment confirmation</p>
-              <p className="mt-0.5 text-muted-foreground">
-                We check your payment directly with Safepay every few seconds — your plan
-                activates the moment the payment is confirmed, even if you close this page
-                and come back later.
-              </p>
-              <Button
-                size="sm"
-                variant="outline"
-                className="mt-3"
-                disabled={verifyBusy}
-                onClick={() => void manualVerify()}
-              >
-                {verifyBusy ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <ShieldCheck className="mr-1.5 size-3.5" />}
-                Check payment status now
-              </Button>
+      {showPendingHint && sub?.status !== "active" && (() => {
+        const statusLine = describeVerify(lastVerify);
+        return (
+          <FadeIn>
+            <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
+              <Loader2 className="mt-0.5 size-4.5 shrink-0 animate-spin text-amber-500" />
+              <div className="flex-1 text-sm">
+                <p className="font-medium">Waiting for payment confirmation</p>
+                <p className="mt-0.5 text-muted-foreground">
+                  We check your payment directly with Safepay every few seconds — your plan
+                  activates the moment the payment is confirmed, even if you close this page
+                  and come back later.
+                </p>
+                {lastVerify && (
+                  <p
+                    className={cn(
+                      "mt-2 rounded-lg border px-3 py-2 text-[13px] leading-relaxed",
+                      statusLine.tone === "warn"
+                        ? "border-amber-500/40 bg-amber-500/10 text-amber-700 dark:text-amber-400"
+                        : "border-border bg-muted/50 text-muted-foreground"
+                    )}
+                  >
+                    {statusLine.line}
+                  </p>
+                )}
+                {lastVerify?.mode && (
+                  <p className="mt-2 text-xs text-muted-foreground">
+                    Payments environment: <span className="font-medium text-foreground">{lastVerify.mode}</span>
+                    {" · "}
+                    {lastVerify.subscriptionFlowConfigured
+                      ? "recurring subscriptions ON (the Safepay dashboard plan must exist)"
+                      : "one-time payments (no Safepay dashboard plan required)"}
+                  </p>
+                )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={verifyBusy}
+                    onClick={() => void manualVerify()}
+                  >
+                    {verifyBusy ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <ShieldCheck className="mr-1.5 size-3.5" />}
+                    Check payment status now
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => {
+                      const pro = (plans.data ?? []).find((p) => p.tier === "pro");
+                      if (pro) void startCheckout(pro);
+                    }}
+                  >
+                    <CreditCard className="mr-1.5 size-3.5" />
+                    Restart checkout
+                  </Button>
+                </div>
+              </div>
             </div>
-          </div>
-        </FadeIn>
-      )}
+          </FadeIn>
+        );
+      })()}
 
       {/* Current plan + usage */}
       <div className="grid gap-5 lg:grid-cols-2">

@@ -473,6 +473,21 @@ export const createPendingSubscription = mutation({
       await ctx.db.patch(s._id, { status: "ended", endedAt: now, updatedAt: now });
     }
 
+    // Also fail their still-pending PAYMENTS so the payment history and the
+    // billing page's verifier only ever track the CURRENT checkout attempt.
+    const stalePayments = await ctx.db
+      .query("payments")
+      .withIndex("by_userId", (q: any) => q.eq("userId", args.userId))
+      .filter((q: any) => q.eq(q.field("status"), "pending"))
+      .collect();
+    for (const p of stalePayments as any[]) {
+      await ctx.db.patch(p._id, {
+        status: "failed",
+        failureReason: "Superseded by a new checkout attempt",
+        updatedAt: now,
+      });
+    }
+
     const id = await ctx.db.insert("subscriptions", {
       userId: args.userId,
       planId: args.planId,
@@ -1006,12 +1021,37 @@ export const reconcileCheckoutFromTracker = mutation({
     ),
     safepayState: v.optional(v.string()),
     paymentMethod: v.optional(v.string()),
+    /**
+     * Fallback lookup key: the Filo subscription id carried in the checkout
+     * state. Used when the token Safepay POSTs back doesn't match the stored
+     * payment token (the true subscription flow stores a passport auth
+     * token at checkout, and its tracker only becomes known on return).
+     */
+    subscriptionId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     assertServerToken(args.serverToken);
     const now = Date.now();
 
-    const payment: any = await findPaymentByTracker(ctx, args.tracker);
+    let payment: any = await findPaymentByTracker(ctx, args.tracker);
+    let matchedTracker = true;
+    if (!payment && args.subscriptionId) {
+      // Subscription-flow checkouts: the tracker was never stored (only the
+      // passport auth token was), so match the payment via OUR subscription
+      // id instead — it comes from checkout state we created, not the client.
+      const candidates = await ctx.db
+        .query("payments")
+        .withIndex("by_subscriptionId", (q: any) =>
+          q.eq("subscriptionId", args.subscriptionId as never)
+        )
+        .order("desc")
+        .collect();
+      const pendingCandidate = (candidates as any[]).find((p) => p.status === "pending");
+      if (pendingCandidate) {
+        payment = pendingCandidate;
+        matchedTracker = false;
+      }
+    }
     if (!payment) {
       return { applied: false, reason: "no_matching_payment" as const };
     }
@@ -1105,6 +1145,7 @@ export const reconcileCheckoutFromTracker = mutation({
 
     await audit("billing.checkout_confirmed", {
       tracker: args.tracker,
+      trackerMatchedPayment: matchedTracker,
       source: args.source,
       safepayState: args.safepayState,
       userId: payment.userId,

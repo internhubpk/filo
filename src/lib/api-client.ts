@@ -459,6 +459,8 @@ class ApiClient {
     state?: string
     detail?: string
     subscriptionStatus?: string | null
+    mode?: 'sandbox' | 'production'
+    subscriptionFlowConfigured?: boolean
   }>> {
     return this.request('/billing/verify', {
       method: 'POST',

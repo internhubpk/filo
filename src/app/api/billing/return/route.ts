@@ -55,11 +55,14 @@ function pick(fields: Record<string, string | undefined>, ...keys: string[]): st
 /**
  * Reconcile the pending checkout for a tracker. Applies a state change ONLY
  * when Safepay's answer is conclusive; returns the billing-page bounce status.
+ * `subscriptionId` is a fallback lookup key from our own checkout state —
+ * needed for true-subscription checkouts whose tracker was never stored.
  */
 async function reconcileTracker(
   tracker: string,
   source: "signed_return" | "tracker_api",
-  safepayState?: string
+  safepayState?: string,
+  subscriptionId?: string
 ): Promise<BounceStatus> {
   try {
     const result = await convexMutation<{
@@ -73,6 +76,7 @@ async function reconcileTracker(
       outcome: "paid",
       source,
       ...(safepayState ? { safepayState } : {}),
+      ...(subscriptionId ? { subscriptionId } : {}),
     });
     if (result.applied) return "confirmed";
     // already_processed + active → the plan is live; treat as confirmed.
@@ -113,6 +117,20 @@ export async function POST(request: NextRequest) {
   const tracker = pick(fields, "tracker", "beacon", "token");
   const signature = pick(fields, "signature", "sig", "hash");
   const orderId = pick(fields, "order_id", "orderId", "reference");
+  // Our own checkout state rides on the redirect_url query string (Safepay
+  // POSTs to that exact URL) — it identifies the payment even when the
+  // stored token isn't the tracker (subscription flow).
+  const stateSubscriptionId =
+    request.nextUrl.searchParams.get("subscriptionId") ?? undefined;
+  // Convex document ids are ~32 lowercase alphanumeric chars — used only as a
+  // fallback when the checkout state param is missing (e.g. order_id echo).
+  const CONVEX_ID_RE = /^[a-z0-9]{25,40}$/;
+  const fallbackSubscriptionId =
+    stateSubscriptionId && CONVEX_ID_RE.test(stateSubscriptionId)
+      ? stateSubscriptionId
+      : orderId && CONVEX_ID_RE.test(orderId)
+        ? orderId
+        : undefined;
   const label = `tracker=${tracker?.slice(0, 12) ?? "n/a"}… order_id=${orderId ?? "n/a"}`;
 
   if (tracker && signature) {
@@ -121,7 +139,7 @@ export async function POST(request: NextRequest) {
       return bounce("invalid_signature", { tracker });
     }
     console.info(`[billing/return] signed return verified for ${label} — reconciling payment`);
-    const status = await reconcileTracker(tracker, "signed_return");
+    const status = await reconcileTracker(tracker, "signed_return", undefined, fallbackSubscriptionId);
     return bounce(status, { tracker });
   }
 
@@ -133,7 +151,10 @@ export async function POST(request: NextRequest) {
       console.info(`[billing/return] tracker API state=${result.outcome.state} for ${label}`);
       switch (result.outcome.kind) {
         case "paid":
-          return bounce(await reconcileTracker(tracker, "tracker_api", result.outcome.state), { tracker });
+          return bounce(
+            await reconcileTracker(tracker, "tracker_api", result.outcome.state, fallbackSubscriptionId),
+            { tracker }
+          );
         case "failed":
           try {
             await convexMutation("billing:reconcileCheckoutFromTracker", {
@@ -142,6 +163,7 @@ export async function POST(request: NextRequest) {
               outcome: "failed",
               source: "tracker_api",
               safepayState: result.outcome.state,
+              ...(fallbackSubscriptionId ? { subscriptionId: fallbackSubscriptionId } : {}),
             });
           } catch (err) {
             console.error("[billing/return] failed-state reconciliation error:", err);
@@ -156,6 +178,7 @@ export async function POST(request: NextRequest) {
               outcome: result.outcome.kind,
               source: "tracker_api",
               safepayState: result.outcome.state,
+              ...(fallbackSubscriptionId ? { subscriptionId: fallbackSubscriptionId } : {}),
             });
           } catch (err) {
             console.error("[billing/return] refunded/disputed reconciliation error:", err);

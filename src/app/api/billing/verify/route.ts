@@ -21,7 +21,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { fetchTrackerState } from "@/lib/safepay";
+import { fetchTrackerState, getSafepayMode, isSubscriptionFlowConfigured } from "@/lib/safepay";
 import { requireUser, serverToken, convexQuery, convexMutation } from "@/lib/billing-server";
 
 export const runtime = "nodejs";
@@ -45,15 +45,29 @@ export async function POST(request: NextRequest) {
       userId: auth.data.user.id,
     });
 
+    // Non-secret deployment diagnostics so the UI can explain WHAT to fix.
+    const diagnostics = {
+      mode: getSafepayMode(),
+      subscriptionFlowConfigured: isSubscriptionFlowConfigured(),
+    };
+
     if (!pending) {
-      return NextResponse.json({ success: true, data: { status: "none" } });
+      return NextResponse.json({ success: true, data: { status: "none", ...diagnostics } });
     }
 
-    if (!pending.tracker) {
-      // Payment row predates tracker storage — only the webhook can confirm.
+    if (!pending.tracker || !pending.tracker.startsWith("track_")) {
+      // Either the row predates tracker storage, or the checkout used the
+      // true subscription flow (stores a passport auth token, not a track_*)
+      // — Safepay only exposes those via webhook/signed return, never via the
+      // Fetch Tracker API, so say so instead of a misleading "unavailable".
       return NextResponse.json({
         success: true,
-        data: { status: "pending", reason: "no_tracker", subscriptionStatus: pending.subscriptionStatus },
+        data: {
+          status: "pending",
+          reason: "no_tracker",
+          subscriptionStatus: pending.subscriptionStatus,
+          ...diagnostics,
+        },
       });
     }
 
@@ -62,7 +76,7 @@ export async function POST(request: NextRequest) {
     if (ageMs > 24 * 60 * 60 * 1000) {
       return NextResponse.json({
         success: true,
-        data: { status: "pending", reason: "stale", subscriptionStatus: pending.subscriptionStatus },
+        data: { status: "pending", reason: "stale", subscriptionStatus: pending.subscriptionStatus, ...diagnostics },
       });
     }
 
@@ -75,6 +89,7 @@ export async function POST(request: NextRequest) {
           reason: "tracker_unavailable",
           detail: result.error,
           subscriptionStatus: pending.subscriptionStatus,
+          ...diagnostics,
         },
       });
     }
@@ -100,6 +115,7 @@ export async function POST(request: NextRequest) {
         data: {
           status: confirmed ? "confirmed" : "pending",
           subscriptionStatus: applied.subscriptionStatus ?? pending.subscriptionStatus,
+          ...diagnostics,
         },
       });
     }
@@ -124,6 +140,7 @@ export async function POST(request: NextRequest) {
         status: "pending",
         state: result.outcome.state,
         subscriptionStatus: pending.subscriptionStatus,
+        ...diagnostics,
       },
     });
   } catch (error) {
