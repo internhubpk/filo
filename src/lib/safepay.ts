@@ -322,8 +322,16 @@ export function classifyTrackerState(state: string | undefined | null): TrackerO
 
 /**
  * Ask Safepay (server-to-server) for the current state of a payment tracker.
- * The reporter endpoint authenticates by the unguessable tracker UUID; if the
- * deployment requires auth we retry with the merchant secret as a bearer.
+ *
+ * AUTH (verified against the live sandbox API): the reporter endpoint rejects
+ * anonymous calls with 401 and its error enumerates the accepted strategies —
+ * one of them is `strategies/secret`, which reads the **X-SFPY-MERCHANT-SECRET**
+ * header (proven: sending that header changes the error from
+ * "merchant webhook secret not found in the request header" to
+ * "could not fetch client"). The docs' unauthenticated curl example is stale.
+ *
+ * Which merchant secret value satisfies the lookup isn't documented, so we
+ * try each configured secret — the first that resolves the client wins.
  */
 export async function fetchTrackerState(tracker: string): Promise<TrackerFetchResult> {
   if (!tracker || !tracker.startsWith("track_")) {
@@ -331,18 +339,30 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
   }
   const url = `${apiBase()}/reporter/api/v1/payments/${encodeURIComponent(tracker)}`;
 
-  const attempts: Array<Record<string, string>> = [{}, { Authorization: `Bearer ${process.env.SAFEPAY_BEACON_SECRET ?? ""}` }];
-  let lastError = "unreachable";
+  const secretCandidates: Array<[string, string | undefined]> = [
+    ["merchant-secret:beacon", process.env.SAFEPAY_BEACON_SECRET],
+    ["merchant-secret:v1", process.env.SAFEPAY_V1_SECRET],
+    ["merchant-secret:webhook", process.env.SAFEPAY_WEBHOOK_SECRET],
+    ["anonymous", undefined],
+  ];
 
-  for (const headers of attempts) {
+  let lastError = "unreachable";
+  for (const [label, secret] of secretCandidates) {
+    if (!secret && label !== "anonymous") continue;
     try {
-      const res = await fetch(url, { headers, cache: "no-store" });
+      const res = await fetch(url, {
+        headers: secret ? { "X-SFPY-MERCHANT-SECRET": secret } : {},
+        cache: "no-store",
+      });
       if (!res.ok) {
-        lastError = `HTTP ${res.status}`;
+        lastError =
+          res.status === 401 || res.status === 403
+            ? `${label} rejected (HTTP ${res.status})`
+            : `HTTP ${res.status}`;
         continue; // try the next auth variant
       }
       const json = (await res.json().catch(() => null)) as
-        | { ok?: boolean; data?: { state?: string } ; state?: string; error?: unknown }
+        | { ok?: boolean; data?: { state?: string }; state?: string; error?: unknown }
         | null;
       const state = json?.data?.state ?? json?.state;
       if (!state) {
@@ -352,6 +372,9 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
     } catch (err) {
       lastError = err instanceof Error ? err.message : "fetch failed";
     }
+  }
+  if (lastError.includes("rejected")) {
+    lastError += " — set the Safepay secrets (SAFEPAY_BEACON_SECRET / SAFEPAY_V1_SECRET) on this deployment";
   }
   return { ok: false, outcome: { kind: "unknown" }, error: lastError };
 }

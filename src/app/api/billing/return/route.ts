@@ -96,10 +96,72 @@ async function reconcileTracker(
   }
 }
 
+/**
+ * Shared tracker-only reconciliation (GET redirect or unsigned POST):
+ * check the tracker state server-to-server and apply conclusive outcomes.
+ * Returns the billing-page bounce status.
+ */
+async function reconcileTrackerOnly(tracker: string, fallbackSubscriptionId?: string): Promise<BounceStatus> {
+  const result = await fetchTrackerState(tracker);
+  if (!result.ok) {
+    console.warn(`[billing/return] tracker lookup unavailable (${result.error}) for tracker=${tracker.slice(0, 12)}… — relying on webhook/verify`);
+    return "return";
+  }
+  console.info(`[billing/return] tracker API state=${result.outcome.state} for tracker=${tracker.slice(0, 12)}…`);
+  switch (result.outcome.kind) {
+    case "paid":
+      return reconcileTracker(tracker, "tracker_api", result.outcome.state, fallbackSubscriptionId);
+    case "failed":
+      try {
+        await convexMutation("billing:reconcileCheckoutFromTracker", {
+          serverToken: serverToken(),
+          tracker,
+          outcome: "failed",
+          source: "tracker_api",
+          safepayState: result.outcome.state,
+          ...(fallbackSubscriptionId ? { subscriptionId: fallbackSubscriptionId } : {}),
+        });
+      } catch (err) {
+        console.error("[billing/return] failed-state reconciliation error:", err);
+      }
+      return "failed";
+    case "refunded":
+    case "disputed":
+      try {
+        await convexMutation("billing:reconcileCheckoutFromTracker", {
+          serverToken: serverToken(),
+          tracker,
+          outcome: result.outcome.kind,
+          source: "tracker_api",
+          safepayState: result.outcome.state,
+          ...(fallbackSubscriptionId ? { subscriptionId: fallbackSubscriptionId } : {}),
+        });
+      } catch (err) {
+        console.error("[billing/return] refunded/disputed reconciliation error:", err);
+      }
+      return "return";
+    default:
+      // still processing / unknown — let the billing page keep polling
+      return "return";
+  }
+}
+
 export async function GET(request: NextRequest) {
-  // Cancel path or manual navigation — nothing to verify.
+  // Safepay's browser redirect can land here as a GET (cancels always do;
+  // some flows even after payment). When a tracker is present we try the
+  // server-to-server check instead of blindly bouncing — this is what
+  // recovers payers whose signed return POST never made it (e.g. it went to
+  // a stale domain and 404'd).
   const tracker = request.nextUrl.searchParams.get("tracker") ?? undefined;
-  return bounce(tracker ? "return" : "cancelled", { tracker: tracker ?? "" });
+  if (!tracker) {
+    return bounce("cancelled");
+  }
+  const stateSubscriptionId = request.nextUrl.searchParams.get("subscriptionId") ?? undefined;
+  const CONVEX_ID_RE = /^[a-z0-9]{25,40}$/;
+  const fallbackSubscriptionId =
+    stateSubscriptionId && CONVEX_ID_RE.test(stateSubscriptionId) ? stateSubscriptionId : undefined;
+  const status = await reconcileTrackerOnly(tracker, fallbackSubscriptionId);
+  return bounce(status, { tracker });
 }
 
 export async function POST(request: NextRequest) {
@@ -146,51 +208,8 @@ export async function POST(request: NextRequest) {
   if (tracker) {
     // Unsigned return (some Safepay modes / cancelled flows): verify the
     // tracker state server-to-server before touching anything.
-    const result = await fetchTrackerState(tracker);
-    if (result.ok) {
-      console.info(`[billing/return] tracker API state=${result.outcome.state} for ${label}`);
-      switch (result.outcome.kind) {
-        case "paid":
-          return bounce(
-            await reconcileTracker(tracker, "tracker_api", result.outcome.state, fallbackSubscriptionId),
-            { tracker }
-          );
-        case "failed":
-          try {
-            await convexMutation("billing:reconcileCheckoutFromTracker", {
-              serverToken: serverToken(),
-              tracker,
-              outcome: "failed",
-              source: "tracker_api",
-              safepayState: result.outcome.state,
-              ...(fallbackSubscriptionId ? { subscriptionId: fallbackSubscriptionId } : {}),
-            });
-          } catch (err) {
-            console.error("[billing/return] failed-state reconciliation error:", err);
-          }
-          return bounce("failed", { tracker });
-        case "refunded":
-        case "disputed":
-          try {
-            await convexMutation("billing:reconcileCheckoutFromTracker", {
-              serverToken: serverToken(),
-              tracker,
-              outcome: result.outcome.kind,
-              source: "tracker_api",
-              safepayState: result.outcome.state,
-              ...(fallbackSubscriptionId ? { subscriptionId: fallbackSubscriptionId } : {}),
-            });
-          } catch (err) {
-            console.error("[billing/return] refunded/disputed reconciliation error:", err);
-          }
-          return bounce("return", { tracker });
-        default:
-          // still processing / unknown — let the billing page keep polling
-          return bounce("return", { tracker });
-      }
-    }
-    console.warn(`[billing/return] unsigned return, tracker lookup unavailable (${result.error}) for ${label} — relying on webhook`);
-    return bounce("return", { tracker });
+    const status = await reconcileTrackerOnly(tracker, fallbackSubscriptionId);
+    return bounce(status, { tracker });
   }
 
   return bounce("return");
