@@ -1,10 +1,11 @@
 // =============================================================================
-// FILO × SAFEPAY — Server-side sandbox client (NEVER import from client code)
+// FILO × SAFEPAY — Server-side client (NEVER import from client code)
 // =============================================================================
 // Responsibilities:
 //   1. Create sandbox checkout sessions (returns a hosted payment URL).
 //   2. Verify webhook signatures (HMAC-SHA256 over the raw request body).
-//   3. Normalize Safepay event payloads into a small typed shape for the
+//   3. Verify the signature Safepay POSTs back to our redirect_url.
+//   4. Normalize Safepay event payloads into a small typed shape for the
 //      billing state machine in convex/billing.ts.
 //
 // SECURITY:
@@ -15,11 +16,26 @@
 //     SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS=true weakens this for local curl
 //     testing ONLY — never enable in production.
 //
+// OFFICIAL API CONTRACT (mirrors @sfpy/node-sdk):
+//   One-time payment (default flow):
+//     POST {api}/order/v1/init
+//       body: { client: <secret key>, amount, currency, environment }
+//       → { data: { token: "track_..." } }
+//     Hosted page: {checkout}/pay?beacon={token}&env=...&order_id=...
+//                  &redirect_url=...&cancel_url=...&source=custom&webhooks=true
+//   Subscription checkout (requires SAFEPAY_V1_SECRET + a Safepay plan id):
+//     POST {api}/client/passport/v1/token   (header X-SFPY-MERCHANT-SECRET)
+//       → { data: <auth token> }
+//     Hosted page: {checkout}/subscribe?plan_id=...&auth_token=...&env=...
+//                  &redirect_url=...&cancel_url=...
+//
 // ENV:
-//   SAFEPAY_MODE=sandbox|production           (default: sandbox)
-//   SAFEPAY_BEACON_SECRET=sec_xxx             (merchant secret key)
-//   SAFEPAY_WEBHOOK_SECRET=whsec_xxx          (webhook signing secret)
-//   SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS=false     (dev escape hatch, default false)
+//   SAFEPAY_MODE=sandbox|production              (default: sandbox)
+//   SAFEPAY_BEACON_SECRET=sec_xxx                (merchant secret key — required)
+//   SAFEPAY_V1_SECRET=xxx                        (merchant v1 secret — enables
+//                                                the true subscription flow)
+//   SAFEPAY_WEBHOOK_SECRET=whsec_xxx             (webhook signing secret)
+//   SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS=false        (dev escape hatch, default false)
 // =============================================================================
 
 import { createHmac, timingSafeEqual } from "crypto";
@@ -28,8 +44,9 @@ export type SafepayMode = "sandbox" | "production";
 
 const SANDBOX_API = "https://sandbox.api.getsafepay.com";
 const PRODUCTION_API = "https://api.getsafepay.com";
-const SANDBOX_CHECKOUT = "https://sandbox.getsafepay.com/payment";
-const PRODUCTION_CHECKOUT = "https://getsafepay.com/payment";
+// Official hosted checkout bases (SDK constants CHECKOUT_SANDBOX / _PRODUCTION).
+const SANDBOX_CHECKOUT = "https://sandbox.api.getsafepay.com/checkout";
+const PRODUCTION_CHECKOUT = "https://getsafepay.com/checkout";
 
 export function getSafepayMode(): SafepayMode {
   return (process.env.SAFEPAY_MODE || "sandbox").toLowerCase() === "production"
@@ -39,6 +56,11 @@ export function getSafepayMode(): SafepayMode {
 
 export function isSafepayConfigured(): boolean {
   return Boolean(process.env.SAFEPAY_BEACON_SECRET);
+}
+
+/** True when the true recurring-subscription flow can be used. */
+export function isSubscriptionFlowConfigured(): boolean {
+  return Boolean(process.env.SAFEPAY_V1_SECRET);
 }
 
 function apiBase(): string {
@@ -61,7 +83,11 @@ export interface CheckoutSessionInput {
   customerPhone?: string;
   /** Safepay subscription plan identifier (for recurring subscription checkouts). */
   subscriptionPlanId?: string;
-  /** Opaque state echoed back to our return URL. */
+  /** Full URL Safepay redirects to after payment (POSTs tracker + signature). */
+  redirectUrl?: string;
+  /** Full URL Safepay redirects to when the payer cancels. */
+  cancelUrl?: string;
+  /** Opaque state echoed back to our return URL as query params. */
   state?: Record<string, string>;
 }
 
@@ -69,16 +95,23 @@ export interface CheckoutSession {
   token: string;
   paymentUrl: string;
   trackingId?: string;
+  /** Which Safepay flow was used (diagnostics + admin monitor). */
+  flow: "subscription" | "one_time";
   raw: unknown;
 }
 
 /**
  * Create a Safepay checkout session and return the hosted payment URL.
  *
- * Uses the documented /checkout/create flow: authenticate with the merchant
- * beacon secret, receive a one-time payment token, then redirect the user to
- * the hosted payment page. `subscription_plan` links the checkout to a
- * recurring plan configured in the Safepay merchant dashboard.
+ * Flow selection:
+ *   1. SUBSCRIPTION — when a Safepay plan id is mapped AND SAFEPAY_V1_SECRET
+ *      is configured. Uses the official passport-token + /checkout/subscribe
+ *      flow so Safepay handles recurring renewals.
+ *   2. ONE-TIME — official /order/v1/init flow (works with just the secret
+ *      key). The first period is charged now; the verified webhook activates
+ *      the Filo subscription. Renewal reminders/collection are then handled
+ *      by switching the plan to the subscription flow once SAFEPAY_V1_SECRET
+ *      and dashboard plan ids are configured.
  */
 export async function createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSession> {
   const beaconSecret = process.env.SAFEPAY_BEACON_SECRET;
@@ -86,35 +119,118 @@ export async function createCheckoutSession(input: CheckoutSessionInput): Promis
     throw new Error("SAFEPAY_BEACON_SECRET is not configured — billing is disabled (fail-closed)");
   }
 
-  const body: Record<string, unknown> = {
-    beacon_secret: beaconSecret,
-    amount: Math.round(input.amountPkr), // PKR, whole rupees
-    currency: "PKR",
-  };
-  if (input.subscriptionPlanId) body.subscription_plan = input.subscriptionPlanId;
-  if (input.orderId) body.order_id = input.orderId;
+  // ---- 1. True subscription flow when fully configured ----
+  if (input.subscriptionPlanId && isSubscriptionFlowConfigured()) {
+    try {
+      const session = await createSubscriptionCheckout(input, beaconSecret);
+      return session;
+    } catch (err) {
+      // Fall through to the one-time flow so the customer is never hard
+      // blocked by a transient passport/plan error — but log loudly.
+      console.error(
+        `[SAFEPAY] subscription checkout failed (plan=${input.subscriptionPlanId}); falling back to one-time payment:`,
+        err instanceof Error ? err.message : err
+      );
+    }
+  }
 
-  const res = await fetch(`${apiBase()}/checkout/create`, {
+  // ---- 2. Official one-time payment flow ----
+  return createOneTimeCheckout(input, beaconSecret);
+}
+
+/** Official subscription flow: passport token → /checkout/subscribe URL. */
+async function createSubscriptionCheckout(
+  input: CheckoutSessionInput,
+  _beaconSecret: string
+): Promise<CheckoutSession> {
+  const v1Secret = process.env.SAFEPAY_V1_SECRET;
+  if (!v1Secret) throw new Error("SAFEPAY_V1_SECRET is not configured");
+
+  const tokenRes = await fetch(`${apiBase()}/client/passport/v1/token`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-SFPY-MERCHANT-SECRET": v1Secret,
+    },
+    body: JSON.stringify({}),
+    cache: "no-store",
+  });
+
+  if (!tokenRes.ok) {
+    const text = await tokenRes.text().catch(() => "");
+    throw new Error(`Safepay passport token failed (${tokenRes.status}): ${text.slice(0, 300)}`);
+  }
+
+  const tokenJson = (await tokenRes.json().catch(() => null)) as { data?: unknown } | null;
+  const authToken =
+    typeof tokenJson?.data === "string"
+      ? tokenJson.data
+      : typeof tokenJson?.data === "object" && tokenJson?.data && "token" in (tokenJson.data as Record<string, unknown>)
+        ? String((tokenJson.data as Record<string, unknown>).token)
+        : undefined;
+  if (!authToken) {
+    throw new Error("Safepay passport token returned no auth token");
+  }
+
+  const url = new URL(`${checkoutPageBase()}/subscribe`);
+  url.searchParams.set("plan_id", input.subscriptionPlanId!);
+  url.searchParams.set("auth_token", authToken);
+  url.searchParams.set("env", getSafepayMode());
+  if (input.redirectUrl) url.searchParams.set("redirect_url", input.redirectUrl);
+  if (input.cancelUrl) url.searchParams.set("cancel_url", input.cancelUrl);
+  if (input.state) {
+    for (const [k, v] of Object.entries(input.state)) url.searchParams.set(k, v);
+  }
+
+  return {
+    token: authToken,
+    paymentUrl: url.toString(),
+    trackingId: undefined,
+    flow: "subscription",
+    raw: { authToken: true },
+  };
+}
+
+/** Official one-time flow: /order/v1/init → /checkout/pay URL. */
+async function createOneTimeCheckout(
+  input: CheckoutSessionInput,
+  beaconSecret: string
+): Promise<CheckoutSession> {
+  const res = await fetch(`${apiBase()}/order/v1/init`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+    body: JSON.stringify({
+      client: beaconSecret,
+      amount: input.amountPkr, // PKR in major units (rupees)
+      currency: "PKR",
+      environment: getSafepayMode(),
+    }),
     cache: "no-store",
   });
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Safepay checkout/create failed (${res.status}): ${text.slice(0, 300)}`);
+    throw new Error(`Safepay order/v1/init failed (${res.status}): ${text.slice(0, 300)}`);
   }
 
   const json = (await res.json().catch(() => null)) as
-    | { token?: string; tracking_id?: string; result?: string; error?: unknown }
+    | { data?: { token?: string; tracking_id?: string } ; token?: string; tracking_id?: string; error?: unknown }
     | null;
 
-  if (!json?.token) {
-    throw new Error("Safepay checkout/create returned no payment token");
+  const token = json?.data?.token ?? json?.token;
+  if (!token) {
+    throw new Error("Safepay order/v1/init returned no payment token");
   }
+  const trackingId = json?.data?.tracking_id ?? json?.tracking_id;
 
-  const url = new URL(`${checkoutPageBase()}/${json.token}`);
+  const url = new URL(`${checkoutPageBase()}/pay`);
+  url.searchParams.set("beacon", token);
+  url.searchParams.set("env", getSafepayMode());
+  url.searchParams.set("source", "custom");
+  url.searchParams.set("webhooks", "true");
+  if (input.orderId) url.searchParams.set("order_id", input.orderId);
+  if (input.redirectUrl) url.searchParams.set("redirect_url", input.redirectUrl);
+  if (input.cancelUrl) url.searchParams.set("cancel_url", input.cancelUrl);
   if (input.customerEmail) url.searchParams.set("email", input.customerEmail);
   if (input.customerName) url.searchParams.set("name", input.customerName);
   if (input.customerPhone) url.searchParams.set("phone", input.customerPhone);
@@ -123,11 +239,27 @@ export async function createCheckoutSession(input: CheckoutSessionInput): Promis
   }
 
   return {
-    token: json.token,
+    token,
     paymentUrl: url.toString(),
-    trackingId: json.tracking_id,
+    trackingId,
+    flow: "one_time",
     raw: json,
   };
+}
+
+// -----------------------------------------------------------------------------
+// Return-redirect signature (Safepay POSTs tracker + signature to redirect_url)
+// -----------------------------------------------------------------------------
+
+/**
+ * Verify the signature Safepay POSTs (form-encoded) to our redirect_url:
+ * HMAC-SHA256 over the tracker token using the merchant secret key.
+ */
+export function verifyReturnSignature(tracker: string, signature: string | null | undefined): boolean {
+  const secret = process.env.SAFEPAY_BEACON_SECRET;
+  if (!secret || !tracker || !signature) return false;
+  const expected = createHmac("sha256", secret).update(tracker, "utf8").digest("hex");
+  return safeCompare(signature.trim().toLowerCase(), expected);
 }
 
 // -----------------------------------------------------------------------------
@@ -137,6 +269,7 @@ export async function createCheckoutSession(input: CheckoutSessionInput): Promis
 const SIGNATURE_HEADERS = [
   "x-sfpay-signature",
   "x-safepay-signature",
+  "x-sfpy-signature",
   "x-sfpay-hmac",
   "x-signature",
 ];

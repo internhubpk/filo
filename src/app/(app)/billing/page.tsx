@@ -152,8 +152,20 @@ function BillingContent() {
       void billing.refresh();
     }, 4000);
     return () => clearTimeout(t);
-     
+
   }, [returnedFromCheckout, returnPolls]);
+
+  // Post-checkout status toasts (cancelled / bad return signature).
+  const checkoutOutcome = search.get("checkout");
+  useEffect(() => {
+    if (checkoutOutcome === "cancelled") {
+      toast.info("Checkout cancelled", { description: "No charge was made. You can pick a plan any time." });
+    } else if (checkoutOutcome === "invalid_signature") {
+      toast.warning("Payment could not be verified on return", {
+        description: "If you completed the payment, it will still activate automatically via the payment webhook.",
+      });
+    }
+  }, [checkoutOutcome]);
 
   const activePlanIds = useMemo(() => new Set((plans.data ?? []).map((p) => p._id)), [plans.data]);
 

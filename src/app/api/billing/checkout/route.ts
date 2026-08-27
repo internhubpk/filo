@@ -19,7 +19,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, serverToken, convexQuery, convexMutation, jsonError, appUrl } from "@/lib/billing-server";
-import { createCheckoutSession, isSafepayConfigured } from "@/lib/safepay";
+import { createCheckoutSession, isSafepayConfigured, isSubscriptionFlowConfigured } from "@/lib/safepay";
 
 interface PlanRow {
   _id: string;
@@ -42,6 +42,22 @@ export async function POST(request: NextRequest) {
 
     if (!isSafepayConfigured()) {
       return jsonError(503, "Payments are not configured on this deployment", "BILLING_UNCONFIGURED");
+    }
+
+    // Fail FAST with a precise diagnostic when the shared secret is missing:
+    // previously this threw deep inside the flow and surfaced as an opaque
+    // 500. 503 tells the operator exactly which env var to set on Vercel.
+    if (!process.env.FILO_SERVER_SECRET) {
+      console.error("[billing/checkout] FILO_SERVER_SECRET is not set on the Next.js runtime — cannot call billing mutations.");
+      return jsonError(
+        503,
+        "Billing is not configured on this deployment (FILO_SERVER_SECRET missing)",
+        "BILLING_SERVER_SECRET_MISSING"
+      );
+    }
+    if (process.env.FILO_SERVER_SECRET &&
+        process.env.FILO_SERVER_SECRET.length < 24) {
+      console.warn("[billing/checkout] FILO_SERVER_SECRET looks too short — make sure Vercel and Convex use the SAME value.");
     }
 
     const body = (await request.json().catch(() => null)) as
@@ -100,12 +116,23 @@ export async function POST(request: NextRequest) {
 
     // ---- Create the Safepay checkout session (secret stays server-side) ----
     const returnBase = appUrl();
+    // Safepay POSTs tracker+signature here; the route then 303-redirects the
+    // browser back to the billing page. Query params carry our opaque state.
+    const stateQuery = new URLSearchParams({
+      source: "filo-subscription",
+      subscriptionId: String(subscriptionId),
+      userId: user.id,
+      planTier: plan.tier ?? "",
+      interval,
+    }).toString();
     const session = await createCheckoutSession({
       amountPkr: amount,
       orderId: String(subscriptionId),
       customerEmail: user.email,
       customerName: user.name,
       subscriptionPlanId: safepayPlanId,
+      redirectUrl: `${returnBase}/api/billing/return?${stateQuery}`,
+      cancelUrl: `${returnBase}/billing?checkout=cancelled`,
       state: {
         source: "filo-subscription",
         subscriptionId: String(subscriptionId),
@@ -126,6 +153,10 @@ export async function POST(request: NextRequest) {
       paymentToken: session.token,
     });
 
+    console.info(
+      `[billing/checkout] session created flow=${session.flow} plan=${plan.tier} interval=${interval} subscriptionId=${subscriptionId}`
+    );
+
     return NextResponse.json({
       success: true,
       data: {
@@ -136,12 +167,15 @@ export async function POST(request: NextRequest) {
         interval,
         amount,
         currency: plan.currency || "PKR",
+        flow: session.flow,
+        subscriptionFlowConfigured: isSubscriptionFlowConfigured(),
         returnUrl: `${returnBase}/billing?checkout=return`,
       },
     });
   } catch (error) {
     console.error("[API /billing/checkout] Error:", error);
     const message = error instanceof Error ? error.message : "Failed to start checkout";
-    return jsonError(500, message, "CHECKOUT_ERROR");
+    // Surface the real cause to the caller (Vercel logs carry the full stack).
+    return jsonError(500, `Checkout failed: ${message}`, "CHECKOUT_ERROR");
   }
 }

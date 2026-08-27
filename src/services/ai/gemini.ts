@@ -39,6 +39,34 @@ const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 const DEFAULT_MODEL = 'gemini-flash-latest'
 
 /**
+ * Normalize a configured Gemini base URL into `<origin>/<api-version>`.
+ *
+ * A mis-set GEMINI_BASE_URL (missing the `/v1beta` path segment, a trailing
+ * slash, or a pasted full `…/v1beta/models` path) makes EVERY model return
+ * HTTP 404 — which looks exactly like "every Gemini model was retired".
+ * This guards against that entire failure class.
+ */
+export function normalizeGeminiBaseUrl(raw: string): string {
+  let url = raw.trim().replace(/\/+$/, '')
+  // Strip a trailing /models segment if someone pasted the full models URL.
+  url = url.replace(/\/models$/i, '')
+  try {
+    const parsed = new URL(url)
+    const segments = parsed.pathname.split('/').filter(Boolean)
+    const last = segments[segments.length - 1] ?? ''
+    const isVersion = /^v\d+[a-z]*$/i.test(last)
+    if (!isVersion) {
+      // Default to the v1beta surface (where the -latest aliases live).
+      segments.push('v1beta')
+    }
+    return `${parsed.origin}/${segments.join('/')}`
+  } catch {
+    // Not a parseable URL — return as-is; fetch will surface the error.
+    return url
+  }
+}
+
+/**
  * Models we're willing to route to on Gemini, tried in order until one
  * responds. The `-latest` aliases always resolve to Google's current model
  * of that family, so they survive per-project model retirements.
@@ -106,7 +134,8 @@ export class GeminiProvider implements AiProvider {
   }
 
   private getBaseUrl(): string {
-    return process.env.GEMINI_BASE_URL || DEFAULT_BASE_URL
+    const raw = process.env.GEMINI_BASE_URL?.trim() || DEFAULT_BASE_URL;
+    return normalizeGeminiBaseUrl(raw);
   }
 
   isConfigured(): boolean {
@@ -142,7 +171,19 @@ export class GeminiProvider implements AiProvider {
         throw normalizeAiError('GEMINI', err)
       }
     }
-    throw normalizeAiError('GEMINI', lastError)
+    // Every candidate 404'd. That pattern almost always means an endpoint or
+    // project problem, NOT that every model was retired — surface the exact
+    // endpoint so the operator can fix GEMINI_BASE_URL / the API key fast.
+    const endpoint = `${this.getBaseUrl()}/models/…:generateContent`
+    const lastMessage = lastError instanceof Error ? lastError.message : String(lastError)
+    throw new AiBaseError(
+      `GEMINI: all ${candidates.length} candidate models returned 404 on ${endpoint}. ` +
+        `Check GEMINI_BASE_URL (must include /v1beta) and that the API key belongs to a project with the Generative Language API enabled. ` +
+        `Last error: ${lastMessage.slice(0, 200)}`,
+      'MODEL_NOT_FOUND',
+      'GEMINI',
+      false
+    )
   }
 
   private async generateWithModel(

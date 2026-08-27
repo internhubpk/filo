@@ -71,7 +71,7 @@ export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly st
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   longform: {
-    GEMINI: ['gemini-2.5-flash', 'gemini-1.5-pro'],
+    GEMINI: ['gemini-2.5-flash', 'gemini-flash-latest'], // 1.5 models are retired
     OPENROUTER: ['anthropic/claude-3.5-sonnet'],
     OPENAI: ['gpt-4o'],
   },
