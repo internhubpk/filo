@@ -54,7 +54,10 @@ export async function GET(request: NextRequest) {
       })
       let filtered = (all as any[]) || []
       if (type) {
-        filtered = filtered.filter((a) => a.type === type)
+        // Case-insensitive: older artifacts were saved with uppercase types
+        // ("DOCUMENT") while the libraries filter by lowercase ids.
+        const t = type.toLowerCase()
+        filtered = filtered.filter((a) => String(a.type || '').toLowerCase() === t)
       }
       if (search) {
         const q = search.toLowerCase()

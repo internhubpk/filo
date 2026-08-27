@@ -29,7 +29,7 @@ import { useApi } from "@/hooks/use-api";
 import { useFiloSession } from "@/hooks/use-session";
 import { cn } from "@/lib/utils";
 import { timeAgo } from "@/lib/format";
-import { PageHeader, EmptyState, ErrorState, SkeletonCards, ConfirmDialog } from "@/components/shared";
+import { PageHeader, EmptyState, ErrorState, SkeletonCards, ConfirmDialog, ActiveGenerations } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -176,6 +176,9 @@ export function ArtifactLibrary({
           </Button>
         }
       />
+
+      {/* Background generations in flight — live from Convex */}
+      <ActiveGenerations onSettled={() => void list.refresh()} />
 
       {/* Toolbar */}
       <div className="flex flex-col gap-2 sm:flex-row sm:items-center">

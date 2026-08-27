@@ -49,6 +49,7 @@ export async function POST(request: NextRequest) {
       order: Number(body.order) || 99,
       contactSales: Boolean(body.contactSales),
       tier: String(body.tier ?? String(body.name).toLowerCase()).slice(0, 30),
+      aiChatEnabled: body.aiChatEnabled !== false,
       safepayPlanIdMonthly: body.safepayPlanIdMonthly ? String(body.safepayPlanIdMonthly) : undefined,
       safepayPlanIdYearly: body.safepayPlanIdYearly ? String(body.safepayPlanIdYearly) : undefined,
     });
@@ -95,6 +96,7 @@ export async function PATCH(request: NextRequest) {
     if (body.order !== undefined) updates.order = Number(body.order) || 99;
     if (body.contactSales !== undefined) updates.contactSales = Boolean(body.contactSales);
     if (body.tier !== undefined) updates.tier = String(body.tier).slice(0, 30);
+    if (body.aiChatEnabled !== undefined) updates.aiChatEnabled = Boolean(body.aiChatEnabled);
     if (body.safepayPlanIdMonthly !== undefined)
       updates.safepayPlanIdMonthly = body.safepayPlanIdMonthly ? String(body.safepayPlanIdMonthly) : undefined;
     if (body.safepayPlanIdYearly !== undefined)

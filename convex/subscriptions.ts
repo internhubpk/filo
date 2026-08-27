@@ -130,9 +130,21 @@ export const canGenerateAI = query({
  * Record an AI generation usage event
  * Call this after successful AI generation
  */
+/**
+ * Record an AI generation usage event (one unit of monthly quota).
+ *
+ * SECURITY: requires the shared server token. Usage counters drive quota
+ * enforcement, so the browser can never call this directly — only the
+ * Next.js server (or other Convex functions presenting the token) may
+ * record usage after a SUCCESSFUL generation.
+ */
 export const recordAIGeneration = mutation({
-  args: { userId: v.id("users") },
+  args: { serverToken: v.string(), userId: v.id("users") },
   handler: async (ctx, args) => {
+    const secret = process.env.FILO_SERVER_SECRET;
+    if (!secret || args.serverToken !== secret) {
+      throw new Error("Unauthorized: invalid server token");
+    }
     const now = new Date();
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
     const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getTime();

@@ -42,6 +42,7 @@ interface PlanRow {
   contactSales?: boolean;
   maxAiGenerations: number;
   maxStorageMb: number;
+  aiChatEnabled?: boolean;
   safepayPlanIdMonthly?: string;
   safepayPlanIdYearly?: string;
 }
@@ -58,6 +59,7 @@ const EMPTY_FORM = {
   popular: false,
   active: true,
   contactSales: false,
+  aiChatEnabled: true,
   safepayPlanIdMonthly: "",
   safepayPlanIdYearly: "",
 };
@@ -85,6 +87,7 @@ export default function AdminPlansPage() {
         popular: editing.popular,
         active: editing.active,
         contactSales: editing.contactSales,
+        aiChatEnabled: editing.aiChatEnabled,
         safepayPlanIdMonthly: editing.safepayPlanIdMonthly || undefined,
         safepayPlanIdYearly: editing.safepayPlanIdYearly || undefined,
       };
@@ -189,6 +192,7 @@ export default function AdminPlansPage() {
                       popular: p.popular,
                       active: p.active,
                       contactSales: Boolean(p.contactSales),
+                      aiChatEnabled: p.aiChatEnabled !== false,
                       safepayPlanIdMonthly: p.safepayPlanIdMonthly ?? "",
                       safepayPlanIdYearly: p.safepayPlanIdYearly ?? "",
                     })
@@ -274,7 +278,14 @@ export default function AdminPlansPage() {
                 <label className="flex items-center gap-2 text-sm">
                   <Switch checked={editing.contactSales} onCheckedChange={(v) => setEditing({ ...editing, contactSales: v })} /> Contact sales
                 </label>
+                <label className="flex items-center gap-2 text-sm">
+                  <Switch checked={editing.aiChatEnabled} onCheckedChange={(v) => setEditing({ ...editing, aiChatEnabled: v })} /> AI generation
+                </label>
               </div>
+              <p className="text-[11px] leading-relaxed text-muted-foreground">
+                "AI generation" controls whether subscribers on this plan may create documents with AI. Turn it off to
+                make the plan storage-only (this is the Free plan's default).
+              </p>
             </div>
           )}
 

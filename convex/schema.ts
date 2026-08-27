@@ -75,6 +75,10 @@ export default defineSchema({
     // (except contactSales plans, which never touch Safepay).
     safepayPlanIdMonthly: v.optional(v.string()),
     safepayPlanIdYearly: v.optional(v.string()),
+    // Entitlement flag: whether this plan may use AI chat/generation.
+    // Enforced SERVER-SIDE on every generation start. When undefined, the
+    // enforcement layer falls back to the plan tier ("free" → denied).
+    aiChatEnabled: v.optional(v.boolean()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -261,6 +265,19 @@ export default defineSchema({
     // Blueprint (the plan) persisted so units can be generated/resumed
     // independently, and so a resumed job doesn't re-plan.
     blueprint: v.optional(v.any()),
+
+    // Original app origin (e.g. "https://filo-ailab99.vercel.app") captured
+    // at enqueue time. The worker calls this origin's /api/generation/render
+    // to render + persist the file, so rendering survives tab close/logout.
+    appBaseUrl: v.optional(v.string()),
+    // Small branding config captured at enqueue time (never secrets).
+    brandConfig: v.optional(v.any()),
+    // Names only — attached file CONTENT is intentionally not persisted
+    // (Convex documents are capped at 1MB; base64 uploads would not fit).
+    attachedFileNames: v.optional(v.array(v.string())),
+    // Timestamp of the last render attempt (concurrency guard for the
+    // idempotent render endpoint — worker AND client may both trigger it).
+    renderStartedAt: v.optional(v.number()),
 
     // Failure info
     error: v.optional(v.string()),

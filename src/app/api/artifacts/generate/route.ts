@@ -8,6 +8,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { validateSessionToken } from '@/lib/session'
 import { getConvexClient } from '@/lib/convex-server'
 import { api } from '@convex/_generated/api'
+import { isAiChatAllowedForPlan } from '@/lib/ai-entitlement'
 
 export async function POST(request: NextRequest) {
   try {
@@ -49,6 +50,33 @@ export async function POST(request: NextRequest) {
 
     // Check subscription/usage limits
     const convex = getConvexClient()
+
+    // ---- PAID-FEATURE GATE: AI chat/generation (free plans are blocked) ----
+    try {
+      const dbUser = await convex.query(api.users.getUser, { userId: userId as any })
+      const planId = (dbUser as any)?.planId as string | undefined
+      let plan: any = null
+      if (planId) {
+        plan = await convex.query(api.plans.getPlanById, { planId: planId as any })
+      }
+      if (!plan) {
+        plan = await convex.query(api.plans.getFreePlan, {})
+      }
+      if (!isAiChatAllowedForPlan(plan)) {
+        return NextResponse.json(
+          {
+            success: false,
+            error: 'AI generation is a premium feature. Upgrade to Pro to create documents with AI.',
+            code: 'PLAN_UPGRADE_REQUIRED',
+            data: { upgradeUrl: '/billing' },
+          },
+          { status: 403 }
+        )
+      }
+    } catch (gateErr) {
+      console.warn('[API /artifacts/generate] Entitlement gate lookup failed:', gateErr)
+    }
+
     try {
       const subscriptionStatus = await convex.query(api.subscriptions.canGenerateAI, {
         userId: userId as any,
@@ -109,9 +137,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Record usage after successful generation
+    // Record usage after successful generation (server-token gated)
     try {
       await convex.mutation(api.subscriptions.recordAIGeneration, {
+        serverToken: process.env.FILO_SERVER_SECRET ?? '',
         userId: userId as any,
       })
     } catch (usageError) {

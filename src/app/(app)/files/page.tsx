@@ -28,7 +28,7 @@ import { useApi } from "@/hooks/use-api";
 import { useFiloSession } from "@/hooks/use-session";
 import { cn } from "@/lib/utils";
 import { formatBytes, formatDate, fileTypeMeta } from "@/lib/format";
-import { PageHeader, EmptyState, ErrorState, ConfirmDialog } from "@/components/shared";
+import { PageHeader, EmptyState, ErrorState, ConfirmDialog, ActiveGenerations } from "@/components/shared";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Progress } from "@/components/ui/progress";
@@ -207,6 +207,9 @@ export default function FilesPage() {
           </Button>
         }
       />
+
+      {/* Background generations in flight — live from Convex */}
+      <ActiveGenerations onSettled={() => void files.refresh()} />
 
       {/* Storage summary + upload progress */}
       <div className="flex flex-col gap-3 rounded-xl border bg-card p-4 sm:flex-row sm:items-center sm:justify-between">

@@ -89,7 +89,7 @@ class ApiClient {
   ): Promise<ApiResponse<T>> {
     try {
       const url = `${this.baseUrl}${endpoint}`
-      
+
       const response = await fetch(url, {
         headers: {
           'Content-Type': 'application/json',
@@ -99,13 +99,36 @@ class ApiClient {
         ...options,
       })
 
-      const data = await response.json()
+      // Parse defensively: proxy/edge errors (502/503/504) return HTML or
+      // plain text, NOT JSON. Previously `response.json()` threw a
+      // SyntaxError here and surfaced a cryptic message to users.
+      const raw = await response.text()
+      let data: any = null
+      try {
+        data = raw ? JSON.parse(raw) : null
+      } catch {
+        data = null
+      }
 
       if (!response.ok) {
+        const friendly =
+          response.status === 504
+            ? 'The request timed out. Please try again.'
+            : response.status === 502 || response.status === 503
+              ? 'The service is temporarily unavailable. Please try again in a moment.'
+              : data?.error || `Request failed (HTTP ${response.status})`
         return {
           success: false,
-          error: data.error || `HTTP ${response.status}`,
-          code: data.code || 'HTTP_ERROR',
+          error: typeof data?.error === 'string' ? data.error : friendly,
+          code: typeof data?.code === 'string' ? data.code : `HTTP_${response.status}`,
+        }
+      }
+
+      if (data === null) {
+        return {
+          success: false,
+          error: 'The server returned an unreadable response. Please try again.',
+          code: 'BAD_RESPONSE',
         }
       }
 
@@ -118,6 +141,11 @@ class ApiClient {
         code: 'NETWORK_ERROR',
       }
     }
+  }
+
+  /** Authorization headers for direct fetch() calls outside this client. */
+  getAuthHeaders(): Record<string, string> {
+    return this.getAuthHeader()
   }
 
   private getAuthHeader(): Record<string, string> {
@@ -204,10 +232,11 @@ class ApiClient {
   }
 
   /**
-   * Generate a real downloadable document using Agent Router
-   * Returns file data (base64) along with artifact metadata
+   * Start a BACKGROUND generation job. Returns a jobId in milliseconds —
+   * the document is then generated in Convex (survives tab close / logout).
+   * Subscribe to progress via Convex (useQuery api.generation.getJob).
    */
-  async agentGenerate(data: {
+  async startGeneration(data: {
     prompt: string
     artifactType?: string
     outputFormat?: string
@@ -220,30 +249,42 @@ class ApiClient {
       fonts?: { heading?: string; body?: string }
     }
     files?: Array<{ filename: string; content: string; mimeType: string }>
-  }): Promise<ApiResponse<{
-    artifact: {
-      id: string
-      title: string
-      type: string
-      format: string
-      content: string
-      fileData?: string
-      fileSize?: number
-      fileName?: string
-      mimeType?: string
-    }
-    tokensUsed?: number
-    generationTimeMs?: number
-    stages?: Array<{
-      id: string
-      label: string
-      status: 'pending' | 'active' | 'completed' | 'error'
-      detail?: string
-    }>
-  }>> {
+  }): Promise<ApiResponse<{ jobId: string; status: string; message?: string }>> {
     return this.request('/artifacts/agent-generate', {
       method: 'POST',
       body: JSON.stringify(data),
+    })
+  }
+
+  /**
+   * Cancel the caller's active generation job (worker stops at the next
+   * section boundary).
+   */
+  async cancelGeneration(jobId: string): Promise<ApiResponse> {
+    return this.request('/generation/cancel', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    })
+  }
+
+  /**
+   * Retry a failed/stuck generation job (resumes from the last good step).
+   */
+  async retryGeneration(jobId: string): Promise<ApiResponse<{ jobId: string; status: string }>> {
+    return this.request('/generation/retry', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
+    })
+  }
+
+  /**
+   * Safety-net trigger for the idempotent render endpoint (called when a
+   * job appears stuck in the "rendering" phase). No-op if already done.
+   */
+  async triggerGenerationRender(jobId: string): Promise<ApiResponse> {
+    return this.request('/generation/render', {
+      method: 'POST',
+      body: JSON.stringify({ jobId }),
     })
   }
 

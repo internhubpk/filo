@@ -35,6 +35,8 @@ interface PlanSeed {
   icon: string;
   order: number;
   contactSales?: boolean;
+  // Whether this plan may use AI chat/generation (server-enforced).
+  aiChatEnabled: boolean;
   safepayPlanIdMonthly?: string;
   safepayPlanIdYearly?: string;
 }
@@ -53,17 +55,22 @@ const DEFAULT_PLANS: PlanSeed[] = [
     priceMonthly: 0,
     priceYearly: 0,
     features: [
-      "25 AI generations per month",
       "200MB cloud storage",
       "DOCX, PDF and CSV export",
+      "Organize files in your workspace",
       "Community support",
     ],
-    limitations: ["Watermark on some exports", "No custom brand profiles"],
+    limitations: [
+      "AI document generation requires a paid plan",
+      "Watermark on some exports",
+      "No custom brand profiles",
+    ],
     popular: false,
     maxAiGenerations: 25,
     maxStorageMb: 200,
     icon: "Sparkles",
     order: 0,
+    aiChatEnabled: false,
   },
   {
     name: "Pro",
@@ -87,6 +94,7 @@ const DEFAULT_PLANS: PlanSeed[] = [
     maxStorageMb: 5120,
     icon: "Crown",
     order: 1,
+    aiChatEnabled: true,
     safepayPlanIdMonthly: "pro-monthly",
     safepayPlanIdYearly: "pro-yearly",
   },
@@ -115,6 +123,7 @@ const DEFAULT_PLANS: PlanSeed[] = [
     maxTeamMembers: 5,
     icon: "Users",
     order: 2,
+    aiChatEnabled: true,
     safepayPlanIdMonthly: "team-monthly",
     safepayPlanIdYearly: "team-yearly",
   },
@@ -142,6 +151,7 @@ const DEFAULT_PLANS: PlanSeed[] = [
     icon: "Building2",
     order: 3,
     contactSales: true,
+    aiChatEnabled: true,
   },
 ];
 
@@ -180,6 +190,7 @@ export const seedDefaultPlans = internalMutation({
           order: plan.order,
           contactSales: plan.contactSales,
           tier: plan.tier,
+          aiChatEnabled: plan.aiChatEnabled,
           safepayPlanIdMonthly: plan.safepayPlanIdMonthly,
           safepayPlanIdYearly: plan.safepayPlanIdYearly,
           updatedAt: Date.now(),
@@ -203,6 +214,7 @@ export const seedDefaultPlans = internalMutation({
           order: plan.order,
           contactSales: plan.contactSales,
           tier: plan.tier,
+          aiChatEnabled: plan.aiChatEnabled,
           safepayPlanIdMonthly: plan.safepayPlanIdMonthly,
           safepayPlanIdYearly: plan.safepayPlanIdYearly,
           createdAt: Date.now(),
@@ -265,6 +277,7 @@ export const ensurePlansSeeded = mutation({
         order: plan.order,
         contactSales: plan.contactSales,
         tier: plan.tier,
+        aiChatEnabled: plan.aiChatEnabled,
         safepayPlanIdMonthly: plan.safepayPlanIdMonthly,
         safepayPlanIdYearly: plan.safepayPlanIdYearly,
         createdAt: now,

@@ -240,3 +240,6 @@ export function ConfirmDialog({
     </AlertDialog>
   );
 }
+
+// ---- ActiveGenerations (re-exported from its own module for ergonomics) ----
+export { ActiveGenerations } from "@/components/shared/active-generations";

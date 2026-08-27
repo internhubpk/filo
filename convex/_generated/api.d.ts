@@ -20,6 +20,7 @@ import type * as seed from "../seed.js";
 import type * as sessions from "../sessions.js";
 import type * as subscriptions from "../subscriptions.js";
 import type * as users from "../users.js";
+import type * as worker from "../worker.js";
 
 import type {
   ApiFromModules,
@@ -40,6 +41,7 @@ declare const fullApi: ApiFromModules<{
   sessions: typeof sessions;
   subscriptions: typeof subscriptions;
   users: typeof users;
+  worker: typeof worker;
 }>;
 
 /**

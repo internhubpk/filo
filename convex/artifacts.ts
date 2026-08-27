@@ -94,6 +94,35 @@ export const generateArtifact = action({
     const startTime = Date.now();
 
     try {
+      // ---- Phase 0: PAID-FEATURE ENTITLEMENT GATE (defense in depth) ----
+      // The Next.js API layer already enforces this; re-checked here so the
+      // action can never be used to bypass the free-plan AI block.
+      if (args.userId) {
+        const user = await ctx.runQuery(api.users.getUser, {
+          userId: args.userId as any,
+        }).catch(() => null);
+        const planId = (user as any)?.planId as string | undefined;
+        let plan: any = null;
+        if (planId) {
+          plan = await ctx.runQuery(api.plans.getPlanById, { planId: planId as any }).catch(() => null);
+        }
+        if (!plan) {
+          plan = await ctx.runQuery(api.plans.getFreePlan, {}).catch(() => null);
+        }
+        const allowed =
+          plan?.aiChatEnabled === true ||
+          (plan?.aiChatEnabled === undefined &&
+            plan?.tier &&
+            String(plan.tier).toLowerCase() !== "free");
+        if (!allowed) {
+          return {
+            success: false,
+            error: "AI generation is a premium feature. Upgrade to Pro to create documents with AI.",
+            code: "PLAN_UPGRADE_REQUIRED",
+          };
+        }
+      }
+
       // ---- Phase 1: Plan the artifact (JSON blueprint) ----
       const planPrompt = buildBlueprintPrompt({
         userRequest: args.prompt,

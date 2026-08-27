@@ -1,58 +1,37 @@
 // =============================================================================
-// POST /api/artifacts/agent-generate
+// POST /api/artifacts/agent-generate  (BACKGROUND JOB EDITION)
 // =============================================================================
-// Agent Router: Generates REAL downloadable documents (DOCX/PDF/XLSX/PPTX/CSV)
-// Pipeline: Prompt → Type Detection → AI Planning → AI Content → File Render
+// Starts a durable generation job in Convex and returns in milliseconds.
+// The AI work runs in a Convex worker (convex/worker.ts) — it keeps running
+// after the user closes the tab, logs out, or loses connectivity. This is the
+// definitive fix for the 504s: nothing long-running happens on Vercel.
 //
-// Fixes included in this version:
-//  1. LIVE account-status check: status is re-read from the database on every
-//     request. Previously it trusted `session.user.status` from the HMAC
-//     token, which stays valid for 7 days — so SUSPENDED users could keep
-//     generating for up to a week, and freshly-activated users were locked
-//     out until they logged in again.
-//     (Payments have since been removed entirely — see the status check
-//     below: only "suspended" blocks now.)
-//  2. Quota PRE-CHECK: plan limit minus current-month usage is verified
-//     BEFORE spending AI tokens. Previously only post-success usage recording
-//     existed, so limits were never actually enforced.
-//  3. Duplicate-request guard: while one generation is running for a user,
-//     additional concurrent requests are rejected instead of silently
-//     consuming multiple credits.
+// Pipeline (server-side, tab-independent):
+//   this route → generation:enqueueJob → scheduled worker (plan + sections)
+//   → POST /api/generation/render (DOCX/PDF/… + R2 upload) → job completed
+//
+// Checks BEFORE any AI spend:
+//   1. Authentication (HMAC session + live DB re-read)
+//   2. Account status (suspended blocks)
+//   3. Plan entitlement (AI chat/generation is a PAID feature — free plans
+//      are denied with PLAN_UPGRADE_REQUIRED; enforced here AND in Convex)
+//   4. Monthly quota (plan limit vs usage, from real DB values)
+//   5. Duplicate guard (one active job per user; returns the running jobId
+//      so the client can just attach to it)
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { validateSessionToken } from '@/lib/session'
-import { agentRouter, type AgentRouterInput } from '@/services/agent-router'
 import { api } from '@convex/_generated/api'
 import { getConvexClient } from '@/lib/convex-server'
+import { isAiChatAllowedForPlan, type PlanEntitlementDoc } from '@/lib/ai-entitlement'
 
-// Simple per-user in-flight generation guard (per server instance).
-// Prevents double-click / parallel duplicate submissions from racing past
-// the client-side button disable. Keyed by userId, auto-cleared in finally.
-const inFlightGenerations = new Map<string, number>()
-
-const MAX_CONCURRENT_GENERATION_AGE_MS = 10 * 60 * 1000 // safety window
-
-function tryAcquireGenerationSlot(userId: string): boolean {
-  const now = Date.now()
-  const startedAt = inFlightGenerations.get(userId)
-  if (
-    startedAt !== undefined &&
-    now - startedAt < MAX_CONCURRENT_GENERATION_AGE_MS
-  ) {
-    return false // already generating on this instance
-  }
-  inFlightGenerations.set(userId, now)
-  return true
-}
-
-function releaseGenerationSlot(userId: string): void {
-  inFlightGenerations.delete(userId)
-}
+// Shape of the plan documents we read for entitlement/quota decisions.
+type PlanDoc = PlanEntitlementDoc
 
 export async function POST(request: NextRequest) {
   try {
-    // Verify authentication
+    // ==================== AUTHENTICATION ====================
     const authHeader = request.headers.get('authorization')
     const token = authHeader?.substring(7)
 
@@ -63,9 +42,7 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate session locally (HMAC, no DB lookup)
     const session = validateSessionToken(token)
-
     if (!session?.valid || !session?.user) {
       return NextResponse.json(
         { success: false, error: 'Invalid or expired session', code: 'INVALID_SESSION' },
@@ -75,19 +52,9 @@ export async function POST(request: NextRequest) {
 
     const userId = session.user.id
 
-    if (userId === 'dev-user') {
-      console.warn('[AGENT-GENERATE] dev-user bypasses activation checks')
-    }
-
-    // ==================== LIVE ACCOUNT STATUS CHECK ====================
-    // Re-read the user's CURRENT status from the database. The session token
-    // may be up to 7 days old and can embed a stale status.
-    //
-    // PAYMENTS REMOVED: accounts are active from signup. Only "suspended"
-    // (admin moderation) blocks generation. This also unblocks legacy
-    // accounts that were stuck in "pending_activation" from the old
-    // manual-payment era without requiring a data migration.
-    let liveStatus: string = session.user.status ?? 'active'
+    // ==================== LIVE ACCOUNT STATUS ====================
+    // Re-read the user's CURRENT record — the HMAC token can be up to 7
+    // days old and embed a stale status.
     let livePlanId: string | null = session.user.planId ?? null
 
     if (userId !== 'dev-user') {
@@ -106,33 +73,26 @@ export async function POST(request: NextRequest) {
             { status: 401 }
           )
         }
-        liveStatus = (dbUser as any).status ?? liveStatus
         livePlanId = (dbUser as any).planId ?? null
+        if (((dbUser as any).status ?? 'active') === 'suspended') {
+          return NextResponse.json(
+            {
+              success: false,
+              error: 'Your account has been suspended. Please contact support for assistance.',
+              code: 'ACCOUNT_SUSPENDED',
+            },
+            { status: 403 }
+          )
+        }
       } catch (statusErr) {
-        // Fail SOFT on infrastructure errors using the token's embedded
-        // status. Logged for observability.
         console.warn('[AGENT-GENERATE] Live status lookup failed, using token status:', statusErr)
-      }
-
-      // Moderation gate (now against LIVE status): suspension is the only
-      // blocking state.
-      if (liveStatus === 'suspended') {
-        return NextResponse.json(
-          {
-            success: false,
-            error: 'Your account has been suspended. Please contact support for assistance.',
-            code: 'ACCOUNT_SUSPENDED',
-          },
-          { status: 403 }
-        )
       }
     }
 
-    // Parse request body
+    // ==================== REQUEST VALIDATION ====================
     const body = await request.json()
     const { prompt, artifactType, outputFormat, workspaceId, brandConfig, files } = body
 
-    // Validate prompt
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 10) {
       return NextResponse.json(
         { success: false, error: 'Prompt must be at least 10 characters', code: 'INVALID_PROMPT' },
@@ -140,10 +100,11 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Validate attached files (count + size caps so uploads cannot blow up memory)
+    // Validate attached files (names are persisted; content stays ephemeral —
+    // the background worker never uploads base64 payloads into the database).
     const MAX_FILES = 10
-    const MAX_FILE_BYTES = 10 * 1024 * 1024 // 10MB base64 content each
-    let safeFiles = files
+    const MAX_FILE_BYTES = 10 * 1024 * 1024
+    let safeFiles: Array<{ filename: string; mimeType: string; content: string }> = []
     if (Array.isArray(files)) {
       if (files.length > MAX_FILES) {
         return NextResponse.json(
@@ -156,7 +117,7 @@ export async function POST(request: NextRequest) {
           !f ||
           typeof f.filename !== 'string' ||
           typeof f.content !== 'string' ||
-          f.content.length > MAX_FILE_BYTES * 1.4 // base64 overhead allowance
+          f.content.length > MAX_FILE_BYTES * 1.4
         ) {
           return NextResponse.json(
             { success: false, error: `Each attached file must be smaller than ${MAX_FILE_BYTES / (1024 * 1024)}MB`, code: 'FILE_TOO_LARGE' },
@@ -176,216 +137,152 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ==================== DUPLICATE REQUEST GUARD ====================
-    if (userId !== 'dev-user' && !tryAcquireGenerationSlot(userId)) {
+    if (userId === 'dev-user') {
       return NextResponse.json(
-        {
-          success: false,
-          error: 'A generation is already in progress. Please wait for it to finish.',
-          code: 'GENERATION_IN_PROGRESS',
-        },
-        { status: 429 }
+        { success: false, error: 'Background generation requires a real account', code: 'UNAUTHORIZED' },
+        { status: 401 }
       )
     }
 
-    try {
-      // ==================== QUOTA PRE-CHECK ====================
-      // Enforce the plan's monthly AI-generation limit BEFORE calling AI
-      // providers (so a failed/exhausted quota never costs provider spend and
-      // failed generations never consume credits — usage is recorded only on
-      // success further below).
-      if (userId !== 'dev-user') {
-        try {
-          const convexClient = getConvexClient()
+    // ==================== PLAN + QUOTA (single Convex round-trip each) ====
+    const convexClient = getConvexClient()
+    const serverToken = process.env.FILO_SERVER_SECRET
+    if (!serverToken) {
+      return NextResponse.json(
+        {
+          success: false,
+          error: 'Generation is temporarily unavailable (server secret not configured).',
+          code: 'BILLING_SERVER_SECRET_MISSING',
+        },
+        { status: 503 }
+      )
+    }
 
-          // Plan limit: explicit plan → Free plan (real DB value) → 25.
-          // "No plan assigned" never means "unlimited" — it means Free.
-          let planLimit: number | null = null
-          if (livePlanId) {
-            try {
-              const plan = await convexClient.query(api.plans.getPlanById, {
-                planId: livePlanId as any,
-              })
-              if (plan?.maxAiGenerations !== undefined && plan.maxAiGenerations !== null) {
-                planLimit = plan.maxAiGenerations
-              }
-            } catch (planErr) {
-              console.warn('[AGENT-GENERATE] Plan lookup failed, falling back to Free plan:', planErr)
-            }
-          }
-          if (planLimit === null) {
-            try {
-              const freePlan = await convexClient.query(api.plans.getFreePlan, {})
-              planLimit = freePlan?.maxAiGenerations ?? 25
-            } catch (freeErr) {
-              console.warn('[AGENT-GENERATE] Free plan lookup failed, using default 25:', freeErr)
-              planLimit = 25
-            }
-          }
+    // ---- Plan lookup: explicit plan → Free plan → null ----
+    let plan: PlanDoc | null = null
+    if (livePlanId) {
+      try {
+        plan = (await convexClient.query(api.plans.getPlanById, {
+          planId: livePlanId as any,
+        })) as PlanDoc | null
+      } catch (planErr) {
+        console.warn('[AGENT-GENERATE] Plan lookup failed, falling back to Free plan:', planErr)
+      }
+    }
+    if (!plan) {
+      try {
+        plan = (await convexClient.query(api.plans.getFreePlan, {})) as PlanDoc | null
+      } catch (freeErr) {
+        console.warn('[AGENT-GENERATE] Free plan lookup failed:', freeErr)
+      }
+    }
 
-          if (planLimit >= 0) {
-            // Monthly usage — new Convex query; degrades gracefully (fail-open)
-            // if the deployment hasn't been updated yet.
-            try {
-              const usage = await convexClient.query(api.subscriptions.getMonthlyAiUsage, {
-                userId: userId as any,
-              })
-              const used = usage?.used ?? 0
-              if (used >= planLimit) {
-                return NextResponse.json(
-                  {
-                    success: false,
-                    error: `Monthly generation limit reached (${used}/${planLimit}). Your limit resets next month.`,
-                    code: 'LIMIT_REACHED',
-                    data: { remaining: Math.max(0, planLimit - used), limit: planLimit },
-                  },
-                  { status: 429 }
-                )
-              }
-            } catch (usageErr) {
-              console.warn('[AGENT-GENERATE] Usage lookup unavailable (pre-deploy), skipping pre-check:', usageErr)
-            }
-          }
-        } catch (quotaErr) {
-          console.warn('[AGENT-GENERATE] Quota pre-check skipped:', quotaErr)
+    // ---- PAID-FEATURE GATE: AI chat/generation ----
+    if (!isAiChatAllowedForPlan(plan)) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'AI generation is a premium feature. Upgrade to Pro to create documents with AI.',
+          code: 'PLAN_UPGRADE_REQUIRED',
+          data: { planName: plan?.name ?? 'Free', upgradeUrl: '/billing' },
+        },
+        { status: 403 }
+      )
+    }
+
+    // ---- Monthly quota pre-check (never spend tokens on an exhausted plan) ----
+    const planLimit = plan?.maxAiGenerations ?? null
+    if (planLimit !== null && planLimit >= 0) {
+      try {
+        const usage = await convexClient.query(api.subscriptions.getMonthlyAiUsage, {
+          userId: userId as any,
+        })
+        const used = usage?.used ?? 0
+        if (used >= planLimit) {
+          return NextResponse.json(
+            {
+              success: false,
+              error: `Monthly generation limit reached (${used}/${planLimit}). Your limit resets next month.`,
+              code: 'LIMIT_REACHED',
+              data: { remaining: 0, limit: planLimit },
+            },
+            { status: 429 }
+          )
         }
+      } catch (usageErr) {
+        console.warn('[AGENT-GENERATE] Usage lookup unavailable, skipping pre-check:', usageErr)
       }
+    }
 
-      console.log(`[AGENT-GENERATE] Starting generation for user: ${userId}`)
-      console.log(`[AGENT-GENERATE] Prompt: ${prompt.substring(0, 100)}...`)
-      console.log(`[AGENT-GENERATE] Format: ${outputFormat || 'auto'}, Type: ${artifactType || 'auto'}`)
-
-      // Build input for agent router
-      const routerInput: AgentRouterInput = {
-        prompt: prompt.trim(),
-        outputFormat: outputFormat,
-        artifactType,
-        userId: session.user.id,
-        workspaceId: workspaceId || session.user.id,
-        brandConfig,
-        files: safeFiles,
-      }
-
-      // Run the agent router pipeline
-      const result = await agentRouter.generate(routerInput)
-
-      if (!result.success || !result.artifact) {
-        // Map error codes to HTTP status
-        let statusCode = 500
-        if (result.code === 'API_KEY_MISSING') statusCode = 502
-        else if (result.code === 'RATE_LIMITED') statusCode = 429
-        else if (result.code === 'TIMEOUT') statusCode = 504
-        else if (result.code === 'PLANNING_FAILED') statusCode = 422
-
+    // ---- Duplicate guard (DB-backed; works across serverless instances) ----
+    try {
+      const activeJob = (await convexClient.query(api.generation.getActiveUserJob, {
+        userId: userId as any,
+      })) as { _id: string; status: string } | null
+      if (activeJob) {
         return NextResponse.json(
           {
             success: false,
-            error: result.error || 'Generation failed',
-            code: result.code || 'GENERATION_FAILED',
-            stages: result.stages,
+            error: 'A generation is already in progress.',
+            code: 'GENERATION_IN_PROGRESS',
+            data: { jobId: activeJob._id, status: activeJob.status },
           },
-          { status: statusCode }
+          { status: 429 }
         )
       }
-
-      // Save artifact record to Convex (non-blocking, best-effort)
-      let artifactDbId: string | null = null
-      try {
-        const convexClient = getConvexClient()
-        if (userId !== 'dev-user') {
-          const saved = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
-            userId: userId as any,
-            title: result.artifact.title,
-            type: result.artifact.type,
-            format: result.artifact.format,
-            prompt: prompt.trim(),
-            status: 'completed',
-          }).catch(() => {
-            // Non-critical: Don't fail if saving fails
-            return null as any
-          })) as { saved: boolean; dbId?: string } | null
-          if (saved?.saved && saved.dbId) artifactDbId = saved.dbId
-        }
-      } catch (saveErr) {
-        console.warn('[AGENT-GENERATE] Non-critical: Could not save artifact record')
-      }
-
-      // ---- Persist the rendered file to R2 + link it to the artifact ----
-      // This is what makes artifacts downloadable from the library forever
-      // (not just in the current browser session).
-      if (artifactDbId && userId !== 'dev-user' && result.artifact.fileData) {
-        try {
-          const { uploadToR2, generateR2Key } = await import('@/lib/r2/client')
-          const convexClient = getConvexClient()
-          const buffer = Buffer.from(result.artifact.fileData, 'base64')
-          const r2Key = generateR2Key(userId, result.artifact.fileName || `artifact-${Date.now()}`)
-          await uploadToR2(
-            r2Key,
-            buffer,
-            result.artifact.mimeType || 'application/octet-stream',
-            {
-              originalName: result.artifact.fileName || 'artifact',
-              size: String(result.artifact.fileSize ?? buffer.length),
-              workspaceId: userId,
-              ownerId: userId,
-              uploadedAt: new Date().toISOString(),
-              category: 'artifact',
-            }
-          )
-          const fileDbId = (await convexClient.mutation(api.files.registerFile, {
-            userId: userId as any,
-            originalName: result.artifact.fileName || 'artifact',
-            mimeType: result.artifact.mimeType || 'application/octet-stream',
-            size: result.artifact.fileSize ?? buffer.length,
-            r2Key,
-          })) as unknown as string
-          await convexClient.mutation(api.artifacts.linkFile, {
-            artifactId: artifactDbId as any,
-            userId: userId as any,
-            fileId: fileDbId as any,
-          })
-          console.log(`[AGENT-GENERATE] Artifact file persisted to R2: ${r2Key}`)
-        } catch (persistErr) {
-          console.warn('[AGENT-GENERATE] R2 persistence failed (artifact metadata still saved):', persistErr)
-        }
-      }
-
-      // Record usage AFTER successful generation only (never on failure)
-      try {
-        const convexClient = getConvexClient()
-        if (userId !== 'dev-user') {
-          await convexClient.mutation(api.subscriptions.recordAIGeneration, {
-            userId: userId as any,
-          }).catch(() => {})
-        }
-      } catch {
-        // Non-critical
-      }
-
-      console.log(`[AGENT-GENERATE] Success! File: ${result.artifact.fileName} (${result.artifact.fileSize} bytes)`)
-
-      return NextResponse.json({
-        success: true,
-        data: {
-          artifact: {
-            id: result.artifact.id,
-            title: result.artifact.title,
-            type: result.artifact.type,
-            format: result.artifact.format,
-            content: result.artifact.content,
-            fileData: result.artifact.fileData,
-            fileSize: result.artifact.fileSize,
-            fileName: result.artifact.fileName,
-            mimeType: result.artifact.mimeType,
-          },
-          tokensUsed: result.tokensUsed,
-          generationTimeMs: result.generationTimeMs,
-          stages: result.stages,
-        },
-      })
-    } finally {
-      releaseGenerationSlot(userId)
+    } catch (guardErr) {
+      console.warn('[AGENT-GENERATE] Duplicate guard lookup failed:', guardErr)
     }
+
+    // ==================== ENQUEUE (returns immediately) ====================
+    // The Convex mutation stores the job and SCHEDULES the worker — the
+    // pipeline is now Convex's responsibility, not this HTTP request's.
+    const origin =
+      process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, '') ||
+      request.nextUrl.origin
+
+    const result = (await convexClient.mutation(api.generation.enqueueJob, {
+      serverToken,
+      userId: userId as any,
+      prompt: prompt.trim(),
+      workspaceId: (workspaceId || undefined) as any,
+      artifactType: artifactType || undefined,
+      outputFormat: outputFormat || undefined,
+      appBaseUrl: origin,
+      brandConfig: brandConfig ?? undefined,
+      attachedFileNames: safeFiles.map((f) => f.filename),
+      // Fallback keys so the worker can call AI even before the keys are
+      // configured on the Convex deployment. Recommended production setup:
+      // `npx convex env set GEMINI_API_KEY ...` (then these stay unused).
+      aiKeys: {
+        gemini: process.env.GEMINI_API_KEY || undefined,
+        geminiBaseUrl: process.env.GEMINI_BASE_URL || undefined,
+        geminiModel: process.env.GEMINI_MODEL || undefined,
+        openrouter: process.env.OPENROUTER_API_KEY || undefined,
+        openai: process.env.OPENAI_API_KEY || undefined,
+      },
+    })) as { success: boolean; jobId?: string; error?: string; code?: string }
+
+    if (!result.success || !result.jobId) {
+      return NextResponse.json(
+        { success: false, error: result.error || 'Could not start generation', code: result.code || 'ENQUEUE_FAILED' },
+        { status: 400 }
+      )
+    }
+
+    console.log(
+      `[AGENT-GENERATE] Job ${result.jobId} queued for user ${userId} (prompt: ${prompt.substring(0, 80)}…)`
+    )
+
+    return NextResponse.json({
+      success: true,
+      data: {
+        jobId: result.jobId,
+        status: 'queued',
+        message: 'Generation started — it will continue even if you close this page.',
+      },
+    })
   } catch (error) {
     console.error('[AGENT-GENERATE] Unhandled error:', error)
     return NextResponse.json(
