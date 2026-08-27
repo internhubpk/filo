@@ -13,8 +13,6 @@ import type * as artifacts from "../artifacts.js";
 import type * as auth from "../auth.js";
 import type * as files from "../files.js";
 import type * as generation from "../generation.js";
-import type * as payments from "../payments.js";
-import type * as paymentVerifications from "../paymentVerifications.js";
 import type * as plans from "../plans.js";
 import type * as sessions from "../sessions.js";
 import type * as subscriptions from "../subscriptions.js";
@@ -32,8 +30,6 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   files: typeof files;
   generation: typeof generation;
-  payments: typeof payments;
-  paymentVerifications: typeof paymentVerifications;
   plans: typeof plans;
   sessions: typeof sessions;
   subscriptions: typeof subscriptions;

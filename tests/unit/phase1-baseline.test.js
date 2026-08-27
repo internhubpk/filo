@@ -7,10 +7,10 @@
 // most critical modules (after the Phase 1 fixes) can be imported and basic
 // invariants hold.
 //
-// NOTE: Updated after the upstream merge that REMOVED SafePay and replaced it
-// with a manual admin-verified payment flow (bank transfer / EasyPaisa /
-// JazzCash + admin approval). Tests now assert the new architecture instead
-// of the old SafePay one.
+// NOTE: Updated after SafePay AND the interim manual admin-verified payment
+// flow were both REMOVED entirely. Signups are activated instantly and quota
+// is enforced purely via usageRecords + users.planId. Tests assert that no
+// payment machinery remains.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -41,26 +41,44 @@ test('next.config.ts has ignoreBuildErrors=false', () => {
   )
 })
 
-test('SafePay files are fully removed (replaced by manual payment flow)', () => {
+test('all payment machinery is fully removed', () => {
   const removedFiles = [
     'convex/safepay.ts',
     'convex/safepay-webhook.ts',
+    'convex/payments.ts',
+    'convex/paymentVerifications.ts',
     'src/app/api/webhooks/safepay/route.ts',
+    'src/app/api/payments/create-checkout/route.ts',
+    'src/app/api/payments/verify/route.ts',
+    'src/app/api/payments/submit/route.ts',
+    'src/app/api/admin/verifications/route.ts',
+    'src/app/api/admin/verifications/[id]/approve/route.ts',
+    'src/app/api/admin/verifications/[id]/reject/route.ts',
+    'src/config/payment.ts',
+    'src/components/billing/billing-page.tsx',
+    'src/app/(dashboard)/billing/page.tsx',
   ]
   for (const rel of removedFiles) {
     assert.equal(
       existsSync(resolve(REPO_ROOT, rel)),
       false,
-      `${rel} should not exist — SafePay was removed upstream`
+      `${rel} should not exist — payments were removed entirely`
     )
   }
 })
 
-test('manual payment flow: paymentVerifications module exists', () => {
-  const path = resolve(REPO_ROOT, 'convex', 'paymentVerifications.ts')
-  assert.ok(existsSync(path), 'convex/paymentVerifications.ts must exist')
+test('signup is activation-free (users created as active, payments gone)', () => {
+  const path = resolve(REPO_ROOT, 'convex', 'users.ts')
   const text = readFileSync(path, 'utf8')
-  assert.ok(text.includes('createVerification'), 'missing createVerification mutation')
+  assert.ok(
+    /createUserWithPassword[\s\S]*?status: "active"/.test(text),
+    'createUserWithPassword must create users as active (no payment gating)'
+  )
+  const authText = readFileSync(resolve(REPO_ROOT, 'convex', 'auth.ts'), 'utf8')
+  assert.ok(
+    !authText.includes('pending_activation",'),
+    'auth.ts must not assign pending_activation on signup'
+  )
 })
 
 test('convex/auth.ts query handlers do not call ctx.db.delete (read-only)', () => {
@@ -87,14 +105,12 @@ test('all route handlers use @convex/_generated/api alias (no string refs)', () 
   // NOTE: /api/auth/me and /api/auth/validate are intentionally excluded —
   // the session system migrated to self-contained HMAC tokens (src/lib/session.ts),
   // so these routes no longer need any Convex reference at all.
+  // Payment routes were removed entirely and are no longer listed here.
   const routes = [
     'src/app/api/artifacts/generate/route.ts',
     'src/app/api/artifacts/route.ts',
     'src/app/api/auth/logout/route.ts',
     'src/app/api/auth/signup/route.ts',
-    'src/app/api/payments/create-checkout/route.ts',
-    'src/app/api/payments/verify/route.ts',
-    'src/app/api/payments/submit/route.ts',
     'src/app/api/plans/route.ts',
     'src/app/api/subscription/status/route.ts',
   ]
@@ -112,14 +128,11 @@ test('all route handlers use @convex/_generated/api alias (no string refs)', () 
   }
 })
 
-test('admin routes (new from upstream merge) use api.* references too', () => {
+test('admin user-management routes use api.* references too', () => {
   const adminRoutes = [
     'src/app/api/admin/users/route.ts',
     'src/app/api/admin/users/[userId]/activate/route.ts',
     'src/app/api/admin/users/[userId]/suspend/route.ts',
-    'src/app/api/admin/verifications/route.ts',
-    'src/app/api/admin/verifications/[id]/approve/route.ts',
-    'src/app/api/admin/verifications/[id]/reject/route.ts',
   ]
   for (const rel of adminRoutes) {
     const text = readFileSync(resolve(REPO_ROOT, rel), 'utf8')
@@ -142,7 +155,6 @@ test('convex/artifacts.ts exposes listUserArtifacts query', () => {
 test('UI pages no longer use broken toast-call-with-object pattern', () => {
   const pages = [
     'src/app/pricing/page.tsx',
-    'src/components/billing/billing-page.tsx',
     'src/components/dashboard/main-dashboard.tsx',
   ]
   for (const rel of pages) {

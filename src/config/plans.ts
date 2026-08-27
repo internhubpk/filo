@@ -125,11 +125,3 @@ export const currencyConfig = {
 
 // Contact sales URL
 export const contactSalesUrl = 'mailto:sales@filo.ai'
-
-// Safepay configuration (server-side only - used in API routes)
-// Actual credentials come from environment/Convex secrets
-export const safepayConfig = {
-  isSandbox: process.env.SAFEPAY_SANDBOX === 'true' || process.env.NODE_ENV !== 'production',
-  returnUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/billing?payment=success`,
-  cancelUrl: `${process.env.NEXT_PUBLIC_APP_URL || 'http://localhost:3000'}/billing?payment=cancelled`,
-}

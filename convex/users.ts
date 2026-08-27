@@ -125,13 +125,15 @@ export const createUser = mutation({
       return existing;
     }
 
-    // Create new user. New signups default to "pending_activation" - admin
-    // must verify payment before the user can perform AI generation.
+    // Create new user. Payments have been removed — every signup is
+    // activated instantly so the user can generate right away. Admins can
+    // still suspend abusive accounts via the admin panel.
     const userId = await ctx.db.insert("users", {
       name: args.name,
       email: args.email,
       image: args.image,
-      status: "pending_activation",
+      status: "active",
+      activatedAt: Date.now(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -188,16 +190,6 @@ export const deleteUser = mutation({
       await ctx.db.delete(artifact._id);
     }
 
-    // Delete subscriptions
-    const subscriptions = await ctx.db
-      .query("subscriptions")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
-      .collect();
-
-    for (const subscription of subscriptions) {
-      await ctx.db.delete(subscription._id);
-    }
-
     // Delete sessions (uses the declared by_userId index instead of a scan)
     const sessions = await ctx.db
       .query("sessions")
@@ -238,13 +230,15 @@ export const createUserWithPassword = internalMutation({
       return existing._id;
     }
 
-    // Create new user with password hash and pending_activation status
+    // Create new user with password hash, activated instantly (payments
+    // removed). Admins retain suspend/activate controls for moderation.
     const userId = await ctx.db.insert("users", {
       name: args.name,
       email: args.email,
       image: args.image,
       passwordHash: args.passwordHash,
-      status: "pending_activation",
+      status: "active",
+      activatedAt: Date.now(),
       createdAt: Date.now(),
       updatedAt: Date.now(),
     });
@@ -255,7 +249,8 @@ export const createUserWithPassword = internalMutation({
 
 // ==================== ADMIN MUTATIONS ====================
 
-// Admin: activate a user account (after verifying their payment)
+// Admin: activate a user account (e.g. re-activating a previously suspended
+// or legacy pending account)
 export const activateUser = mutation({
   args: {
     userId: v.id("users"),
@@ -306,7 +301,7 @@ export const suspendUser = mutation({
   },
 });
 
-// Admin: reset a user back to pending_activation (e.g. after a refund)
+// Admin: reset a user back to pending state (e.g. moderation hold)
 export const resetUserToPending = mutation({
   args: {
     userId: v.id("users"),

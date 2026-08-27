@@ -23,13 +23,10 @@ import {
   Mail,
   Sun,
   Moon,
-  X,
-  Loader2
+  X
 } from 'lucide-react'
 import { getDefaultPlans, currencyConfig, contactSalesUrl, type PlanConfig } from '@/config/plans'
 import { useTheme } from 'next-themes'
-import { apiClient } from '@/lib/api-client'
-import { toast } from '@/lib/toast'
 
 // Icon mapping for plans
 const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -48,23 +45,11 @@ export default function PricingPage() {
   const [isAnnual, setIsAnnual] = useState(false)
   const { theme, setTheme } = useTheme()
 
-  const [isRedirecting, setIsRedirecting] = useState<string | null>(null)
-
-  const handleSubscribe = async (planId: string) => {
-    // Check if user has an active session
-    if (!apiClient.isAuthenticated()) {
-      // Redirect to home with signup prompt and plan selection
-      router.push(`/?signup=true&plan=${planId}`)
-      return
-    }
-
-    // In the manual admin-verified payment flow we don't redirect to a
-    // SafePay checkout anymore. Send the user to /billing where they can
-    // pick a plan and submit their payment transaction details for admin
-    // verification. The ?plan= query preserves their selection.
-    setIsRedirecting(planId)
-    toast.success('Opening billing...', 'Submit your payment transaction details for admin verification.',)
-    router.push(`/billing?plan=${planId}`)
+  const handleGetStarted = (_planId: string) => {
+    // Payments are removed for now — plans on this page are informational.
+    // Sending the user to sign up lets them start generating immediately
+    // (every account includes a monthly AI generation allowance).
+    router.push('/?signup=true')
   }
 
   const handleContactSales = () => {
@@ -286,19 +271,13 @@ export default function PricingPage() {
                             ? "default" 
                             : "secondary"
                       }
-                      onClick={() => plan.contactSales ? handleContactSales() : handleSubscribe(plan.id)}
-                      disabled={isRedirecting === plan.id}
+                      onClick={() => plan.contactSales ? handleContactSales() : handleGetStarted(plan.id)}
                     >
                       {plan.contactSales ? (
                         <>
                           <Phone className="mr-2 h-4 w-4" />
                           {plan.cta}
                           <Mail className="ml-2 h-4 w-4" />
-                        </>
-                      ) : isRedirecting === plan.id ? (
-                        <>
-                          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-                          Redirecting...
                         </>
                       ) : (
                         <>
@@ -331,13 +310,13 @@ export default function PricingPage() {
           <div className="grid gap-4 sm:gap-6 md:grid-cols-2 max-w-4xl mx-auto">
             {[
               {
-                q: 'Is there a free trial available?',
-                a: 'Yes! All paid plans come with a 7-day free trial so you can experience Filo\'s full capabilities before committing.',
+                q: 'Is there a free option available?',
+                a: 'Yes! Payments are removed for now — every account is activated instantly and includes a monthly AI generation allowance so you can try Filo\'s full capabilities.',
                 icon: Sparkles
               },
               {
-                q: 'What payment methods do you accept?',
-                a: 'We accept all major credit and debit cards, bank transfers, and JazzCash/EasyPaisa through SafePay, Pakistan\'s leading payment gateway.',
+                q: 'What does my account include?',
+                a: 'Every signup gets instant access to all document types (DOCX, PDF, XLSX, PPTX, CSV) with a monthly AI generation allowance that resets automatically each month.',
                 icon: CreditCard
               },
               {
@@ -392,7 +371,7 @@ export default function PricingPage() {
               <div className="flex flex-col sm:flex-row gap-4 justify-center">
                 <Button size="lg" asChild className="cursor-pointer gap-2 min-h-[48px]">
                   <Link href="/?signup=true">
-                    Start Your Free Trial
+                    Start Creating for Free
                     <ArrowRight className="ml-2 h-5 w-5" />
                   </Link>
                 </Button>

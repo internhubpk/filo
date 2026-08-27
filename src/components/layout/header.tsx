@@ -20,7 +20,6 @@ import {
   Settings, 
   LogOut, 
   User, 
-  CreditCard,
   Moon,
   Sun,
   Menu,
@@ -179,12 +178,6 @@ export function Header({ onMobileMenuToggle, userData: propUserData }: HeaderPro
               <Link href="/settings">
                 <Settings className="mr-2 h-4 w-4" />
                 Settings
-              </Link>
-            </DropdownMenuItem>
-            <DropdownMenuItem asChild>
-              <Link href="/billing">
-                <CreditCard className="mr-2 h-4 w-4" />
-                Billing
               </Link>
             </DropdownMenuItem>
             <DropdownMenuSeparator />

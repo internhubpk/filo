@@ -87,7 +87,7 @@ my-project/
 ### ✅ Convex Database Integration
 - **Schema**: Complete schema with 10+ tables (users, plans, subscriptions, artifacts, files, etc.)
 - **Queries**: Get active plans, user data, usage stats, payment history
-- **Mutations**: User CRUD, file uploads, payment processing, webhook handling
+- **Mutations**: User CRUD, file uploads, usage recording
 - **Seeding**: Script to populate initial plan data
 
 ### ✅ Cloudflare R2 Storage
@@ -142,7 +142,6 @@ npm start
 | `R2_SECRET_ACCESS_KEY` | R2 API Secret | `secret_key` |
 | `R2_BUCKET_NAME` | R2 bucket name | `filo-uploads` |
 | `OPENAI_API_KEY` | OpenAI API key | `sk-...` |
-| `PAYFAST_MERCHANT_ID` | PayFast merchant ID | `10000100` |
 
 ---
 
@@ -150,7 +149,7 @@ npm start
 
 - **Convex**: Real-time database with built-in caching and optimistic updates
 - **R2**: S3-compatible storage with no egress fees
-- **PayFast**: South African payment gateway integration ready
+- **Payments**: removed — signups are activated instantly
 - **NextAuth.js**: Authentication setup prepared (add your provider)
 
 ---

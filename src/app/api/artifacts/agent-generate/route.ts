@@ -10,6 +10,8 @@
 //     token, which stays valid for 7 days — so SUSPENDED users could keep
 //     generating for up to a week, and freshly-activated users were locked
 //     out until they logged in again.
+//     (Payments have since been removed entirely — see the status check
+//     below: only "suspended" blocks now.)
 //  2. Quota PRE-CHECK: plan limit minus current-month usage is verified
 //     BEFORE spending AI tokens. Previously only post-success usage recording
 //     existed, so limits were never actually enforced.
@@ -80,7 +82,12 @@ export async function POST(request: NextRequest) {
     // ==================== LIVE ACCOUNT STATUS CHECK ====================
     // Re-read the user's CURRENT status from the database. The session token
     // may be up to 7 days old and can embed a stale status.
-    let liveStatus: string = session.user.status ?? 'pending_activation'
+    //
+    // PAYMENTS REMOVED: accounts are active from signup. Only "suspended"
+    // (admin moderation) blocks generation. This also unblocks legacy
+    // accounts that were stuck in "pending_activation" from the old
+    // manual-payment era without requiring a data migration.
+    let liveStatus: string = session.user.status ?? 'active'
     let livePlanId: string | null = session.user.planId ?? null
 
     if (userId !== 'dev-user') {
@@ -103,29 +110,18 @@ export async function POST(request: NextRequest) {
         livePlanId = (dbUser as any).planId ?? null
       } catch (statusErr) {
         // Fail SOFT on infrastructure errors using the token's embedded
-        // status (better to allow a paying user than hard-block everyone on
-        // a transient Convex hiccup). Logged for observability.
+        // status. Logged for observability.
         console.warn('[AGENT-GENERATE] Live status lookup failed, using token status:', statusErr)
       }
 
-      // Manual activation gate (now against LIVE status)
-      if (liveStatus !== 'active') {
-        const message =
-          liveStatus === 'pending_activation'
-            ? 'Your account is pending activation. An administrator will activate it after verifying your payment. Please try again later.'
-            : liveStatus === 'suspended'
-              ? 'Your account has been suspended. Please contact support for assistance.'
-              : 'Your account is not active. Please contact support.'
+      // Moderation gate (now against LIVE status): suspension is the only
+      // blocking state.
+      if (liveStatus === 'suspended') {
         return NextResponse.json(
           {
             success: false,
-            error: message,
-            code:
-              liveStatus === 'pending_activation'
-                ? 'ACCOUNT_PENDING_ACTIVATION'
-                : liveStatus === 'suspended'
-                  ? 'ACCOUNT_SUSPENDED'
-                  : 'ACCOUNT_NOT_ACTIVE',
+            error: 'Your account has been suspended. Please contact support for assistance.',
+            code: 'ACCOUNT_SUSPENDED',
           },
           { status: 403 }
         )

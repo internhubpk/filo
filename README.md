@@ -22,7 +22,7 @@
 - **📊 Multi-Format Output** - Export to DOCX, PDF, XLSX, PPTX, CSV
 - **☁️ Cloud Storage Integration** - Cloudflare R2 for reliable file storage
 - **🔄 Real-Time Database** - Convex for instant data synchronization
-- 💳 **Multiple Payment Gateways** - PayFast & SafePay integration
+- 🚀 **Instant Activation** - Sign up and generate immediately (no payment step)
 
 ### User Features
 - 🔐 Secure authentication system
@@ -48,9 +48,6 @@ filo/
 │   ├── app/                    # Next.js App Router pages
 │   │   ├── admin/             # Admin dashboard (/admin)
 │   │   ├── api/               # API routes
-│   │   │   ├── webhooks/
-│   │   │   │   ├── payfast/   # PayFast webhook handler
-│   │   │   │   └── safepay/   # SafePay webhook handler ✨ NEW
 │   │   │   ├── artifacts/     # Artifact generation API
 │   │   │   └── files/         # File upload/download API
 │   │   ├── pricing/           # Public pricing page (/pricing)
@@ -106,8 +103,6 @@ filo/
 | **Cloudflare R2** | S3-compatible object storage |
 | **Lucide Icons** | Icon library |
 | **next-themes** | Theme switching (dark/light) |
-| **PayFast** | South African payment gateway |
-| **SafePay** | Alternative payment gateway |
 
 ---
 
@@ -158,16 +153,8 @@ R2_ACCESS_KEY_ID=your-access-key
 R2_SECRET_ACCESS_KEY=your-secret-key
 R2_BUCKET_NAME=filo-uploads
 
-# Payment Gateways
-# PayFast (South Africa)
-PAYFAST_MERCHANT_ID=your-id
-PAYFAST_MERCHANT_KEY=your-key
-PAYFAST_SANDBOX=true
-
-# SafePay (Alternative)
-SAFEPAY_PUBLIC_KEY=pk_your-key
-SAFEPAY_SECRET_KEY=sk_your-key
-SAFEPAY_SANDBOX=true
+# NOTE: Payments have been removed entirely — no payment env vars needed.
+# Every signup is activated instantly.
 ```
 
 ### Running Locally
@@ -190,154 +177,16 @@ Visit [http://localhost:3000](http://localhost:3000)
 
 ## 📡 API Endpoints
 
-### Webhooks
-
-#### PayFast Webhook
-```
-POST /api/webhooks/payfast
-GET  /api/webhooks/payfast  (health check)
-```
-
-#### SafePay Webhook ✨ NEW
-```
-POST /api/webhooks/safepay
-GET  /api/webhooks/safepay  (health check)
-```
-
-**SafePay Events Handled:**
-- `payment.succeeded` - Activate subscription
-- `payment.failed` / `payment.declined` - Notify user
-- `payment.refunded` - Process refund
-- `subscription.created` / `subscription.activated` - Setup access
-- `subscription.cancelled` - Schedule downgrade
-- `subscription.renewed` - Extend billing period
-- And more...
-
-### File Operations
-```
-POST   /api/files          # Generate presigned upload URL
-GET    /api/files/:id      # Download file
-DELETE /api/files/:id      # Delete file
-```
-
-### Artifacts
-```
-POST   /api/artifacts      # Create new artifact
-GET    /api/artifacts      # List user artifacts
-GET    /api/artifacts/:id  # Get specific artifact
-```
-
----
-
-## 💰 Pricing Plans
-
-Filo uses a **paid-only model** (no free tier):
-
-| Plan | Price (Monthly) | Price (Yearly) | Best For |
-|------|-----------------|----------------|----------|
-| **Pro** | R190 | R1,900 | Individual professionals |
-| **Team** | R490 | R4,900 | Small teams (up to 5 users) |
-| **Department** | Custom | Custom | Enterprises (contact sales) |
-
-All plans are configurable via environment variables:
-
-```bash
-# Pro Plan Pricing
-NEXT_PUBLIC_PLAN_PRO_MONTHLY_PRICE=190
-NEXT_PUBLIC_PLAN_PRO_YEARLY_PRICE=1900
-
-# Team Plan Pricing  
-NEXT_PUBLIC_PLAN_TEAM_MONTHLY_PRICE=490
-NEXT_PUBLIC_PLAN_TEAM_YEARLY_PRICE=4900
-
-# Department (Contact Sales)
-NEXT_PUBLIC_CONTACT_SALES_URL=mailto:sales@filo.ai
-```
-
-Manage plans visually at `/admin`
-
----
-
-## ❓ File Explanations
-
-### 🐧 Caddyfile
-**Purpose:** Web server reverse proxy configuration for [Caddy](https://caddyserver.com/)
-
-```caddyfile
-:81 {
-    # Forwards requests to Next.js on port 3000
-    handle {
-        reverse_proxy localhost:3000 {
-            header_up Host {host}
-            header_up X-Forwarded-For {remote_host}
-        }
-    }
-}
-```
-
-**Why it exists:**
-- Caddy is a modern web server with automatic HTTPS
-- Handles SSL/TLS termination automatically
-- Provides production-ready reverse proxy
-- Useful when deploying to VPS/Dedicated server
-
-**Do you need it?**
-- ✅ **Yes** if deploying to your own server (VPS, dedicated)
-- ❌ **No** if using Vercel, Railway, or similar platforms (they handle this)
-
-### 📦 bun.lock
-**Purpose:** Lockfile for [Bun](https://bun.sh/) package manager
-
-**Why it exists:**
-- Ensures reproducible dependency installations
-- Faster than npm's `package-lock.json`
-- Bun can be used as alternative to Node.js/npm
-
-**Do you need it?**
-- ✅ **Keep it** if using Bun as runtime/package manager
-- ✅ **Keep it** for consistency even if using npm (doesn't hurt)
-- Can safely ignore if only using npm/pnpm
-
-### 🗂️ tool-results/ directory
-**Purpose:** Internal working directory for AI assistant
-
-**What's inside:** Temporary read results from large files during development
-
-**Action:** Can be deleted - not needed for production:
-```bash
-rm -rf tool-results/
-```
-
 Add to `.gitignore` if desired.
 
 ---
 
 ## 🔒 Security
 
-### Webhook Signature Verification
-
-Both PayFast and SafePay webhooks verify signatures:
-
-```typescript
-// SafePay uses HMAC-SHA256
-function verifySignature(event) {
-  const expected = crypto
-    .createHmac('sha256', SAFEPAY_CONFIG.webhookSecret)
-    .update(JSON.stringify(event))
-    .digest('hex')
-  
-  return crypto.timingSafeEqual(
-    Buffer.from(expected),
-    Buffer.from(event.signature)
-  )
-}
-```
-
 ### Best Practices
 - Never expose secret keys to client (`NEXT_PUBLIC_` prefix only for public values)
 - Use HTTPS in production
-- Validate all webhook payloads
-- Implement idempotency for webhook processing
+- Validate all payloads server-side
 - Log events for audit trails
 
 ---

@@ -9,8 +9,8 @@
 // Convex via an internal mutation — plaintext passwords stop at TLS into the
 // action, and hash insertion is not publicly invokable.
 //
-// New signups always start with status="pending_activation" — an admin must
-// verify payment before they can generate.
+// New signups are activated instantly (status="active") — payments were
+// removed entirely. Admins can suspend accounts for moderation.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -125,11 +125,11 @@ export async function POST(request: NextRequest) {
       id: result.user.id,
       name: result.user.name,
       email: result.user.email,
-      status: result.user.status ?? 'pending_activation',
+      status: result.user.status ?? 'active',
       planId: result.user.planId ?? null,
     })
 
-    console.log('[API /auth/signup] ✅ Account created successfully (pending activation)')
+    console.log('[API /auth/signup] ✅ Account created successfully (active)')
 
     return NextResponse.json({
       success: true,
@@ -138,7 +138,7 @@ export async function POST(request: NextRequest) {
           id: result.user.id,
           name: result.user.name,
           email: result.user.email,
-          status: result.user.status ?? 'pending_activation',
+          status: result.user.status ?? 'active',
           planId: result.user.planId ?? null,
         },
         sessionToken,

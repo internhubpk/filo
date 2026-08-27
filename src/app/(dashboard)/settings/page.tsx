@@ -84,8 +84,7 @@ export default function SettingsPage() {
   const [notifications, setNotifications] = useState({
     email: true,
     generations: true,
-    billing: true,
-    marketing: false
+    productUpdates: false
   })
 
   const handleSaveProfile = async () => {
@@ -542,17 +541,11 @@ export default function SettingsPage() {
                     description: 'Get notified when your documents are finished generating'
                   },
                   {
-                    key: 'billing' as const,
-                    icon: AlertCircle,
-                    title: 'Billing Alerts',
-                    description: 'Receive alerts about payments, invoices, and subscription changes'
-                  },
-                  {
-                    key: 'marketing' as const,
+                    key: 'productUpdates' as const,
                     icon: Globe,
-                    title: 'Marketing Updates',
-                    description: 'Tips, new features, and product updates (optional)'
-                  }
+                    title: 'Product Updates',
+                    description: 'Important announcements about new features and improvements'
+                  },
                 ].map(({ key, icon: Icon, title, description }) => (
                   <div key={key} className="flex items-center justify-between py-3">
                     <div className="flex items-center gap-3">

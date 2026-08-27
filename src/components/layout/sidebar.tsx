@@ -14,7 +14,6 @@ import {
   Presentation,
   FolderOpen,
   Settings,
-  CreditCard,
   HelpCircle,
   LogOut,
   Menu,
@@ -76,11 +75,6 @@ const secondaryNavItems = [
     title: 'Settings',
     href: '/settings',
     icon: Settings,
-  },
-  {
-    title: 'Billing',
-    href: '/billing',
-    icon: CreditCard,
   },
   {
     title: 'Help',

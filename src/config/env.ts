@@ -8,7 +8,7 @@
 // 2. Admin auth config (server-side only, HTTP-only cookies)
 // 3. App constants (not secrets)
 //
-// ALL API keys, payment credentials, and secrets live in Convex environment.
+// ALL API keys and secrets live in Convex environment.
 // See .env.example for Convex secret configuration.
 // =============================================================================
 
@@ -35,7 +35,6 @@ export const env = {
   // Feature Flags (Public)
   ENABLE_REGISTRATION: true,
   ENABLE_AI_GENERATION: true,
-  ENABLE_PAYMENTS: false, // Enable when Safepay is configured
   ENABLE_ADMIN_PANEL: process.env.NODE_ENV === 'development',
 } as const
 
@@ -48,7 +47,6 @@ export function getPublicConfig() {
     convexUrl: env.CONVEX_URL,
     enableRegistration: env.ENABLE_REGISTRATION,
     enableAiGeneration: env.ENABLE_AI_GENERATION,
-    enablePayments: env.ENABLE_PAYMENTS,
     maxFileSizeMb: env.MAX_FILE_SIZE_MB,
     maxUploadFiles: env.MAX_UPLOAD_FILES,
   }

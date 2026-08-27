@@ -1,16 +1,16 @@
 // =============================================================================
 // GET /api/subscription/status
 // =============================================================================
-// Get current user's activation status and plan details.
+// Get current user's account status and generation quota.
 //
-// In the manual admin-verified payment model, access is gated by the
-// `users.status` field. The values:
-//   - "pending_activation" -> user signed up but admin hasn't verified payment
-//   - "active"             -> admin verified payment; AI generation allowed
-//   - "suspended"          -> admin revoked access
-//
-// We also surface the latest paymentVerification so the client can show
-// "your payment is being reviewed" or "your payment was rejected: <reason>".
+// PAYMENTS REMOVED: there is no payment/subscription gating anymore. Every
+// signup is active instantly; the only blocking state is "suspended"
+// (admin moderation). This endpoint now simply reports:
+//   - accountStatus (from the live DB record, not the 7-day HMAC token)
+//   - hasActiveSubscription = status !== "suspended"   (legacy field name
+//     kept so existing clients keep working)
+//   - plan quota: monthly generation limit + remaining, derived from the
+//     user's assigned plan (default 500/month) and current-month usage.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -39,21 +39,19 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const tokenUserId = session.user.id
-    let status = session.user.status ?? 'pending_activation'
+    const userId = session.user.id
+    let status = session.user.status ?? 'active'
     let userPlanId = session.user.planId ?? null
 
-    // FIX (stale-token-status): the HMAC token embeds the status from login
-    // time and stays valid for up to 7 days. An admin-activated user kept
-    // seeing "pending activation", and a suspended user stayed unlocked,
-    // until they re-authenticated. Re-read the CURRENT status from the
-    // database on every call and fall back to the token value only if the
-    // lookup infrastructure fails.
+    // The HMAC token embeds the status from login time and stays valid for up
+    // to 7 days. Re-read the CURRENT status from the database on every call
+    // so an admin suspension takes effect immediately, and fall back to the
+    // token value only if the lookup infrastructure fails.
     try {
       const { getConvexClient } = await import('@/lib/convex-server')
       const convexUserClient = getConvexClient()
       const dbUser = await convexUserClient.query(api.users.getUser, {
-        userId: tokenUserId as any,
+        userId: userId as any,
       })
       if (!dbUser) {
         // Account was deleted — treat as logged out.
@@ -68,8 +66,6 @@ export async function GET(request: NextRequest) {
       console.warn('[API /subscription/status] Live user lookup failed, using token status:', userErr)
     }
 
-    const userId = tokenUserId
-
     // Fetch plan details if user has one assigned
     const { getConvexClient } = await import('@/lib/convex-server')
     const convex = getConvexClient()
@@ -82,45 +78,38 @@ export async function GET(request: NextRequest) {
       }
     }
 
-    // Determine plan name and limits from real data
-    const planName = planData?.name ?? (status === 'active' ? 'Verified' : 'Pending Activation')
-    const maxGenerations = planData?.maxAiGenerations ?? (status === 'active' ? 500 : 0)
-    const maxStorageMb = planData?.maxStorageMb ?? (status === 'active' ? 5120 : 0)
-    const hasActive = status === 'active'
+    const suspended = status === 'suspended'
 
-    // Try to fetch the latest payment verification for this user so the UI
-    // can show a richer status ("pending review", "rejected: <reason>").
-    let latestVerification: any = null
+    // Determine plan name and limits from real data
+    const planName = planData?.name ?? 'Free'
+    const maxGenerations = suspended ? 0 : (planData?.maxAiGenerations ?? 500)
+    const maxStorageMb = suspended ? 0 : (planData?.maxStorageMb ?? 5120)
+
+    // Current-month usage for a truthful "remaining" number. Degrades
+    // gracefully if the query is unavailable.
+    let used = 0
     try {
-      latestVerification = await convex.query(api.paymentVerifications.getLatestVerification, {
+      const usage = await convex.query(api.subscriptions.getMonthlyAiUsage, {
         userId: userId as any,
       })
-    } catch (verifErr) {
-      console.warn('[API /subscription/status] Could not load latest verification:', verifErr)
+      used = usage?.used ?? 0
+    } catch (usageErr) {
+      console.warn('[API /subscription/status] Usage lookup failed:', usageErr)
     }
+    const remaining = Math.max(0, maxGenerations - used)
 
     return NextResponse.json({
       success: true,
       data: {
-        hasActiveSubscription: hasActive,
+        // Legacy field name kept for client compatibility. "Active" now just
+        // means "not suspended" since payments no longer exist.
+        hasActiveSubscription: !suspended,
         accountStatus: status,
-        remainingGenerations: hasActive ? maxGenerations : 0,
+        remainingGenerations: remaining,
+        usedGenerations: used,
         planLimit: maxGenerations,
         planName,
         planStorageMb: maxStorageMb,
-        latestVerification: latestVerification
-          ? {
-              id: latestVerification._id,
-              status: latestVerification.status,
-              amount: latestVerification.amount,
-              currency: latestVerification.currency,
-              paymentMethod: latestVerification.paymentMethod,
-              transactionId: latestVerification.transactionId,
-              adminNote: latestVerification.adminNote ?? null,
-              createdAt: latestVerification.createdAt,
-              reviewedAt: latestVerification.reviewedAt ?? null,
-            }
-          : null,
       }
     })
 

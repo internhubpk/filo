@@ -32,32 +32,6 @@ export const getPlanById = query({
   },
 });
 
-// Get user's current subscription with plan details
-export const getUserSubscription = query({
-  args: { userId: v.id("users") },
-  handler: async (ctx, args) => {
-    const subscription = await ctx.db
-      .query("subscriptions")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
-      .filter((q) => 
-        q.or(
-          q.eq(q.field("status"), "active"),
-          q.eq(q.field("status"), "trialing")
-        )
-      )
-      .first();
-
-    if (!subscription) return null;
-
-    const plan = await ctx.db.get(subscription.planId);
-    
-    return {
-      ...subscription,
-      plan,
-    };
-  },
-});
-
 // Get usage stats for a user
 export const getUserUsage = query({
   args: { 

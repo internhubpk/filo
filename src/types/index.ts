@@ -195,73 +195,6 @@ export interface Plan {
   updatedAt: number
 }
 
-export interface Subscription {
-  id: string
-  userId: string
-  workspaceId?: string
-  planId: string
-  provider: 'safepay'
-  status: SubscriptionStatus
-  providerCustomerId?: string
-  providerSubscriptionId?: string
-  currentPeriodStart: number
-  currentPeriodEnd: number
-  cancelAtPeriodEnd: boolean
-  createdAt: number
-  updatedAt: number
-}
-
-export type SubscriptionStatus = 
-  | 'active'
-  | 'canceled'
-  | 'past_due'
-  | 'trialing'
-  | 'expired'
-
-// Payment Types
-export interface Payment {
-  id: string
-  userId: string
-  subscriptionId?: string
-  amount: number
-  currency: string // PKR
-  status: PaymentStatus
-  provider: 'safepay'
-  providerPaymentId?: string
-  invoiceId?: string
-  description: string
-  metadata?: Record<string, unknown>
-  createdAt: number
-  updatedAt: number
-}
-
-export type PaymentProvider = 'safepay'
-export type PaymentStatus = 
-  | 'pending'
-  | 'completed'
-  | 'failed'
-  | 'refunded'
-  | 'cancelled'
-
-export interface Invoice {
-  id: string
-  paymentId: string
-  invoiceNumber: string
-  amount: number
-  currency: string
-  status: InvoiceStatus
-  pdfUrl?: string
-  createdAt: number
-}
-
-export type InvoiceStatus = 
-  | 'draft'
-  | 'sent'
-  | 'paid'
-  | 'overdue'
-  | 'cancelled'
-  | 'refunded'
-
 // Usage Tracking Types
 export interface UsageRecord {
   id: string
@@ -303,23 +236,6 @@ export type AiProvider =
   | 'ANTHROPIC'
   | 'GOOGLE'
   | 'LOCAL'
-
-// Webhook Event Types
-export interface WebhookEvent {
-  id: string
-  provider: WebhookProvider
-  eventId: string
-  type: string
-  data: Record<string, unknown>
-  processed: boolean
-  processingError?: string
-  receivedAt: number
-  processedAt?: number
-}
-
-export type WebhookProvider = 
-  | 'safepay'
-  | 'custom'
 
 // Notification Types
 export interface Notification {
@@ -782,40 +698,6 @@ export interface SignedUrlOptions {
   r2Key: string
   expiresInSeconds?: number
   purpose: 'download' | 'upload' | 'preview'
-}
-
-// ==================== PAYMENT TYPES (SAFEPAY) ====================
-
-export interface SafepayConfig {
-  publicKey: string
-  secretKey: string
-  webhookSecret: string
-  isSandbox: boolean
-  returnUrl: string
-  cancelUrl: string
-  webhookUrl: string
-}
-
-export interface SafepayPaymentRequest {
-  amount: number
-  currency: string // PKR
-  itemName: string
-  description?: string
-  email?: string
-  orderId?: string
-}
-
-export interface SafepayWebhookEvent {
-  id: string
-  type: string
-  data: {
-    id: string
-    status: string
-    amount: number
-    currency: string
-    metadata?: Record<string, unknown>
-  }
-  created_at: string
 }
 
 // ==================== API TYPES ====================

@@ -62,15 +62,11 @@ import {
   Moon,
   Star,
   LogOut,
-  Shield,
   Loader2,
   Wifi,
-  WifiOff,
   UserCheck,
   UserX,
-  Clock,
-  Send,
-  ExternalLink
+  Clock
 } from 'lucide-react'
 import { useTheme } from 'next-themes'
 import { useQuery, useMutation } from 'convex/react'
@@ -200,29 +196,13 @@ function AdminDashboard() {
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
   const [planToDelete, setPlanToDelete] = useState<PlanDisplay | null>(null)
 
-  // ===== Manual activation flow state =====
-  // Active tab: "plans" (legacy plan management) or "verifications"
-  // (manual payment verification + user activation).
-  const [activeTab, setActiveTab] = useState<'plans' | 'verifications'>('plans')
+  // ===== Account management state =====
+  // PAYMENTS REMOVED: accounts are activated instantly at signup, so there is
+  // no payment-verification queue anymore. This panel now focuses on direct
+  // user administration (activate / suspend) plus legacy plan management.
+  // Active tab: "users" (account administration) or "plans" (plan CRUD).
+  const [activeTab, setActiveTab] = useState<'users' | 'plans'>('users')
 
-  // Verifications data - fetched from /api/admin/verifications (cookie-auth)
-  interface AdminVerification {
-    _id: string
-    userId: string
-    planId?: string
-    amount: number
-    currency: string
-    paymentMethod: string
-    transactionId: string
-    proofUrl?: string
-    notes?: string
-    status: 'pending' | 'approved' | 'rejected'
-    reviewedBy?: string
-    reviewedAt?: number
-    adminNote?: string
-    createdAt: number
-    updatedAt: number
-  }
   interface AdminUser {
     id: string
     name: string
@@ -234,22 +214,11 @@ function AdminDashboard() {
     createdAt: number
     updatedAt: number
   }
-  const [verifications, setVerifications] = useState<AdminVerification[]>([])
   const [allUsers, setAllUsers] = useState<AdminUser[]>([])
-  const [verificationsLoading, setVerificationsLoading] = useState(false)
-  const [verificationsError, setVerificationsError] = useState<string | null>(null)
-  const [verificationsFilter, setVerificationsFilter] = useState<'pending' | 'all'>('pending')
+  const [usersLoading, setUsersLoading] = useState(false)
+  const [usersError, setUsersError] = useState<string | null>(null)
 
-  // Approve/reject dialog state
-  const [reviewDialog, setReviewDialog] = useState<{
-    open: boolean
-    verification: AdminVerification | null
-    action: 'approve' | 'reject'
-    adminNote: string
-  }>({ open: false, verification: null, action: 'approve', adminNote: '' })
-
-  // Manual activate-by-user dialog state (admin can also bypass verifications
-  // and activate a user directly without a payment submission)
+  // Manual user-status dialog state (activate / suspend).
   const [userActionDialog, setUserActionDialog] = useState<{
     open: boolean
     user: AdminUser | null
@@ -257,36 +226,30 @@ function AdminDashboard() {
     note: string
   }>({ open: false, user: null, action: 'activate', note: '' })
 
-  // Fetch the verifications list + all users list from the admin API.
-  const refreshVerifications = async () => {
-    setVerificationsLoading(true)
-    setVerificationsError(null)
+  // Fetch the users list from the admin API.
+  const refreshUsers = async () => {
+    setUsersLoading(true)
+    setUsersError(null)
     try {
-      const [verifResp, usersResp] = await Promise.all([
-        apiClient.adminListVerifications(verificationsFilter),
-        apiClient.adminListUsers(),
-      ])
-      if (verifResp.success && verifResp.data) {
-        setVerifications(verifResp.data as AdminVerification[])
-      } else {
-        setVerificationsError(verifResp.error || 'Failed to load verifications')
-      }
+      const usersResp = await apiClient.adminListUsers()
       if (usersResp.success && usersResp.data) {
         setAllUsers((usersResp.data as any).all ?? [])
+      } else {
+        setUsersError(usersResp.error || 'Failed to load users')
       }
     } catch (err: any) {
-      setVerificationsError(err.message || 'Failed to load admin data')
+      setUsersError(err.message || 'Failed to load admin data')
     } finally {
-      setVerificationsLoading(false)
+      setUsersLoading(false)
     }
   }
 
-  // Load verifications on first tab open and whenever filter changes
+  // Load users when the Users tab opens.
   useEffect(() => {
-    if (activeTab === 'verifications') {
-      refreshVerifications()
+    if (activeTab === 'users') {
+      refreshUsers()
     }
-  }, [activeTab, verificationsFilter])
+  }, [activeTab])
 
   // Show notification helper
   const showNotification = (type: 'success' | 'error', message: string) => {
@@ -294,73 +257,9 @@ function AdminDashboard() {
     setTimeout(() => setNotification(null), 4000)
   }
 
-  // ===== Verification review handlers (manual activation flow) =====
-
-  // Approve a payment verification. This unlocks the user's account
-  // so they can immediately perform AI generation.
-  const handleApproveVerification = async () => {
-    if (!reviewDialog.verification) return
-    setIsSaving(true)
-    try {
-      const v = reviewDialog.verification
-      const resp = await apiClient.adminApproveVerification(
-        v._id,
-        reviewDialog.adminNote.trim() || undefined,
-      )
-      if (!resp.success) {
-        showNotification('error', resp.error || 'Failed to approve verification')
-      } else {
-        showNotification('success', `Approved ${v.transactionId} - user activated`)
-        // Optimistically update the local list
-        setVerifications(prev =>
-          prev.map(x => x._id === v._id ? { ...x, status: 'approved', adminNote: reviewDialog.adminNote, reviewedAt: Date.now() } : x)
-        )
-        // Refresh to pull fresh user status too
-        await refreshVerifications()
-      }
-    } catch (err: any) {
-      showNotification('error', err.message || 'Failed to approve verification')
-    } finally {
-      setIsSaving(false)
-      setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
-    }
-  }
-
-  // Reject a payment verification with a reason. The user remains in
-  // their current status (typically pending_activation) and the reason
-  // is surfaced back to them on /billing so they can re-submit.
-  const handleRejectVerification = async () => {
-    if (!reviewDialog.verification) return
-    if (!reviewDialog.adminNote.trim()) {
-      showNotification('error', 'A reason is required when rejecting a verification')
-      return
-    }
-    setIsSaving(true)
-    try {
-      const v = reviewDialog.verification
-      const resp = await apiClient.adminRejectVerification(
-        v._id,
-        reviewDialog.adminNote.trim(),
-      )
-      if (!resp.success) {
-        showNotification('error', resp.error || 'Failed to reject verification')
-      } else {
-        showNotification('success', `Rejected ${v.transactionId} - reason sent to user`)
-        setVerifications(prev =>
-          prev.map(x => x._id === v._id ? { ...x, status: 'rejected', adminNote: reviewDialog.adminNote, reviewedAt: Date.now() } : x)
-        )
-        await refreshVerifications()
-      }
-    } catch (err: any) {
-      showNotification('error', err.message || 'Failed to reject verification')
-    } finally {
-      setIsSaving(false)
-      setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
-    }
-  }
-
-  // Direct user status management (bypassing the verification flow).
-  // Useful for granting access to internal/team users or revoking access.
+  // Direct user status management (activate / suspend).
+  // Useful for revoking access (suspension blocks AI generation) or
+  // re-activating suspended / legacy pending accounts.
   const handleUserAction = async () => {
     if (!userActionDialog.user) return
     setIsSaving(true)
@@ -373,7 +272,7 @@ function AdminDashboard() {
         showNotification('error', resp.error || `Failed to ${userActionDialog.action} user`)
       } else {
         showNotification('success', `${u.email} ${userActionDialog.action === 'activate' ? 'activated' : 'suspended'}`)
-        await refreshVerifications()
+        await refreshUsers()
       }
     } catch (err: any) {
       showNotification('error', err.message || 'Failed to update user')
@@ -582,7 +481,7 @@ function AdminDashboard() {
   }
 
   // Loading state while Convex connects (only required for plans tab;
-  // verifications tab fetches its own data via the admin API).
+  // users tab fetches its own data via the admin API).
   if (activeTab === 'plans' && plans === undefined) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -669,6 +568,17 @@ function AdminDashboard() {
         {/* Tab Switcher */}
         <div className="flex items-center gap-2 mb-6 border-b">
           <button
+            onClick={() => setActiveTab('users')}
+            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-md transition-colors cursor-pointer ${
+              activeTab === 'users'
+                ? 'bg-background text-foreground border border-b-0'
+                : 'text-muted-foreground hover:text-foreground'
+            }`}
+          >
+            <UserCheck className="h-4 w-4" />
+            Users
+          </button>
+          <button
             onClick={() => setActiveTab('plans')}
             className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-md transition-colors cursor-pointer ${
               activeTab === 'plans'
@@ -679,66 +589,35 @@ function AdminDashboard() {
             <Settings2 className="h-4 w-4" />
             Plans
           </button>
-          <button
-            onClick={() => setActiveTab('verifications')}
-            className={`flex items-center gap-2 px-4 py-2 text-sm font-medium rounded-t-md transition-colors cursor-pointer ${
-              activeTab === 'verifications'
-                ? 'bg-background text-foreground border border-b-0'
-                : 'text-muted-foreground hover:text-foreground'
-            }`}
-          >
-            <UserCheck className="h-4 w-4" />
-            User Verifications
-            {verifications.filter(v => v.status === 'pending').length > 0 && (
-              <Badge variant="destructive" className="ml-1 text-xs cursor-default">
-                {verifications.filter(v => v.status === 'pending').length}
-              </Badge>
-            )}
-          </button>
         </div>
 
-        {/* ===== VERIFICATIONS TAB ===== */}
-        {activeTab === 'verifications' && (
+        {/* ===== USERS TAB (payments removed: direct account administration) ===== */}
+        {activeTab === 'users' && (
           <div className="space-y-6">
             {/* Page Header */}
             <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
               <div>
-                <h2 className="text-2xl md:text-3xl font-bold tracking-tight">User Verifications</h2>
+                <h2 className="text-2xl md:text-3xl font-bold tracking-tight">Account Management</h2>
                 <p className="text-muted-foreground mt-1 text-sm md:text-base">
-                  Review payment submissions and activate user accounts
+                  Every signup is active instantly. Suspend an account to revoke AI generation access.
                 </p>
               </div>
-              <div className="flex items-center gap-2">
-                {/* Pending / All filter */}
-                <Select
-                  value={verificationsFilter}
-                  onValueChange={(v) => setVerificationsFilter(v as 'pending' | 'all')}
-                >
-                  <SelectTrigger className="w-[140px] cursor-pointer">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectItem value="pending" className="cursor-pointer">Pending only</SelectItem>
-                    <SelectItem value="all" className="cursor-pointer">All submissions</SelectItem>
-                  </SelectContent>
-                </Select>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={refreshVerifications}
-                  disabled={verificationsLoading}
-                  className="gap-2 cursor-pointer"
-                >
-                  <RefreshCw className={`h-4 w-4 ${verificationsLoading ? 'animate-spin' : ''}`} />
-                  Refresh
-                </Button>
-              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={refreshUsers}
+                disabled={usersLoading}
+                className="gap-2 cursor-pointer"
+              >
+                <RefreshCw className={`h-4 w-4 ${usersLoading ? 'animate-spin' : ''}`} />
+                Refresh
+              </Button>
             </div>
 
-            {verificationsError && (
+            {usersError && (
               <div className="bg-red-50 dark:bg-red-950 border border-red-200 dark:border-red-800 text-red-700 dark:text-red-300 rounded-lg p-4 text-sm">
                 <AlertCircle className="h-4 w-4 inline mr-2" />
-                {verificationsError}
+                {usersError}
               </div>
             )}
 
@@ -796,238 +675,6 @@ function AdminDashboard() {
               </Card>
             </div>
 
-            {/* Verifications table */}
-            <Card className="overflow-hidden">
-              <CardHeader className="pb-4 px-4 md:px-6">
-                <CardTitle className="text-base md:text-lg flex items-center gap-2">
-                  Payment Verifications
-                  <Badge variant="secondary" className="text-xs ml-2 cursor-default">
-                    {verificationsFilter === 'pending' ? 'Pending' : 'All'}
-                  </Badge>
-                </CardTitle>
-                <CardDescription>
-                  Review each submission and approve (activates user) or reject (with reason)
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="px-0 md:px-6 pb-0 md:pb-6">
-                {verificationsLoading ? (
-                  <div className="text-center py-12">
-                    <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
-                    <p className="text-sm text-muted-foreground mt-3">Loading verifications...</p>
-                  </div>
-                ) : verifications.length === 0 ? (
-                  <div className="text-center py-12 px-4">
-                    <div className="h-16 w-16 rounded-full bg-muted flex items-center justify-center mx-auto mb-4">
-                      <Check className="h-8 w-8 text-muted-foreground" />
-                    </div>
-                    <h3 className="text-lg font-medium mb-2">No {verificationsFilter === 'pending' ? 'pending ' : ''}submissions</h3>
-                    <p className="text-muted-foreground text-sm">
-                      {verificationsFilter === 'pending'
-                        ? 'New payment submissions will appear here for your review.'
-                        : 'No payment verifications have been submitted yet.'}
-                    </p>
-                  </div>
-                ) : (
-                  <div className="hidden md:block overflow-x-auto">
-                    <Table>
-                      <TableHeader>
-                        <TableRow>
-                          <TableHead className="w-[180px]">User</TableHead>
-                          <TableHead className="w-[160px]">Transaction</TableHead>
-                          <TableHead className="w-[120px]">Amount</TableHead>
-                          <TableHead className="w-[120px]">Method</TableHead>
-                          <TableHead className="w-[100px]">Status</TableHead>
-                          <TableHead className="w-[120px]">Submitted</TableHead>
-                          <TableHead className="w-[180px] text-right">Actions</TableHead>
-                        </TableRow>
-                      </TableHeader>
-                      <TableBody>
-                        {verifications.map((v) => {
-                          const user = allUsers.find(u => u.id === v.userId)
-                          return (
-                            <TableRow key={v._id}>
-                              <TableCell>
-                                <div className="flex flex-col">
-                                  <span className="font-medium text-sm">{user?.name ?? 'Unknown user'}</span>
-                                  <span className="text-xs text-muted-foreground">{user?.email ?? v.userId}</span>
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <div className="flex flex-col">
-                                  <span className="font-mono text-xs">{v.transactionId}</span>
-                                  {v.notes && (
-                                    <span className="text-xs text-muted-foreground truncate max-w-[160px]">
-                                      {v.notes}
-                                    </span>
-                                  )}
-                                </div>
-                              </TableCell>
-                              <TableCell>
-                                <span className="font-medium text-sm">
-                                  {v.currency} {v.amount.toLocaleString()}
-                                </span>
-                              </TableCell>
-                              <TableCell className="capitalize text-sm">
-                                {v.paymentMethod.replace('_', ' ')}
-                              </TableCell>
-                              <TableCell>
-                                {v.status === 'approved' ? (
-                                  <Badge className="bg-green-600 cursor-default">approved</Badge>
-                                ) : v.status === 'rejected' ? (
-                                  <Badge variant="destructive" className="cursor-default">rejected</Badge>
-                                ) : (
-                                  <Badge variant="secondary" className="cursor-default">pending</Badge>
-                                )}
-                              </TableCell>
-                              <TableCell className="text-xs text-muted-foreground">
-                                {new Date(v.createdAt).toLocaleDateString('en-PK', {
-                                  month: 'short',
-                                  day: 'numeric',
-                                  hour: '2-digit',
-                                  minute: '2-digit',
-                                })}
-                              </TableCell>
-                              <TableCell className="text-right">
-                                <div className="flex justify-end gap-1.5">
-                                  {v.proofUrl && (
-                                    <Button
-                                      variant="ghost"
-                                      size="sm"
-                                      asChild
-                                      className="cursor-pointer h-8 w-8 p-0"
-                                      title="View receipt"
-                                    >
-                                      <a href={v.proofUrl} target="_blank" rel="noopener noreferrer">
-                                        <ExternalLink className="h-3.5 w-3.5" />
-                                      </a>
-                                    </Button>
-                                  )}
-                                  {v.status === 'pending' && (
-                                    <>
-                                      <Button
-                                        size="sm"
-                                        className="gap-1.5 cursor-pointer h-8 text-xs"
-                                        onClick={() => setReviewDialog({
-                                          open: true,
-                                          verification: v,
-                                          action: 'approve',
-                                          adminNote: '',
-                                        })}
-                                      >
-                                        <Check className="h-3.5 w-3.5" /> Approve
-                                      </Button>
-                                      <Button
-                                        variant="destructive"
-                                        size="sm"
-                                        className="gap-1.5 cursor-pointer h-8 text-xs"
-                                        onClick={() => setReviewDialog({
-                                          open: true,
-                                          verification: v,
-                                          action: 'reject',
-                                          adminNote: '',
-                                        })}
-                                      >
-                                        <X className="h-3.5 w-3.5" /> Reject
-                                      </Button>
-                                    </>
-                                  )}
-                                  {v.status !== 'pending' && v.adminNote && (
-                                    <span className="text-xs text-muted-foreground italic max-w-[160px] truncate">
-                                      "{v.adminNote}"
-                                    </span>
-                                  )}
-                                </div>
-                              </TableCell>
-                            </TableRow>
-                          )
-                        })}
-                      </TableBody>
-                    </Table>
-                  </div>
-                )}
-
-                {/* Mobile cards view */}
-                {!verificationsLoading && verifications.length > 0 && (
-                  <div className="md:hidden space-y-3 px-4 pb-4">
-                    {verifications.map((v) => {
-                      const user = allUsers.find(u => u.id === v.userId)
-                      return (
-                        <Card key={v._id} className="p-4">
-                          <div className="flex items-start justify-between mb-3">
-                            <div>
-                              <div className="font-medium text-sm">{user?.name ?? 'Unknown user'}</div>
-                              <div className="text-xs text-muted-foreground">{user?.email ?? v.userId}</div>
-                            </div>
-                            {v.status === 'approved' ? (
-                              <Badge className="bg-green-600 cursor-default">approved</Badge>
-                            ) : v.status === 'rejected' ? (
-                              <Badge variant="destructive" className="cursor-default">rejected</Badge>
-                            ) : (
-                              <Badge variant="secondary" className="cursor-default">pending</Badge>
-                            )}
-                          </div>
-                          <div className="grid grid-cols-2 gap-2 mb-3 text-sm">
-                            <div>
-                              <div className="text-muted-foreground text-xs">Transaction</div>
-                              <div className="font-mono text-xs">{v.transactionId}</div>
-                            </div>
-                            <div>
-                              <div className="text-muted-foreground text-xs">Amount</div>
-                              <div className="font-medium">{v.currency} {v.amount.toLocaleString()}</div>
-                            </div>
-                            <div>
-                              <div className="text-muted-foreground text-xs">Method</div>
-                              <div className="font-medium capitalize">{v.paymentMethod.replace('_', ' ')}</div>
-                            </div>
-                            <div>
-                              <div className="text-muted-foreground text-xs">Submitted</div>
-                              <div className="font-medium text-xs">
-                                {new Date(v.createdAt).toLocaleDateString('en-PK', { month: 'short', day: 'numeric' })}
-                              </div>
-                            </div>
-                          </div>
-                          {v.adminNote && (
-                            <div className="text-xs italic text-muted-foreground bg-muted/50 p-2 rounded mb-3">
-                              "{v.adminNote}"
-                            </div>
-                          )}
-                          {v.status === 'pending' && (
-                            <div className="flex gap-2">
-                              <Button
-                                size="sm"
-                                className="gap-1.5 cursor-pointer flex-1"
-                                onClick={() => setReviewDialog({
-                                  open: true,
-                                  verification: v,
-                                  action: 'approve',
-                                  adminNote: '',
-                                })}
-                              >
-                                <Check className="h-3.5 w-3.5" /> Approve
-                              </Button>
-                              <Button
-                                variant="destructive"
-                                size="sm"
-                                className="gap-1.5 cursor-pointer flex-1"
-                                onClick={() => setReviewDialog({
-                                  open: true,
-                                  verification: v,
-                                  action: 'reject',
-                                  adminNote: '',
-                                })}
-                              >
-                                <X className="h-3.5 w-3.5" /> Reject
-                              </Button>
-                            </div>
-                          )}
-                        </Card>
-                      )
-                    })}
-                  </div>
-                )}
-              </CardContent>
-            </Card>
-
             {/* All users table - direct activate/suspend */}
             <Card className="overflow-hidden">
               <CardHeader className="pb-4 px-4 md:px-6">
@@ -1038,11 +685,16 @@ function AdminDashboard() {
                   </Badge>
                 </CardTitle>
                 <CardDescription>
-                  Direct account management (bypasses the verification flow)
+                  Activate or suspend accounts. Suspension blocks AI generation until reactivated.
                 </CardDescription>
               </CardHeader>
               <CardContent className="px-0 md:px-6 pb-0 md:pb-6">
-                {allUsers.length === 0 ? (
+                {usersLoading ? (
+                  <div className="text-center py-12">
+                    <Loader2 className="h-8 w-8 animate-spin mx-auto text-muted-foreground" />
+                    <p className="text-sm text-muted-foreground mt-3">Loading users...</p>
+                  </div>
+                ) : allUsers.length === 0 ? (
                   <div className="text-center py-12">
                     <Users className="h-12 w-12 mx-auto text-muted-foreground opacity-50 mb-3" />
                     <p className="text-sm text-muted-foreground">No users yet</p>
@@ -1114,6 +766,73 @@ function AdminDashboard() {
                         ))}
                       </TableBody>
                     </Table>
+                  </div>
+                )}
+
+                {/* Mobile cards view */}
+                {!usersLoading && allUsers.length > 0 && (
+                  <div className="md:hidden space-y-3 px-4 pb-4">
+                    {allUsers.map((u) => (
+                      <Card key={u.id} className="p-4">
+                        <div className="flex items-start justify-between mb-3">
+                          <div>
+                            <div className="font-medium text-sm">{u.name}</div>
+                            <div className="text-xs text-muted-foreground">{u.email}</div>
+                          </div>
+                          {u.status === 'active' ? (
+                            <Badge className="bg-green-600 cursor-default">active</Badge>
+                          ) : u.status === 'suspended' ? (
+                            <Badge variant="destructive" className="cursor-default">suspended</Badge>
+                          ) : (
+                            <Badge variant="secondary" className="cursor-default">pending</Badge>
+                          )}
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 mb-3 text-sm">
+                          <div>
+                            <div className="text-muted-foreground text-xs">Status</div>
+                            <div className="font-medium capitalize">{u.status.replace('_', ' ')}</div>
+                          </div>
+                          <div>
+                            <div className="text-muted-foreground text-xs">Activated</div>
+                            <div className="font-medium text-xs">
+                              {u.activatedAt ? new Date(u.activatedAt).toLocaleDateString('en-PK', { month: 'short', day: 'numeric' }) : '—'}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="flex gap-2">
+                          <Button
+                            size="sm"
+                            variant={u.status === 'active' ? 'outline' : 'default'}
+                            disabled={u.status === 'active' || isSaving}
+                            className="gap-1.5 cursor-pointer flex-1"
+                            onClick={() => setUserActionDialog({
+                              open: true,
+                              user: u,
+                              action: 'activate',
+                              note: '',
+                            })}
+                          >
+                            <UserCheck className="h-3.5 w-3.5" /> Activate
+                          </Button>
+                          {u.status !== 'suspended' && (
+                            <Button
+                              size="sm"
+                              variant="outline"
+                              disabled={isSaving}
+                              className="gap-1.5 cursor-pointer flex-1 text-red-600 hover:text-red-700 hover:bg-red-50"
+                              onClick={() => setUserActionDialog({
+                                open: true,
+                                user: u,
+                                action: 'suspend',
+                                note: '',
+                              })}
+                            >
+                              <UserX className="h-3.5 w-3.5" /> Suspend
+                            </Button>
+                          )}
+                        </div>
+                      </Card>
+                    ))}
                   </div>
                 )}
               </CardContent>
@@ -1679,111 +1398,6 @@ function AdminDashboard() {
         </Card>
           </>
         )}
-
-        {/* ===== Review Verification Dialog (approve/reject) ===== */}
-        <Dialog open={reviewDialog.open} onOpenChange={(open) => {
-          setReviewDialog(prev => ({ ...prev, open }))
-          if (!open) {
-            setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })
-          }
-        }}>
-          <DialogContent className="mx-4 sm:mx-0 max-w-md">
-            <DialogHeader>
-              <DialogTitle className="flex items-center gap-2 text-xl">
-                {reviewDialog.action === 'approve' ? (
-                  <>
-                    <UserCheck className="h-5 w-5 text-green-600" />
-                    Approve Verification
-                  </>
-                ) : (
-                  <>
-                    <UserX className="h-5 w-5 text-red-600" />
-                    Reject Verification
-                  </>
-                )}
-              </DialogTitle>
-              <DialogDescription>
-                {reviewDialog.action === 'approve'
-                  ? 'This will activate the user account and unlock AI generation immediately.'
-                  : 'Provide a reason for rejection. The user will see this note on their billing page.'}
-              </DialogDescription>
-            </DialogHeader>
-
-            {reviewDialog.verification && (
-              <div className="bg-muted/50 rounded-lg p-4 space-y-2 my-4 border">
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Transaction</span>
-                  <span className="font-mono">{reviewDialog.verification.transactionId}</span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Amount</span>
-                  <span className="font-medium">
-                    {reviewDialog.verification.currency} {reviewDialog.verification.amount.toLocaleString()}
-                  </span>
-                </div>
-                <div className="flex justify-between text-sm">
-                  <span className="text-muted-foreground">Method</span>
-                  <span className="font-medium capitalize">
-                    {reviewDialog.verification.paymentMethod.replace('_', ' ')}
-                  </span>
-                </div>
-                {reviewDialog.verification.notes && (
-                  <div className="border-t pt-2 mt-2">
-                    <p className="text-xs text-muted-foreground mb-1">User notes:</p>
-                    <p className="text-sm">{reviewDialog.verification.notes}</p>
-                  </div>
-                )}
-              </div>
-            )}
-
-            <div className="space-y-2">
-              <Label htmlFor="admin-note">
-                {reviewDialog.action === 'approve' ? 'Note (optional)' : 'Reason for rejection *'}
-              </Label>
-              <Textarea
-                id="admin-note"
-                placeholder={
-                  reviewDialog.action === 'approve'
-                    ? 'Optional note for the user (e.g. "Welcome to Filo!")'
-                    : 'Required - e.g. "Transaction ID not found in our records. Please verify and resubmit."'
-                }
-                value={reviewDialog.adminNote}
-                onChange={(e) => setReviewDialog(prev => ({ ...prev, adminNote: e.target.value }))}
-                rows={3}
-                className="cursor-text"
-              />
-            </div>
-
-            <DialogFooter className="flex-col sm:flex-row gap-2">
-              <Button
-                variant="outline"
-                onClick={() => setReviewDialog({ open: false, verification: null, action: 'approve', adminNote: '' })}
-                disabled={isSaving}
-                className="w-full sm:w-auto cursor-pointer"
-              >
-                Cancel
-              </Button>
-              <Button
-                variant={reviewDialog.action === 'approve' ? 'default' : 'destructive'}
-                onClick={reviewDialog.action === 'approve' ? handleApproveVerification : handleRejectVerification}
-                disabled={isSaving || (reviewDialog.action === 'reject' && !reviewDialog.adminNote.trim())}
-                className="w-full sm:w-auto gap-2 cursor-pointer"
-              >
-                {isSaving ? (
-                  <>
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    {reviewDialog.action === 'approve' ? 'Approving...' : 'Rejecting...'}
-                  </>
-                ) : (
-                  <>
-                    {reviewDialog.action === 'approve' ? <Check className="h-4 w-4" /> : <X className="h-4 w-4" />}
-                    {reviewDialog.action === 'approve' ? 'Approve & Activate' : 'Reject with Reason'}
-                  </>
-                )}
-              </Button>
-            </DialogFooter>
-          </DialogContent>
-        </Dialog>
 
         {/* ===== User Action Dialog (direct activate/suspend) ===== */}
         <Dialog open={userActionDialog.open} onOpenChange={(open) => {

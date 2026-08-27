@@ -116,7 +116,7 @@ export async function POST(request: NextRequest) {
           id: result.user.id,
           name: result.user.name,
           email: result.user.email,
-          status: result.user.status ?? 'pending_activation',
+          status: result.user.status ?? 'active',
           planId: result.user.planId ?? null,
         },
         sessionToken,

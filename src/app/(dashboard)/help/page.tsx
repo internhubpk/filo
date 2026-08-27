@@ -13,7 +13,6 @@ import {
   ExternalLink,
   FileText,
   Sparkles,
-  CreditCard,
   Upload,
   Download,
   Settings
@@ -29,12 +28,12 @@ const faqItems = [
     answer: 'Filo supports DOCX for documents, XLSX and CSV for spreadsheets, and PPTX for presentations. You can also upload PDF, DOCX, XLSX, and PPTX files as reference material.'
   },
   {
-    question: 'How does billing work?',
-    answer: 'After signing up, your account starts in pending_activation status. Submit your payment proof through the Billing page. Once verified by our team, your account will be activated with your selected plan limits.'
+    question: 'Do I need to pay to use Filo?',
+    answer: 'No. Payments have been removed for now — every account is activated instantly when you sign up, and you can start generating documents right away. Your account includes a monthly AI generation allowance.'
   },
   {
     question: 'What are the generation limits?',
-    answer: 'Generation limits depend on your subscription plan. Visit the Billing page to see your current plan details, usage, and limits. You can upgrade your plan at any time for higher limits.'
+    answer: 'Every account includes a monthly AI generation allowance (500 generations per month by default). When you approach the limit, the dashboard shows your remaining quota. Limits reset automatically at the start of each month.'
   },
   {
     question: 'How do I download my generated files?',
@@ -50,8 +49,7 @@ const quickLinks = [
   { title: 'Getting Started Guide', icon: BookOpen, description: 'Learn the basics of using Filo', href: '#' },
   { title: 'Document Generation', icon: Sparkles, description: 'How to generate documents with AI', href: '/' },
   { title: 'Upload Files', icon: Upload, description: 'Upload and manage your reference files', href: '/files' },
-  { title: 'Billing & Plans', icon: CreditCard, description: 'Manage your subscription and payments', href: '/billing' },
-  { title: 'Settings', icon: Settings, description: 'Configure your account preferences', href: '/settings' },
+  { title: 'Account Settings', icon: Settings, description: 'Configure your account preferences', href: '/settings' },
   { title: 'Download Files', icon: Download, description: 'Access and download your documents', href: '/documents' },
 ]
 
