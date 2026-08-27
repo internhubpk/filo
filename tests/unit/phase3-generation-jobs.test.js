@@ -194,8 +194,10 @@ test('resumability: startGenerationJob supports resumeJobId + crash recovery', (
     'worker must expose a unit-loop that can resume from pending units'
   )
   // Blueprint is persisted on the job so a resume doesn't re-plan.
+  // (The validator was loosened to v.any() — v.object({}) rejects every real
+  // blueprint payload in Convex, breaking initializeUnits at runtime.)
   assert.ok(
-    /blueprint: v\.optional\(v\.object\(\{\}\)\)/.test(schema),
+    /blueprint:\s*v\.optional\(v\./.test(schema),
     'generationJobs.blueprint must be persisted for resume-without-replan'
   )
 })

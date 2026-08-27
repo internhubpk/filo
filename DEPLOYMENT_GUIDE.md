@@ -324,3 +324,41 @@ The webhook handler uses HMAC-SHA256 signature verification:
 - In **production mode**: Full HMAC-SHA256 verification using `SAFEPAY_WEBHOOK_SECRET`
 - All events are recorded in `webhookEvents` table for audit trail
 - Idempotent: Duplicate events are silently ignored
+
+---
+
+## 🔐 ADMIN PANEL AUTHENTICATION (Updated)
+
+The admin panel uses **environment-credential login with HMAC-signed HTTP-only
+cookies**. Previously any registered user could obtain an admin session — this
+has been fixed.
+
+### Required environment variables (Vercel + local `.env`)
+
+| Variable | Required | Purpose |
+|----------|----------|---------|
+| `ADMIN_USERNAME` | yes (defaults to `admin`) | Admin panel username |
+| `ADMIN_PASSWORD` | **yes** | Admin panel password. Without it the panel returns `503 ADMIN_NOT_CONFIGURED`. |
+| `ADMIN_SESSION_SECRET` | strongly recommended | Key used to sign admin session cookies. Falls back to `SESSION_SECRET`/`CONVEX_URL`; set a long random value in production. |
+
+### Login flow
+
+```
+Browser → /admin/login → POST /api/auth/admin/login (username+password vs env)
+        → issues HttpOnly `admin_session` cookie = base64url(payload).base64url(HMAC-SHA256)
+Every /admin page  → middleware cryptographically verifies the cookie signature + expiry
+Every /api/admin/* → shared requireAdmin()/isAdminRequest() verification (src/lib/admin-auth.ts)
+```
+
+Note: regular product accounts (login at `/`) can NEVER access `/admin`.
+
+### Convex function changes that must be deployed
+
+Run `npx convex deploy` after pulling these changes so the backend matches:
+
+- `users.getUserAuthDataByEmail` (new, internal) — credential checks inside Convex
+- `users.createUserWithPassword`, `sessions.createSession`, `sessions.deleteSession`
+  → now INTERNAL mutations (not publicly callable)
+- `sessions.createSessionByEmail` — removed
+- `subscriptions.getMonthlyAiUsage` (new public query) — monthly quota enforcement
+- Password hashes are stripped from ALL public user queries

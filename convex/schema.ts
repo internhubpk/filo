@@ -141,7 +141,7 @@ export default defineSchema({
     ),
     fileId: v.optional(v.id("files")),
     versionCount: v.number(),
-    metadata: v.optional(v.object({})),
+    metadata: v.optional(v.any()),
     brandId: v.optional(v.id("brands")),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -183,7 +183,7 @@ export default defineSchema({
     amount: v.number(),
     periodStart: v.number(),
     periodEnd: v.number(),
-    metadata: v.optional(v.object({})),
+    metadata: v.optional(v.any()),
     createdAt: v.number(),
   })
     .index("by_userId", ["userId"])
@@ -210,7 +210,7 @@ export default defineSchema({
     providerPaymentId: v.optional(v.string()),
     invoiceId: v.optional(v.string()),
     description: v.string(),
-    metadata: v.optional(v.object({})),
+    metadata: v.optional(v.any()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -224,7 +224,7 @@ export default defineSchema({
     provider: v.union(v.literal("safepay"), v.literal("custom")),
     eventId: v.string(),
     type: v.string(),
-    data: v.object({}),
+    data: v.any(),
     processed: v.boolean(),
     processingError: v.optional(v.string()),
     receivedAt: v.number(),
@@ -238,7 +238,7 @@ export default defineSchema({
     name: v.string(),
     description: v.optional(v.string()),
     ownerId: v.id("users"),
-    settings: v.optional(v.object({})),
+    settings: v.optional(v.any()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -287,9 +287,9 @@ export default defineSchema({
     workspaceId: v.optional(v.id("workspaces")),
     name: v.string(),
     logoUrl: v.optional(v.string()),
-    colors: v.optional(v.object({})),
-    fonts: v.optional(v.object({})),
-    contactInfo: v.optional(v.object({})),
+    colors: v.optional(v.any()),
+    fonts: v.optional(v.any()),
+    contactInfo: v.optional(v.any()),
     footerText: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
@@ -345,7 +345,7 @@ export default defineSchema({
 
     // Blueprint (the plan) persisted so units can be generated/resumed
     // independently, and so a resumed job doesn't re-plan.
-    blueprint: v.optional(v.object({})),
+    blueprint: v.optional(v.any()),
 
     // Failure info
     error: v.optional(v.string()),
@@ -373,8 +373,8 @@ export default defineSchema({
       v.literal("failed"),
       v.literal("skipped")
     ),
-    content: v.optional(v.object({})), // structured GeneratedSection JSON
-    metadata: v.optional(v.object({})),
+    content: v.optional(v.any()), // structured GeneratedSection JSON
+    metadata: v.optional(v.any()),
     attempts: v.number(),
     error: v.optional(v.string()),
     inputTokens: v.optional(v.number()),

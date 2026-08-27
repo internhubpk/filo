@@ -1,20 +1,43 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { generateDownloadUrl, fileExistsInR2 } from '@/lib/r2/client'
+import { validateSessionToken } from '@/lib/session'
 
 // GET /api/files/[fileId]/download - Generate download URL or redirect
-// This endpoint provides a download link for a specific file
+// This endpoint provides a download link for a specific file.
+// SECURITY: requires a valid session; callers may only access keys under
+// their own uploads/{userId}/ prefix.
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ fileId: string }> }
 ) {
   try {
+    // ---- Auth (was missing) ----
+    const authHeader = request.headers.get('authorization')
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+    const session = token ? validateSessionToken(token) : null
+
+    if (!session?.valid || !session.user) {
+      return NextResponse.json(
+        { success: false, error: 'Authentication required', code: 'UNAUTHORIZED' },
+        { status: 401 }
+      )
+    }
+
     const { fileId } = await params
-    
+
     if (!fileId) {
       return NextResponse.json(
         { error: 'File ID required', code: 'MISSING_FILE_ID' },
         { status: 400 }
+      )
+    }
+
+    // Ownership: files are stored under uploads/{userId}/... — no cross-user reads.
+    if (!fileId.startsWith(`uploads/${session.user.id}/`)) {
+      return NextResponse.json(
+        { error: 'Access denied for this file', code: 'FORBIDDEN_FILE' },
+        { status: 403 }
       )
     }
 
@@ -82,8 +105,20 @@ export async function DELETE(
   { params }: { params: Promise<{ fileId: string }> }
 ) {
   try {
+    // ---- Auth (was missing — previously anyone could delete any object) ----
+    const authHeader = request.headers.get('authorization')
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+    const session = token ? validateSessionToken(token) : null
+
+    if (!session?.valid || !session.user) {
+      return NextResponse.json(
+        { success: false, error: 'Authentication required', code: 'UNAUTHORIZED' },
+        { status: 401 }
+      )
+    }
+
     const { fileId } = await params
-    
+
     if (!fileId) {
       return NextResponse.json(
         { error: 'File ID required', code: 'MISSING_FILE_ID' },
@@ -91,9 +126,17 @@ export async function DELETE(
       )
     }
 
+    // Ownership: only the uploader may delete.
+    if (!fileId.startsWith(`uploads/${session.user.id}/`)) {
+      return NextResponse.json(
+        { error: 'Access denied for this file', code: 'FORBIDDEN_FILE' },
+        { status: 403 }
+      )
+    }
+
     // Import delete function
     const { deleteFromR2 } = await import('@/lib/r2/client')
-    
+
     await deleteFromR2(fileId)
 
     return NextResponse.json({

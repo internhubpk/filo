@@ -84,13 +84,14 @@ test('convex/sessions.ts query handlers do not call ctx.db.delete (read-only)', 
 })
 
 test('all route handlers use @convex/_generated/api alias (no string refs)', () => {
+  // NOTE: /api/auth/me and /api/auth/validate are intentionally excluded —
+  // the session system migrated to self-contained HMAC tokens (src/lib/session.ts),
+  // so these routes no longer need any Convex reference at all.
   const routes = [
     'src/app/api/artifacts/generate/route.ts',
     'src/app/api/artifacts/route.ts',
     'src/app/api/auth/logout/route.ts',
-    'src/app/api/auth/me/route.ts',
     'src/app/api/auth/signup/route.ts',
-    'src/app/api/auth/validate/route.ts',
     'src/app/api/payments/create-checkout/route.ts',
     'src/app/api/payments/verify/route.ts',
     'src/app/api/payments/submit/route.ts',

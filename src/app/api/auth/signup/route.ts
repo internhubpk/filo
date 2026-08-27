@@ -1,22 +1,29 @@
 // =============================================================================
 // POST /api/auth/signup
 // =============================================================================
-// Proxy route that handles signup via Convex.
-// New signups always start with status="pending_activation" — the user must
-// submit a payment and an admin must verify it before they can generate.
+// Proxy route that handles signup via the Convex `auth.signup` action.
 //
-// Session tokens are now self-contained (HMAC-signed). They do NOT
-// depend on the Convex "sessions" table.
+// SECURITY FIX: the previous implementation hashed the password in the route
+// and pushed the raw hash through the PUBLIC `createUserWithPassword`
+// mutation (callable by anyone). User creation now happens entirely inside
+// Convex via an internal mutation — plaintext passwords stop at TLS into the
+// action, and hash insertion is not publicly invokable.
+//
+// New signups always start with status="pending_activation" — an admin must
+// verify payment before they can generate.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
 import { createSessionToken } from '@/lib/session'
+import { getConvexClient } from '@/lib/convex-server'
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { name, email, password } = body
+    const name = typeof body?.name === 'string' ? body.name : ''
+    const email = typeof body?.email === 'string' ? body.email : ''
+    const password = typeof body?.password === 'string' ? body.password : ''
 
     // Validate required fields
     if (!name || !email || !password) {
@@ -55,9 +62,8 @@ export async function POST(request: NextRequest) {
     console.log('[API /auth/signup] Creating account for:', normalizedEmail)
 
     // ---- Initialize Convex client ----
-    let convexClient: any
+    let convexClient
     try {
-      const { getConvexClient } = await import('@/lib/convex-server')
       convexClient = getConvexClient()
     } catch (initError) {
       console.error('[API /auth/signup] Convex not configured:', initError)
@@ -71,90 +77,57 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Step 1: Check if user already exists
-    console.log('[API /auth/signup] Step 1: Checking if user exists...')
-
-    let existingUser: any = null
-    try {
-      existingUser = await convexClient.query(api.users.getUserByEmail, {
-        email: normalizedEmail,
-      })
-    } catch (queryError) {
-      console.warn('[API /auth/signup] Existing-user check failed (continuing):', queryError)
+    // ---- Delegate account creation to the Convex action ----
+    let result: {
+      success: boolean
+      user?: { id: string; name: string; email: string; status?: string; planId?: string | null }
+      error?: string
+      code?: string
     }
-
-    if (existingUser) {
-      console.log('[API /auth/signup] User already exists:', existingUser._id)
-      return NextResponse.json(
-        {
-          success: false,
-          error: 'An account with this email already exists',
-          code: 'EMAIL_EXISTS'
-        },
-        { status: 409 }
-      )
-    }
-
-    // Step 2: Hash password & create user
-    console.log('[API /auth/signup] Step 2: Creating user...')
-
-    const encoder = new TextEncoder()
-    const data = encoder.encode(password + "filo_salt_2024_secret")
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-    const passwordHash = Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
-
-    let userId: string
     try {
-      userId = await convexClient.mutation(api.users.createUserWithPassword, {
+      result = await convexClient.action(api.auth.signup, {
         name: name.trim(),
         email: normalizedEmail,
-        passwordHash,
+        password,
       })
-      console.log('[API /auth/signup] User created with ID:', userId)
-    } catch (mutationError) {
-      console.error('[API /auth/signup] createUserWithPassword failed:', mutationError)
+    } catch (actionError) {
+      console.error('[API /auth/signup] Convex action failed:', actionError)
       return NextResponse.json(
         {
           success: false,
           error: 'Failed to create user account',
           code: 'USER_CREATION_FAILED',
-          details: String(mutationError)
         },
         { status: 500 }
       )
     }
 
-    // Step 3: Create self-contained session token (HMAC-signed)
-    // This token encodes the user payload and is validated locally
-    // without needing a Convex session lookup.
-    console.log('[API /auth/signup] Step 3: Creating session token...')
+    if (!result?.success || !result.user) {
+      const code = result?.code ?? 'USER_CREATION_FAILED'
+      const message =
+        result?.error ??
+        (code === 'EMAIL_EXISTS'
+          ? 'An account with this email already exists'
+          : code === 'PASSWORD_TOO_SHORT'
+            ? 'Password must be at least 6 characters'
+            : 'Account creation failed')
+      const status = code === 'EMAIL_EXISTS' ? 409 : 400
 
-    const sessionToken = createSessionToken({
-      id: userId,
-      name: name.trim(),
-      email: normalizedEmail,
-      status: 'pending_activation',
-      planId: null,
-    })
-
-    // Best-effort: also store in Convex sessions table for backward compat.
-    // Failure is non-fatal — the HMAC token works independently.
-    try {
-      const array = new Uint8Array(32)
-      crypto.getRandomValues(array)
-      const convexToken = Array.from(array)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-      await convexClient.mutation(api.sessions.createSessionByEmail, {
-        email: normalizedEmail,
-        token: convexToken,
-        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-      })
-    } catch (e) {
-      console.warn('[API /auth/signup] Convex session creation skipped (non-fatal):', e)
+      console.log('[API /auth/signup] Rejected:', normalizedEmail, 'code:', code)
+      return NextResponse.json(
+        { success: false, error: message, code },
+        { status }
+      )
     }
+
+    // ---- Create self-contained HMAC session token ----
+    const sessionToken = createSessionToken({
+      id: result.user.id,
+      name: result.user.name,
+      email: result.user.email,
+      status: result.user.status ?? 'pending_activation',
+      planId: result.user.planId ?? null,
+    })
 
     console.log('[API /auth/signup] ✅ Account created successfully (pending activation)')
 
@@ -162,15 +135,15 @@ export async function POST(request: NextRequest) {
       success: true,
       data: {
         user: {
-          id: userId,
-          name: name.trim(),
-          email: normalizedEmail,
-          status: 'pending_activation',
+          id: result.user.id,
+          name: result.user.name,
+          email: result.user.email,
+          status: result.user.status ?? 'pending_activation',
+          planId: result.user.planId ?? null,
         },
         sessionToken,
       }
     })
-
   } catch (error) {
     console.error('[API /auth/signup] Route error:', error)
 
@@ -179,7 +152,6 @@ export async function POST(request: NextRequest) {
         success: false,
         error: 'Internal server error during signup',
         code: 'INTERNAL_ERROR',
-        details: error instanceof Error ? error.message : String(error)
       },
       { status: 500 }
     )

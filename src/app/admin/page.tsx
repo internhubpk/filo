@@ -136,7 +136,49 @@ const emptyForm: PlanFormData = {
   order: 0,
 }
 
+// Whether the Convex public URL is available to the browser bundle.
+// NEXT_PUBLIC_* vars are inlined at build time.
+const HAS_CONVEX_URL =
+  typeof process.env.NEXT_PUBLIC_CONVEX_URL === 'string' &&
+  process.env.NEXT_PUBLIC_CONVEX_URL.length > 0
+
 export default function AdminPage() {
+  // GUARD: the dashboard below calls useQuery/useMutation unconditionally.
+  // Without NEXT_PUBLIC_CONVEX_URL there is no ConvexProvider in the tree,
+  // and those hooks THROW — taking down the whole /admin route with Next's
+  // generic error page. Render a clear configuration notice instead so the
+  // panel degrades gracefully on deployments missing one env var.
+  if (!HAS_CONVEX_URL) {
+    return (
+      <div className="flex min-h-screen items-center justify-center bg-background p-6">
+        <Card className="max-w-md w-full">
+          <CardHeader>
+            <CardTitle className="flex items-center gap-2 text-lg">
+              <AlertCircle className="h-5 w-5 text-yellow-500" />
+              Admin panel unavailable
+            </CardTitle>
+            <CardDescription>
+              The admin panel requires a backend connection that isn&apos;t configured on this deployment.
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-3 text-sm text-muted-foreground">
+            <p>
+              Set <code className="rounded bg-muted px-1.5 py-0.5 font-mono text-xs">NEXT_PUBLIC_CONVEX_URL</code> in
+              your hosting provider&apos;s environment variables, then redeploy.
+            </p>
+            <Link href="/" className="inline-flex items-center gap-2 font-medium text-primary hover:underline">
+              <ArrowLeft className="h-4 w-4" />
+              Back to Filo
+            </Link>
+          </CardContent>
+        </Card>
+      </div>
+    )
+  }
+  return <AdminDashboard />
+}
+
+function AdminDashboard() {
   const { theme, setTheme } = useTheme()
 
   // REAL Convex queries - fetching actual data from database
@@ -244,7 +286,6 @@ export default function AdminPage() {
     if (activeTab === 'verifications') {
       refreshVerifications()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, verificationsFilter])
 
   // Show notification helper

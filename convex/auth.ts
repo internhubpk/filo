@@ -6,7 +6,7 @@
 
 import { v } from "convex/values";
 import { action, query } from "./_generated/server";
-import { api } from "./_generated/api";
+import { api, internal } from "./_generated/api";
 
 // ==================== TYPES ====================
 
@@ -77,8 +77,9 @@ export const login = action({
 
       console.log('[AUTH] Login attempt for:', args.email.toLowerCase().trim());
 
-      // Look up user in database
-      const user = await ctx.runQuery(api.users.getUserByEmail, {
+      // Look up user in database (internal query — the passwordHash never
+      // leaves the Convex deployment; public queries strip secrets)
+      const user = await ctx.runQuery(internal.users.getUserAuthDataByEmail, {
         email: args.email.toLowerCase().trim(),
       });
 
@@ -100,8 +101,9 @@ export const login = action({
       // Create session token
       const sessionToken = generateSessionToken();
       
-      // Store session using sessions.ts (SEPARATE FILE - NO CIRCULAR REFS!)
-      await ctx.runMutation(api.sessions.createSession, {
+      // Store session using sessions.ts (internal mutation — session rows
+      // cannot be minted by anonymous callers)
+      await ctx.runMutation(internal.sessions.createSession, {
         userId: user._id,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -181,8 +183,9 @@ export const signup = action({
       // Hash the password
       const passwordHash = await hashPassword(args.password);
 
-      // Create the user in database
-      const userId = await ctx.runMutation(api.users.createUserWithPassword, {
+      // Create the user in database (internal mutation so arbitrary hash
+      // insertion is not publicly invokable)
+      const userId = await ctx.runMutation(internal.users.createUserWithPassword, {
         name: args.name.trim(),
         email: normalizedEmail,
         passwordHash,
@@ -192,7 +195,7 @@ export const signup = action({
 
       // Auto-login after signup using sessions.ts (NO CIRCULAR REFS!)
       const sessionToken = generateSessionToken();
-      await ctx.runMutation(api.sessions.createSession, {
+      await ctx.runMutation(internal.sessions.createSession, {
         userId,
         token: sessionToken,
         expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
@@ -288,8 +291,8 @@ export const logout = action({
   },
   handler: async (ctx, args) => {
     try {
-      // Delete session using sessions.ts (NO CIRCULAR REFS!)
-      await ctx.runMutation(api.sessions.deleteSession, {
+      // Delete session using sessions.ts (internal mutation)
+      await ctx.runMutation(internal.sessions.deleteSession, {
         token: args.token,
       });
 

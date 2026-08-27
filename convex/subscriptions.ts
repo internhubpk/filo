@@ -281,6 +281,40 @@ export const reactivateSubscription = mutation({
 // ==================== USAGE TRACKING ====================
 
 /**
+ * Get the user's AI-generation usage for the CURRENT calendar month.
+ *
+ * Used by the Next.js /api/artifacts/agent-generate route to enforce the
+ * plan's monthly limit BEFORE doing expensive AI work. Kept separate from
+ * canGenerateAI because that query derives entitlements from the
+ * subscriptions table, which is unused in the manual admin-activation model.
+ */
+export const getMonthlyAiUsage = query({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const now = new Date();
+    const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).getTime();
+    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0).getTime();
+
+    const usageRecords = await ctx.db
+      .query("usageRecords")
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("type"), "ai_generation"),
+          q.gte(q.field("periodStart"), startOfMonth)
+        )
+      )
+      .collect();
+
+    return {
+      used: usageRecords.reduce((sum, record) => sum + record.amount, 0),
+      periodStart: startOfMonth,
+      periodEnd: endOfMonth,
+    };
+  },
+});
+
+/**
  * Check if user can perform AI generation
  * Enforces rate limits based on plan
  */

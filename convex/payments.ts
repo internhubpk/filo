@@ -41,7 +41,7 @@ export const updatePaymentStatus = mutation({
       v.literal("cancelled")
     ),
     providerPaymentId: v.optional(v.string()),
-    metadata: v.optional(v.object({})),
+    metadata: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
     const updates: Record<string, unknown> = {
@@ -88,7 +88,7 @@ export const recordWebhookEvent = mutation({
     provider: v.union(v.literal("safepay"), v.literal("custom")),
     eventId: v.string(),
     type: v.string(),
-    data: v.object({}),
+    data: v.any(),
   },
   handler: async (ctx, args) => {
     // Check for duplicate (idempotency - critical for payment security)

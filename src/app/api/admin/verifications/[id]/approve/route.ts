@@ -15,20 +15,16 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
+import { isAdminRequest } from '@/lib/admin-auth'
 import { api } from '@convex/_generated/api'
 
-function isAdminRequest(request: NextRequest): boolean {
-  const token = request.cookies.get('admin_session')?.value
-  if (!token) return false
-  return /^[a-f0-9]{64}$/.test(token)
-}
 
 export async function POST(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    if (!isAdminRequest(request)) {
+    if (!(await isAdminRequest(request))) {
       return NextResponse.json(
         { success: false, error: 'Admin authentication required', code: 'UNAUTHORIZED' },
         { status: 401 }

@@ -527,8 +527,33 @@ export function MainDashboard() {
     toast.logoutSuccess()
   }
 
+  // ==================== FILE ATTACHMENT HELPERS ====================
+  // Files picked in the UI are sent to /api/artifacts/agent-generate as
+  // base64 content so the AI can actually READ them. Previously files were
+  // collected but silently dropped from the request.
+  // Limits mirror the server-side caps in agent-generate route.
+  const MAX_FILES = 10
+  const MAX_FILE_MB = 10
+
+  const fileToBase64 = (file: File): Promise<string> =>
+    new Promise((resolve, reject) => {
+      const reader = new FileReader()
+      reader.onload = () => {
+        const result = String(reader.result || '')
+        // Strip the data URL prefix ("data:mime;base64,")
+        const commaIndex = result.indexOf(',')
+        resolve(commaIndex >= 0 ? result.substring(commaIndex + 1) : result)
+      }
+      reader.onerror = () => reject(new Error(`Could not read "${file.name}"`))
+      reader.readAsDataURL(file)
+    })
+
   // Handle generation
+  const isGeneratingRef = useRef(false)
   const handleGenerate = async () => {
+    // Re-entrancy guard: rapid double-clicks (e.g. example cards schedule a
+    // delayed call) must not start two parallel generations.
+    if (isGeneratingRef.current) return
     if (!prompt.trim()) {
       toast.warning('Please enter a prompt', 'Describe what you want to create')
       return
@@ -564,10 +589,48 @@ export function MainDashboard() {
     }
 
     setIsGenerating(true)
+    isGeneratingRef.current = true
     clearError()
     
     // Show generation started toast with loading animation
     const loadingToastId = toast.generationStarted(prompt)
+    
+    // Encode attached files (validated client-side to match server limits)
+    let attachments: Array<{ filename: string; content: string; mimeType: string }> | undefined
+    if (files.length > 0) {
+      if (files.length > MAX_FILES) {
+        toast.dismiss(loadingToastId)
+        toast.error(`Too many files`, `Please attach at most ${MAX_FILES} files`)
+        setIsGenerating(false)
+        isGeneratingRef.current = false
+        return
+      }
+      try {
+        const encoded: Array<{ filename: string; content: string; mimeType: string }> = []
+        for (const f of files) {
+          if (f.size > MAX_FILE_MB * 1024 * 1024) {
+            toast.dismiss(loadingToastId)
+            toast.error('File too large', `${f.name} exceeds the ${MAX_FILE_MB}MB limit`)
+            setIsGenerating(false)
+            isGeneratingRef.current = false
+            return
+          }
+          encoded.push({
+            filename: f.name,
+            mimeType: f.type || 'application/octet-stream',
+            content: await fileToBase64(f),
+          })
+        }
+        attachments = encoded
+      } catch (readErr) {
+        console.error('[DASHBOARD] File read error:', readErr)
+        toast.dismiss(loadingToastId)
+        toast.error('Could not read attached files', readErr instanceof Error ? readErr.message : undefined)
+        setIsGenerating(false)
+        isGeneratingRef.current = false
+        return
+      }
+    }
     
     // Initialize generation stages
     const stages: GenerationStage[] = [
@@ -589,6 +652,7 @@ export function MainDashboard() {
         artifactType: detectArtifactType(prompt),
         outputFormat: selectedFormat === 'auto' ? undefined : selectedFormat,
         workspaceId: user.id, // Use user's default workspace
+        files: attachments,
       })
 
       // Check for errors from API
@@ -731,6 +795,7 @@ export function MainDashboard() {
       )
     } finally {
       setIsGenerating(false)
+      isGeneratingRef.current = false
     }
   }
 

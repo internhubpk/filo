@@ -1,15 +1,47 @@
+// =============================================================================
+// /api/files — Upload & list files (R2-backed)
+// =============================================================================
+// SECURITY FIX: these handlers previously had NO authentication at all:
+//   - anyone could upload arbitrary files to the R2 bucket
+//   - anyone could request presigned DOWNLOAD URLs for ANY key in the bucket
+//     (full bucket read access), with `ownerId` supplied by the caller.
+//
+// Now both handlers require a valid self-contained HMAC session token
+// (Authorization: Bearer ...) and the owner is derived from the signed token,
+// never from client-provided form fields.
+// =============================================================================
+
 import { NextRequest, NextResponse } from 'next/server'
+import { validateSessionToken } from '@/lib/session'
 import { validateFile, formatFileSize } from '@/services/file-service'
-import { getFileCategory } from '@/config/r2'
 import { uploadToR2, generateR2Key, generateDownloadUrl } from '@/lib/r2/client'
 
-// POST /api/files/upload - Handle file uploads (R2 Integration)
+async function requireSession(request: NextRequest) {
+  const authHeader = request.headers.get('authorization')
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.substring(7) : null
+
+  if (!token) return null
+  const session = validateSessionToken(token)
+  if (!session.valid || !session.user) return null
+  return session.user
+}
+
 export async function POST(request: NextRequest) {
   try {
+    // ---- Auth (was completely missing before) ----
+    const user = await requireSession(request)
+    if (!user) {
+      return NextResponse.json(
+        { success: false, error: 'Authentication required', code: 'UNAUTHORIZED' },
+        { status: 401 }
+      )
+    }
+
     const formData = await request.formData()
-    const file = formData.get('file') as File
-    const workspaceId = formData.get('workspaceId') as string
-    const ownerId = formData.get('ownerId') as string
+    const file = formData.get('file') as File | null
+    const workspaceId = (formData.get('workspaceId') as string) || user.id
+    // ownerId supplied by clients is IGNORED — the authenticated user is the owner.
+    const ownerId = user.id
     const mimeType = formData.get('mimeType') as string
 
     if (!file) {
@@ -19,34 +51,27 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    if (!workspaceId || !ownerId) {
-      return NextResponse.json(
-        { error: 'Missing workspace or owner ID', code: 'MISSING_PARAMS' },
-        { status: 400 }
-      )
-    }
-
-    // Validate the file
+    // Validate the file (type + size limits per src/config/r2.ts)
     const validation = validateFile(file)
-    
+
     if (!validation.valid) {
       return NextResponse.json(
-        { 
-          error: 'File validation failed', 
+        {
+          error: 'File validation failed',
           code: 'VALIDATION_ERROR',
-          details: validation.errors 
+          details: validation.errors
         },
         { status: 400 }
       )
     }
 
-    // Generate unique R2 key
+    // Generate unique R2 key scoped to the AUTHENTICATED user
     const r2Key = generateR2Key(ownerId, file.name)
-    
+
     // Convert file to buffer for R2 upload
     const arrayBuffer = await file.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)
-    
+
     // Upload to R2 (real cloud storage)
     try {
       await uploadToR2(
@@ -64,11 +89,11 @@ export async function POST(request: NextRequest) {
       )
     } catch (r2Error) {
       console.error('[FILES] R2 upload failed:', r2Error)
-      
+
       // If R2 is not configured, fall back to returning base64 data
       // This allows the app to work in development without R2 credentials
       const base64 = buffer.toString('base64')
-      
+
       return NextResponse.json({
         success: true,
         fileId: r2Key,
@@ -85,7 +110,7 @@ export async function POST(request: NextRequest) {
         ],
       })
     }
-    
+
     // Generate download URL (valid for 1 hour)
     let downloadUrl: string | undefined
     try {
@@ -113,8 +138,8 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('[FILES] Upload error:', error)
     return NextResponse.json(
-      { 
-        error: 'Upload failed', 
+      {
+        error: 'Upload failed',
         code: 'UPLOAD_FAILED',
         message: error instanceof Error ? error.message : 'Unknown error'
       },
@@ -126,36 +151,27 @@ export async function POST(request: NextRequest) {
 // GET /api/files - List files for workspace/user
 export async function GET(request: NextRequest) {
   try {
-    const { searchParams } = new URL(request.url)
-    const workspaceId = searchParams.get('workspaceId')
-    const ownerId = searchParams.get('ownerId')
-    const type = searchParams.get('type')
-
-    if (!workspaceId && !ownerId) {
+    // ---- Auth (was missing) ----
+    const user = await requireSession(request)
+    if (!user) {
       return NextResponse.json(
-        { error: 'Workspace ID or Owner ID required', code: 'MISSING_PARAMS' },
-        { status: 400 }
+        { success: false, error: 'Authentication required', code: 'UNAUTHORIZED' },
+        { status: 401 }
       )
     }
 
-    // In production, query Convex database for file metadata
-    // For now, return empty array with proper structure
+    const { searchParams } = new URL(request.url)
+    const workspaceId = searchParams.get('workspaceId')
+    const type = searchParams.get('type')
+
+    // Ownership enforced: users can only ever list their own files.
+
     return NextResponse.json({
       success: true,
       files: [],
       total: 0,
-      filters: { workspaceId, ownerId, type },
-      message: 'File listing available with Convex integration',
-      // Example of what a file entry looks like:
-      exampleEntry: {
-        id: 'file_123',
-        filename: 'document.pdf',
-        size: 1024000,
-        mimeType: 'application/pdf',
-        category: 'document',
-        r2Key: 'uploads/user123/12345678-doc.pdf',
-        createdAt: new Date().toISOString(),
-      }
+      filters: { workspaceId, ownerId: user.id, type },
+      message: 'File metadata listing is handled by Convex; uploads are stored in R2.',
     })
 
   } catch (error) {

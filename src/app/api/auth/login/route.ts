@@ -1,24 +1,28 @@
 // =============================================================================
 // POST /api/auth/login
 // =============================================================================
-// Proxy route that handles login via Convex.
-// Login is allowed even when the user's status is "pending_activation" —
-// we return the status to the client so the UI can show the
-// "Your account is pending verification" banner and block AI generation.
+// Proxy route that handles login via the Convex `auth.login` action.
 //
-// Session tokens are now self-contained (HMAC-signed). They do NOT
-// depend on the Convex "sessions" table. This eliminates the bug where
-// silent session-creation failures left the client with an orphaned token.
+// SECURITY: password verification happens INSIDE Convex (the action reads the
+// hash through an internalQuery). This route never sees or transmits a
+// password hash — previously it fetched the full user document (including
+// `passwordHash`) from a PUBLIC query, meaning anyone with the deployment URL
+// could harvest all users' hashes.
+//
+// On success this route issues its own self-contained HMAC session token
+// (see src/lib/session.ts), keeping the response shape unchanged for clients.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
 import { createSessionToken } from '@/lib/session'
+import { getConvexClient } from '@/lib/convex-server'
 
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { email, password } = body
+    const email = typeof body?.email === 'string' ? body.email : ''
+    const password = typeof body?.password === 'string' ? body.password : ''
 
     // Validate input
     if (!email || !password) {
@@ -39,10 +43,9 @@ export async function POST(request: NextRequest) {
 
     const normalizedEmail = email.toLowerCase().trim()
 
-    // ---- Look up user in Convex ----
-    let convexClient: any
+    // ---- Initialize Convex client ----
+    let convexClient
     try {
-      const { getConvexClient } = await import('@/lib/convex-server')
       convexClient = getConvexClient()
     } catch (initError) {
       console.error('[API /auth/login] Failed to initialize Convex client:', initError)
@@ -56,90 +59,69 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    console.log('[API /auth/login] Looking up user:', normalizedEmail)
-    let user: any = null
+    // ---- Delegate credential check to the Convex action ----
+    console.log('[API /auth/login] Verifying credentials for:', normalizedEmail)
+    let result: {
+      success: boolean
+      user?: { id: string; name: string; email: string; status?: string; planId?: string | null }
+      error?: string
+      code?: string
+    }
     try {
-      user = await convexClient.query(api.users.getUserByEmail, {
+      result = await convexClient.action(api.auth.login, {
         email: normalizedEmail,
+        password,
       })
-    } catch (queryError) {
-      console.error('[API /auth/login] User lookup failed:', queryError)
+    } catch (actionError) {
+      console.error('[API /auth/login] Convex action failed:', actionError)
       return NextResponse.json(
         { success: false, error: 'Login failed. Please try again.', code: 'LOGIN_FAILED' },
         { status: 500 }
       )
     }
 
-    if (!user) {
-      console.log('[API /auth/login] User not found:', normalizedEmail)
+    if (!result?.success || !result.user) {
+      const code = result?.code ?? 'LOGIN_FAILED'
+      const message =
+        result?.error ??
+        (code === 'USER_NOT_FOUND'
+          ? 'No account found with this email'
+          : code === 'INVALID_PASSWORD'
+            ? 'Incorrect password'
+            : 'Login failed')
+      const status = code === 'USER_NOT_FOUND' ? 404 : code === 'INVALID_PASSWORD' ? 401 : 500
+
+      console.log('[API /auth/login] Rejected:', normalizedEmail, 'code:', code)
       return NextResponse.json(
-        { success: false, error: 'No account found with this email', code: 'USER_NOT_FOUND' },
-        { status: 404 }
+        { success: false, error: message, code },
+        { status }
       )
     }
 
-    // ---- Verify password (SHA-256, same as signup) ----
-    const encoder = new TextEncoder()
-    const data = encoder.encode(password + "filo_salt_2024_secret")
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-    const passwordHash = Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
-
-    if (passwordHash !== (user.passwordHash || '')) {
-      console.log('[API /auth/login] Invalid password for:', normalizedEmail)
-      return NextResponse.json(
-        { success: false, error: 'Incorrect password', code: 'INVALID_PASSWORD' },
-        { status: 401 }
-      )
-    }
-
-    console.log('[API /auth/login] Password valid for:', user.email)
-
-    // ---- Create self-contained session token (HMAC-signed) ----
-    // This token encodes the user payload and is validated locally
-    // without needing a Convex session lookup.
+    // ---- Create self-contained HMAC session token ----
     const sessionToken = createSessionToken({
-      id: user._id,
-      name: user.name,
-      email: user.email,
-      status: user.status ?? 'pending_activation',
-      planId: user.planId ?? null,
+      id: result.user.id,
+      name: result.user.name,
+      email: result.user.email,
+      status: result.user.status,
+      planId: result.user.planId ?? null,
     })
 
-    // Best-effort: also store in Convex sessions table for backward compat
-    // (e.g. if other parts of the system still query it). Failure is non-fatal.
-    try {
-      const array = new Uint8Array(32)
-      crypto.getRandomValues(array)
-      const convexToken = Array.from(array)
-        .map((b) => b.toString(16).padStart(2, "0"))
-        .join("")
-      await convexClient.mutation(api.sessions.createSessionByEmail, {
-        email: normalizedEmail,
-        token: convexToken,
-        expiresAt: Date.now() + 7 * 24 * 60 * 60 * 1000,
-      })
-    } catch (e) {
-      console.warn('[API /auth/login] Convex session creation skipped (non-fatal):', e)
-    }
-
-    console.log('[API /auth/login] Login successful for:', user.email)
+    console.log('[API /auth/login] Login successful for:', result.user.email)
 
     return NextResponse.json({
       success: true,
       data: {
         user: {
-          id: user._id,
-          name: user.name,
-          email: user.email,
-          status: user.status ?? 'pending_activation',
-          planId: user.planId ?? null,
+          id: result.user.id,
+          name: result.user.name,
+          email: result.user.email,
+          status: result.user.status ?? 'pending_activation',
+          planId: result.user.planId ?? null,
         },
         sessionToken,
       }
     })
-
   } catch (error) {
     console.error('[API /auth/login] Unhandled error:', error)
 

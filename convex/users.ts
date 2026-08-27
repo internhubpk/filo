@@ -1,18 +1,47 @@
-import { mutation, query } from "./_generated/server";
+import { mutation, query, internalMutation, internalQuery } from "./_generated/server";
 import { v } from "convex/values";
+
+// SECURITY: user documents contain `passwordHash`, which must never leave
+// the database. Public queries below strip it before returning. Hash access
+// happens ONLY inside Convex via the internalQuery `getUserAuthDataByEmail`
+// (used by the login action) — an internal function cannot be invoked from
+// outside the Convex deployment.
+type PublicUser = Record<string, unknown> | null;
+
+function stripSecrets<T extends { passwordHash?: string }>(
+  user: T | null
+): PublicUser {
+  if (!user) return null;
+  const { passwordHash: _omit, ...rest } = user;
+  return rest;
+}
 
 // ==================== QUERIES ====================
 
-// Get user by ID
+// Get user by ID (public — secrets stripped)
 export const getUser = query({
   args: { userId: v.id("users") },
   handler: async (ctx, args) => {
-    return await ctx.db.get(args.userId);
+    return stripSecrets(await ctx.db.get(args.userId));
   },
 });
 
-// Get user by email
+// Get user by email (public — secrets stripped)
 export const getUserByEmail = query({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    return stripSecrets(
+      await ctx.db
+        .query("users")
+        .withIndex("by_email", (q) => q.eq("email", args.email))
+        .first()
+    );
+  },
+});
+
+// INTERNAL: full user record including passwordHash for credential checks.
+// Only callable from within Convex (actions/mutations in this deployment).
+export const getUserAuthDataByEmail = internalQuery({
   args: { email: v.string() },
   handler: async (ctx, args) => {
     return await ctx.db
@@ -40,38 +69,41 @@ export const getUserStatus = query({
   },
 });
 
-// Admin: list all users (newest first)
+// Admin: list all users (newest first) — secrets stripped
 export const getAllUsers = query({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db
+    const users = await ctx.db
       .query("users")
       .order("desc")
       .take(200);
+    return users.map(stripSecrets);
   },
 });
 
-// Admin: list users pending activation
+// Admin: list users pending activation — secrets stripped
 export const getPendingUsers = query({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db
+    const users = await ctx.db
       .query("users")
       .withIndex("by_status", (q) => q.eq("status", "pending_activation"))
       .order("desc")
       .take(200);
+    return users.map(stripSecrets);
   },
 });
 
-// Admin: list active users
+// Admin: list active users — secrets stripped
 export const getActiveUsers = query({
   args: {},
   handler: async (ctx) => {
-    return await ctx.db
+    const users = await ctx.db
       .query("users")
       .withIndex("by_status", (q) => q.eq("status", "active"))
       .order("desc")
       .take(200);
+    return users.map(stripSecrets);
   },
 });
 
@@ -166,10 +198,10 @@ export const deleteUser = mutation({
       await ctx.db.delete(subscription._id);
     }
 
-    // Delete sessions
+    // Delete sessions (uses the declared by_userId index instead of a scan)
     const sessions = await ctx.db
       .query("sessions")
-      .filter((q) => q.eq(q.field("userId"), args.userId))
+      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
       .collect();
 
     for (const session of sessions) {
@@ -183,10 +215,12 @@ export const deleteUser = mutation({
   },
 });
 
-// Create user with password hash (for real auth)
-// New signups always start with status="pending_activation" so admin can
-// verify payment before unlocking AI generation.
-export const createUserWithPassword = mutation({
+// Create user with password hash.
+// INTERNAL: password hash insertion must never be callable from outside the
+// Convex deployment. Called exclusively by the signup action in auth.ts,
+// which hashes the password inside Convex so plaintext hashes do not travel
+// over the network or appear in client-callable argument surfaces.
+export const createUserWithPassword = internalMutation({
   args: {
     name: v.string(),
     email: v.string(),

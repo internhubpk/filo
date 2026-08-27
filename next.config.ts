@@ -1,7 +1,14 @@
 import type { NextConfig } from "next";
 
+// `output: "standalone"` exists for SELF-HOSTED deployments (it produces
+// .next/standalone/server.js used by `npm run start` behind Caddy/Docker).
+// On Vercel it is unnecessary (the platform serves its own build output) and
+// has historically caused asset/hydration issues, so it is DISABLED when
+// building on Vercel — the VERCEL env var is always set to "1" there.
+const isVercelBuild = process.env.VERCEL === "1";
+
 const nextConfig: NextConfig = {
-  output: "standalone",
+  ...(isVercelBuild ? {} : { output: "standalone" as const }),
   // NOTE: `ignoreBuildErrors` was previously `true`, which masked ~138 real
   // TypeScript errors across the codebase. Phase 1 of the production-readiness
   // hardening pass fixed every one of them, so we now enforce strict type

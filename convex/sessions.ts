@@ -2,29 +2,44 @@
 // FILO Session Management
 // =============================================================================
 // Separated from auth.ts to avoid circular resolution errors
-// Auth.ts calls api.sessions.* instead of self-referencing
+// Auth.ts calls internal.sessions.* instead of self-referencing
+//
+// SECURITY: session rows authenticate holders of their token. Creation and
+// deletion are therefore INTERNAL — they can only be invoked from inside the
+// Convex deployment (the login/signup/logout actions), never by an anonymous
+// caller holding the public deployment URL. Previously `createSession` was a
+// public mutation accepting arbitrary tokens + expiry, which allowed anyone
+// to mint database-backed sessions for any user.
 // =============================================================================
 
 import { v } from "convex/values";
-import { mutation, query } from "./_generated/server";
+import { internalMutation, query } from "./_generated/server";
 
 /**
- * Create a new session for a user
- * Called by auth.ts login/signup functions via ctx.runMutation(api.sessions.createSession)
+ * Create a new session for a user.
+ * Called by auth.ts login/signup actions via internal reference.
  */
-export const createSession = mutation({
+export const createSession = internalMutation({
   args: {
     userId: v.id("users"),
     token: v.string(),
     expiresAt: v.number(),
   },
   handler: async (ctx, args) => {
+    // Defensive clamps even though only trusted code calls this now.
+    const token = /^[a-f0-9]{32,128}$/.test(args.token) ? args.token : null;
+    if (!token) {
+      throw new Error("Invalid session token format");
+    }
+    const maxExpiry = Date.now() + 30 * 24 * 60 * 60 * 1000; // 30 days max
+    const expiresAt = Math.min(Math.max(args.expiresAt, Date.now()), maxExpiry);
+
     console.log('[SESSIONS] Creating session for user:', args.userId);
-    
+
     const sessionId = await ctx.db.insert("sessions", {
       userId: args.userId,
-      token: args.token,
-      expiresAt: args.expiresAt,
+      token,
+      expiresAt,
       createdAt: Date.now(),
     });
 
@@ -34,53 +49,13 @@ export const createSession = mutation({
 });
 
 /**
- * Create a session by email (avoids Convex ID serialization issues).
- * 
- * The Next.js server passes a plain email string; Convex looks up the
- * user internally and creates the session. This avoids the bug where
- * ConvexHttpClient fails to serialize user._id (from a query result)
- * back into a v.id("users") for a mutation call.
- */
-export const createSessionByEmail = mutation({
-  args: {
-    email: v.string(),
-    token: v.string(),
-    expiresAt: v.number(),
-  },
-  handler: async (ctx, args) => {
-    console.log('[SESSIONS] createSessionByEmail for:', args.email);
-
-    const user = await ctx.db
-      .query("users")
-      .withIndex("by_email", (q) => q.eq("email", args.email))
-      .first();
-
-    if (!user) {
-      console.error('[SESSIONS] User not found:', args.email);
-      throw new Error("User not found");
-    }
-
-    const sessionId = await ctx.db.insert("sessions", {
-      userId: user._id,
-      token: args.token,
-      expiresAt: args.expiresAt,
-      createdAt: Date.now(),
-    });
-
-    console.log('[SESSIONS] Session created by email:', sessionId);
-    return sessionId;
-  },
-});
-
-/**
  * Delete a session (logout)
- * Called by auth.ts logout function via ctx.runMutation(api.sessions.deleteSession)
  */
-export const deleteSession = mutation({
+export const deleteSession = internalMutation({
   args: { token: v.string() },
   handler: async (ctx, args) => {
     console.log('[SESSIONS] Deleting session with token');
-    
+
     const session = await ctx.db
       .query("sessions")
       .withIndex("by_token", (q) => q.eq("token", args.token))

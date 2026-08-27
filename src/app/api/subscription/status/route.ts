@@ -39,9 +39,36 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const userId = session.user.id
-    const status = session.user.status ?? 'pending_activation'
-    const userPlanId = session.user.planId ?? null
+    const tokenUserId = session.user.id
+    let status = session.user.status ?? 'pending_activation'
+    let userPlanId = session.user.planId ?? null
+
+    // FIX (stale-token-status): the HMAC token embeds the status from login
+    // time and stays valid for up to 7 days. An admin-activated user kept
+    // seeing "pending activation", and a suspended user stayed unlocked,
+    // until they re-authenticated. Re-read the CURRENT status from the
+    // database on every call and fall back to the token value only if the
+    // lookup infrastructure fails.
+    try {
+      const { getConvexClient } = await import('@/lib/convex-server')
+      const convexUserClient = getConvexClient()
+      const dbUser = await convexUserClient.query(api.users.getUser, {
+        userId: tokenUserId as any,
+      })
+      if (!dbUser) {
+        // Account was deleted — treat as logged out.
+        return NextResponse.json(
+          { success: false, error: 'Account not found', code: 'ACCOUNT_NOT_FOUND' },
+          { status: 401 }
+        )
+      }
+      status = (dbUser as any).status ?? status
+      userPlanId = (dbUser as any).planId ?? null
+    } catch (userErr) {
+      console.warn('[API /subscription/status] Live user lookup failed, using token status:', userErr)
+    }
+
+    const userId = tokenUserId
 
     // Fetch plan details if user has one assigned
     const { getConvexClient } = await import('@/lib/convex-server')

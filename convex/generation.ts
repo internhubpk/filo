@@ -121,7 +121,7 @@ export const createJob = internalMutation({
 export const initializeUnits = internalMutation({
   args: {
     jobId: v.id("generationJobs"),
-    blueprint: v.object({}),
+    blueprint: v.any(),
     sections: v.array(
       v.object({
         id: v.string(),
@@ -176,7 +176,7 @@ export const claimUnit = internalMutation({
 export const completeUnit = internalMutation({
   args: {
     unitId: v.id("generationUnits"),
-    content: v.object({}),
+    content: v.any(),
     inputTokens: v.optional(v.number()),
     outputTokens: v.optional(v.number()),
   },

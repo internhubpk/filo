@@ -1,8 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
-import { useAction, useMutation } from 'convex/react'
-import { api } from '@convex/_generated/api'
+import React, { useState } from 'react'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -26,32 +24,41 @@ import {
   Globe,
   Mail
 } from 'lucide-react'
+import { toast } from '@/lib/toast'
+import { useFiloSession, useHostname } from '@/hooks/use-session'
 
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState('profile')
-  
-  // Profile state — initialize from localStorage synchronously so we don't
-  // trip the setState-in-effect lint rule on mount.
-  const [profile, setProfile] = useState(() => {
-    const initial = { name: '', email: '', bio: '', company: '' }
-    if (typeof window === 'undefined') return initial
-    try {
-      const sessionData = localStorage.getItem('filo_session')
-      if (sessionData) {
-        const session = JSON.parse(sessionData)
-        if (session?.user) {
-          return {
-            ...initial,
-            name: session.user.name || '',
-            email: session.user.email || '',
-          }
-        }
-      }
-    } catch (e) {
-      console.error('Failed to load user session:', e)
+
+  // HYDRATION-SAFE: session comes from the shared external store (empty on
+  // server + first render, applied post-mount — no hydration mismatch).
+  const sessionUser = useFiloSession().user
+  // Hostname for the "Current Session" row; '' until mounted (matches SSR).
+  const hostname = useHostname()
+
+  // Editable profile DRAFT. `null` means "no edits yet" and the form derives
+  // its values from the session store — avoiding any setState-in-effect
+  // cascades while still reflecting the session as soon as it loads.
+  const [draftProfile, setDraftProfile] = useState<{
+    name: string
+    email: string
+    bio: string
+    company: string
+  } | null>(null)
+  const profile = draftProfile ?? {
+    name: sessionUser?.name ?? '',
+    email: sessionUser?.email ?? '',
+    bio: '',
+    company: '',
+  }
+  const setProfile = (
+    updater: (prev: { name: string; email: string; bio: string; company: string }) => {
+      name: string
+      email: string
+      bio: string
+      company: string
     }
-    return initial
-  })
+  ) => setDraftProfile(updater(profile))
   const [profileSaved, setProfileSaved] = useState(false)
   const [saving, setSaving] = useState(false)
 
@@ -80,11 +87,6 @@ export default function SettingsPage() {
     billing: true,
     marketing: false
   })
-
-  // User data is loaded synchronously during state initialization above
-  // (no useEffect needed for initial load). This avoids the
-  // react-hooks/set-state-in-effect anti-pattern of calling setState
-  // synchronously inside an effect body.
 
   const handleSaveProfile = async () => {
     setSaving(true)
@@ -123,12 +125,12 @@ export default function SettingsPage() {
 
   const handleChangePassword = async () => {
     if (passwords.newPassword !== passwords.confirm) {
-      alert('Passwords do not match')
+      toast.error('Passwords do not match', 'Please make sure both fields match')
       return
     }
     
     if (passwords.newPassword.length < 6) {
-      alert('Password must be at least 6 characters')
+      toast.error('Password too short', 'Password must be at least 6 characters')
       return
     }
 
@@ -479,7 +481,7 @@ export default function SettingsPage() {
                         <div>
                           <p className="font-medium">Current Session</p>
                           <p className="text-sm text-muted-foreground">
-                            {typeof window !== 'undefined' ? window.location.hostname : 'localhost'} • Now
+                            {hostname} • Now
                           </p>
                         </div>
                       </div>

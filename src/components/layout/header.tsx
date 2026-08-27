@@ -1,6 +1,6 @@
 'use client'
 
-import React, { useState, useEffect } from 'react'
+import React from 'react'
 import { useRouter } from 'next/navigation'
 import Link from 'next/link'
 import { Button } from '@/components/ui/button'
@@ -32,6 +32,8 @@ import {
   PopoverTrigger,
 } from '@/components/ui/popover'
 import { useTheme } from 'next-themes'
+import { useFiloSession, type SessionUser } from '@/hooks/use-session'
+import { apiClient } from '@/lib/api-client'
 
 // User interface
 interface UserData {
@@ -48,60 +50,18 @@ interface HeaderProps {
 export function Header({ onMobileMenuToggle, userData: propUserData }: HeaderProps) {
   const { theme, setTheme } = useTheme()
   const router = useRouter()
-  
-  // Local state for user data — initialize from localStorage synchronously
-  // when propUserData is absent, then subscribe to auth/storage events for
-  // subsequent updates (avoids cascading setState-in-effect renders).
-  const [userData, setUserData] = useState<UserData | null>(() => {
-    if (propUserData) return propUserData
-    if (typeof window === 'undefined') return null
-    try {
-      const sessionData = localStorage.getItem('filo_session')
-      if (sessionData) {
-        const session = JSON.parse(sessionData)
-        return session?.user || null
-      }
-    } catch (e) {
-      console.error('Failed to load user session:', e)
-    }
-    return null
-  })
 
-  // If parent passes a different propUserData, sync state to it.
-  // We use the functional setState form to avoid the synchronous-in-effect
-  // lint rule while still allowing the prop to override local state.
-  useEffect(() => {
-    if (propUserData) {
-      // eslint-disable-next-line react-hooks/set-state-in-effect
-      setUserData(propUserData)
-    }
-  }, [propUserData])
-
-  // Listen for storage changes (when user logs in/out in another tab)
-  useEffect(() => {
-    const handleStorageChange = () => {
-      try {
-        const sessionData = localStorage.getItem('filo_session')
-        if (sessionData) {
-          const session = JSON.parse(sessionData)
-          setUserData(session.user || null)
-        } else {
-          setUserData(null)
-        }
-      } catch (e) {
-        console.error('Failed to parse updated session:', e)
-      }
-    }
-
-    window.addEventListener('storage', handleStorageChange)
-    return () => window.removeEventListener('storage', handleStorageChange)
-  }, [])
+  // HYDRATION-SAFE session via shared external store. The stored session is
+  // applied as a normal post-mount update (never during the hydration render),
+  // so server HTML and first client render always match.
+  const storedUser = useFiloSession().user
+  const userData: UserData | SessionUser | null = propUserData ?? storedUser
 
   const handleLogout = () => {
-    // Clear session from localStorage
-    localStorage.removeItem('filo_session')
-    setUserData(null)
-    
+    // Clear session from localStorage — the shared store notifies all
+    // subscribers (this header, sidebar, layout) automatically.
+    apiClient.clearSession()
+
     // Redirect to home (which will show login form)
     router.push('/')
     router.refresh()

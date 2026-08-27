@@ -1,5 +1,19 @@
+// =============================================================================
+// POST /api/auth/admin/login
+// =============================================================================
+// SECURITY FIX: This route previously validated credentials against the
+// regular users table and issued an `admin_session` cookie to ANY registered
+// user — giving every signed-up account full admin access (user lists,
+// payment approval, activation/suspension, plan management).
+//
+// Admin authentication is now credential-based via the ADMIN_USERNAME /
+// ADMIN_PASSWORD environment variables (documented in .env.example) and
+// issues an HMAC-signed session token (see src/lib/admin-auth.ts). Ordinary
+// product accounts can never obtain an admin session.
+// =============================================================================
+
 import { NextRequest, NextResponse } from 'next/server'
-import { api } from '@convex/_generated/api'
+import { createAdminSessionToken, ADMIN_COOKIE_NAME } from '@/lib/admin-auth'
 
 // Session duration (24 hours)
 const SESSION_MAX_AGE = 24 * 60 * 60
@@ -25,11 +39,21 @@ function recordFailedAttempt(ip: string): void {
   })
 }
 
-// POST /api/auth/admin/login - Admin login against Convex database
+// Constant-time-ish string comparison to avoid leaking match length.
+function safeEqual(a: string, b: string): boolean {
+  if (a.length !== b.length) return false
+  let diff = 0
+  for (let i = 0; i < a.length; i++) {
+    diff |= a.charCodeAt(i) ^ b.charCodeAt(i)
+  }
+  return diff === 0
+}
+
 export async function POST(request: NextRequest) {
   try {
     const body = await request.json()
-    const { username, password } = body
+    const username = typeof body?.username === 'string' ? body.username.trim() : ''
+    const password = typeof body?.password === 'string' ? body.password : ''
 
     if (!username || !password) {
       return NextResponse.json(
@@ -38,9 +62,10 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const clientIP = request.headers.get('x-forwarded-for') ||
-                     request.headers.get('x-real-ip') ||
-                     'unknown'
+    const clientIP =
+      request.headers.get('x-forwarded-for') ||
+      request.headers.get('x-real-ip') ||
+      'unknown'
 
     if (await isRateLimited(clientIP)) {
       return NextResponse.json(
@@ -49,79 +74,43 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Initialize Convex client
-    let convexClient: any
-    try {
-      const { getConvexClient } = await import('@/lib/convex-server')
-      convexClient = getConvexClient()
-    } catch (initError) {
-      console.error('[Admin Login] Failed to initialize Convex client:', initError)
+    // ---- Verify admin credentials against environment configuration ----
+    const envUsername = process.env.ADMIN_USERNAME || 'admin'
+    const envPassword = process.env.ADMIN_PASSWORD
+
+    if (!envPassword) {
+      console.error('[Admin Login] ADMIN_PASSWORD is not configured')
       return NextResponse.json(
-        { error: 'Authentication service unavailable. Please try again later.', code: 'SERVICE_UNAVAILABLE' },
+        {
+          error: 'Admin panel is not configured. Set ADMIN_PASSWORD on the server.',
+          code: 'ADMIN_NOT_CONFIGURED',
+        },
         { status: 503 }
       )
     }
 
-    // Look up user by email (admin login uses email as username)
-    const input = username.trim().toLowerCase()
-    let user: any = null
-    try {
-      user = await convexClient.query(api.users.getUserByEmail, {
-        email: input,
-      })
-    } catch (queryError) {
-      console.error('[Admin Login] User lookup failed:', queryError)
-      return NextResponse.json(
-        { error: 'Login failed. Please try again.', code: 'LOGIN_FAILED' },
-        { status: 500 }
-      )
-    }
-
-    if (!user) {
-      console.log('[Admin Login] User not found:', input)
+    if (!safeEqual(username.toLowerCase(), envUsername.toLowerCase()) || !safeEqual(password, envPassword)) {
       recordFailedAttempt(clientIP)
+      console.warn('[Admin Login] Invalid admin credentials, IP:', clientIP)
       return NextResponse.json(
         { error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' },
         { status: 401 }
       )
     }
 
-    // Hash the password the same way as user login (SHA-256 with filo salt)
-    const encoder = new TextEncoder()
-    const data = encoder.encode(password + "filo_salt_2024_secret")
-    const hashBuffer = await crypto.subtle.digest('SHA-256', data)
-    const passwordHash = Array.from(new Uint8Array(hashBuffer))
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
+    // ---- Issue HMAC-signed admin session cookie ----
+    const sessionToken = await createAdminSessionToken(envUsername)
 
-    if (passwordHash !== (user.passwordHash || '')) {
-      console.log('[Admin Login] Invalid password for:', input)
-      recordFailedAttempt(clientIP)
-      return NextResponse.json(
-        { error: 'Invalid credentials', code: 'INVALID_CREDENTIALS' },
-        { status: 401 }
-      )
-    }
-
-    // Generate session token (64-char hex for middleware compatibility)
-    const array = new Uint8Array(32)
-    crypto.getRandomValues(array)
-    const sessionToken = Array.from(array)
-      .map((b) => b.toString(16).padStart(2, "0"))
-      .join("")
-
-    // Create response with session cookie
     const response = NextResponse.json({
       success: true,
       message: 'Login successful',
       user: {
-        username: user.email,
-        name: user.name,
+        username: envUsername,
         role: 'admin',
       },
     })
 
-    response.cookies.set('admin_session', sessionToken, {
+    response.cookies.set(ADMIN_COOKIE_NAME, sessionToken, {
       httpOnly: true,
       secure: process.env.NODE_ENV === 'production',
       sameSite: 'lax',
@@ -129,10 +118,9 @@ export async function POST(request: NextRequest) {
       path: '/',
     })
 
-    console.log('[Admin Login] Successful for:', user.email, 'IP:', clientIP)
+    console.log('[Admin Login] Successful for:', envUsername)
 
     return response
-
   } catch (error) {
     console.error('[Admin Login] Unhandled error:', error)
     return NextResponse.json(
