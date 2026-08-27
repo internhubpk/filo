@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit",
     "verify": "npm run typecheck && npm run lint && npm run build",
     "test": "node --test tests/unit/*.test.js",
+    "test:e2e": "playwright test",
     "convex:dev": "convex dev",
     "convex:deploy": "convex deploy",
     "convex:seed": "convex run seed:seedDefaultPlans"
@@ -90,6 +91,7 @@
     "zustand": "^5.0.6"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@types/react": "^19",
     "@types/react-dom": "^19",

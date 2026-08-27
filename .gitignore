@@ -69,3 +69,7 @@ server.log
 
 # Instructions
 instructions.md
+
+# Playwright
+test-results/
+playwright-report/

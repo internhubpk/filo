@@ -11,6 +11,16 @@
 //
 // On success this route issues its own self-contained HMAC session token
 // (see src/lib/session.ts), keeping the response shape unchanged for clients.
+//
+// ERROR CODES RETURNED (passed through from the Convex action):
+//   MISSING_FIELDS / INVALID_EMAIL / USER_NOT_FOUND / INVALID_PASSWORD
+//   LOGIN_LOOKUP_FAILED   - user lookup query threw inside Convex
+//   LOGIN_HASH_FAILED     - password verification threw (runtime problem)
+//   LOGIN_SESSION_FAILED  - session insert threw (often a stale deploy)
+//   LOGIN_ERROR           - unexpected action-level failure
+//   CONVEX_ACTION_ERROR   - transport/function-missing level failure. Usually
+//                           means the Convex functions were NOT redeployed
+//                           after this repo changed them: run `npx convex deploy`
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -73,10 +83,23 @@ export async function POST(request: NextRequest) {
         password,
       })
     } catch (actionError) {
-      console.error('[API /auth/login] Convex action failed:', actionError)
+      // Transport-level rejection (no handler ran). Common cause: the deployed
+      // Convex functions are missing or out of sync with this repository.
+      const detail =
+        actionError instanceof Error ? actionError.message : String(actionError)
+      console.error(
+        '[API /auth/login] Convex action rejected:',
+        actionError
+      )
       return NextResponse.json(
-        { success: false, error: 'Login failed. Please try again.', code: 'LOGIN_FAILED' },
-        { status: 500 }
+        {
+          success: false,
+          error:
+            'Authentication service is not responding correctly. If this persists, the Convex backend needs redeployment.',
+          code: 'CONVEX_ACTION_ERROR',
+          detail,
+        },
+        { status: 503 }
       )
     }
 
@@ -89,7 +112,15 @@ export async function POST(request: NextRequest) {
           : code === 'INVALID_PASSWORD'
             ? 'Incorrect password'
             : 'Login failed')
-      const status = code === 'USER_NOT_FOUND' ? 404 : code === 'INVALID_PASSWORD' ? 401 : 500
+      // Infrastructure-level failures are server errors; validation is client.
+      const status =
+        code === 'USER_NOT_FOUND'
+          ? 404
+          : code === 'INVALID_PASSWORD'
+            ? 401
+            : code.endsWith('_FAILED') || code.endsWith('_ERROR')
+              ? 500
+              : 400
 
       console.log('[API /auth/login] Rejected:', normalizedEmail, 'code:', code)
       return NextResponse.json(

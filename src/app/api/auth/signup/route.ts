@@ -11,6 +11,20 @@
 //
 // New signups are activated instantly (status="active") — payments were
 // removed entirely. Admins can suspend accounts for moderation.
+//
+// ERROR CODES RETURNED (passed through from the Convex action):
+//   MISSING_FIELDS / INVALID_NAME / INVALID_EMAIL / PASSWORD_TOO_SHORT /
+//   EMAIL_EXISTS                     - validation / duplicate account
+//   SIGNUP_HASH_FAILED               - hashing threw inside Convex (runtime)
+//   SIGNUP_CREATE_USER_FAILED        - internal user insert threw
+//   SIGNUP_SESSION_FAILED            - internal session insert threw
+//   SIGNUP_EMAIL_CHECK_FAILED        - duplicate-email query threw
+//   SIGNUP_ERROR                     - unexpected action-level failure
+//   CONVEX_ACTION_ERROR              - transport/function-missing level
+//                                      failure (usually means the Convex
+//                                      functions were NOT redeployed after
+//                                      this repo changed them: run
+//                                      `npx convex deploy`)
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -91,14 +105,23 @@ export async function POST(request: NextRequest) {
         password,
       })
     } catch (actionError) {
-      console.error('[API /auth/signup] Convex action failed:', actionError)
+      // Transport-level rejection (no handler ran). Common cause: the deployed
+      // Convex functions are missing or out of sync with this repository.
+      const detail =
+        actionError instanceof Error ? actionError.message : String(actionError)
+      console.error(
+        '[API /auth/signup] Convex action rejected:',
+        actionError
+      )
       return NextResponse.json(
         {
           success: false,
-          error: 'Failed to create user account',
-          code: 'USER_CREATION_FAILED',
+          error:
+            'Authentication service is not responding correctly. If this persists, the Convex backend needs redeployment.',
+          code: 'CONVEX_ACTION_ERROR',
+          detail,
         },
-        { status: 500 }
+        { status: 503 }
       )
     }
 
@@ -111,7 +134,12 @@ export async function POST(request: NextRequest) {
           : code === 'PASSWORD_TOO_SHORT'
             ? 'Password must be at least 6 characters'
             : 'Account creation failed')
-      const status = code === 'EMAIL_EXISTS' ? 409 : 400
+      // Infrastructure-level failures are server errors; validation is client.
+      const status = code === 'EMAIL_EXISTS'
+        ? 409
+        : code.endsWith('_FAILED') || code.endsWith('_ERROR')
+          ? 500
+          : 400
 
       console.log('[API /auth/signup] Rejected:', normalizedEmail, 'code:', code)
       return NextResponse.json(
