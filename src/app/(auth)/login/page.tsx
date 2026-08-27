@@ -12,6 +12,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Eye, EyeOff, Loader2 } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
+import { useFiloSession } from "@/hooks/use-session";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,7 +21,8 @@ import { Alert, AlertDescription } from "@/components/ui/alert";
 function LoginForm() {
   const router = useRouter();
   const search = useSearchParams();
-  const nextPath = search.get("next") || "/dashboard";
+  const explicitNext = search.get("next");
+  const { user: storedUser } = useFiloSession();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -29,13 +31,19 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [fieldErrors, setFieldErrors] = useState<{ email?: string; password?: string }>({});
 
-  // Already logged in? Straight to the workspace.
+  // Already logged in? Straight to the workspace — admins land on /admin.
   useEffect(() => {
     if (apiClient.isAuthenticated()) {
-      router.replace(nextPath.startsWith("/") ? nextPath : "/dashboard");
+      if (storedUser?.isAdmin) router.replace("/admin");
+      else router.replace(explicitNext?.startsWith("/") ? explicitNext : "/dashboard");
     }
      
-  }, []);
+  }, [storedUser?.isAdmin]);
+
+  function destinationFor(isAdmin?: boolean): string {
+    if (explicitNext?.startsWith("/")) return explicitNext;
+    return isAdmin ? "/admin" : "/dashboard";
+  }
 
   async function onSubmit(e: React.FormEvent) {
     e.preventDefault();
@@ -60,7 +68,7 @@ function LoginForm() {
       }
       apiClient.storeSession(res.data.user as any, res.data.sessionToken);
       toast.success("Welcome back");
-      router.replace(nextPath.startsWith("/") ? nextPath : "/dashboard");
+      router.replace(destinationFor(res.data.user.isAdmin));
     } catch {
       setError("Could not reach the server. Check your connection and try again.");
     } finally {

@@ -230,6 +230,16 @@ export const createUserWithPassword = internalMutation({
       return existing._id;
     }
 
+    // Resolve the Free plan so every new account starts with real,
+    // enforceable limits (quota reads user.planId → plans.maxAiGenerations).
+    // If the plans table is empty (unseeded deployment) the assignment is
+    // simply skipped and the billing overview falls back to the Free plan
+    // at read time.
+    const freePlan = await ctx.db
+      .query("plans")
+      .withIndex("by_tier", (q) => q.eq("tier", "free"))
+      .first();
+
     // Create new user with password hash, activated instantly (payments
     // removed). Admins retain suspend/activate controls for moderation.
     const userId = await ctx.db.insert("users", {
@@ -237,6 +247,7 @@ export const createUserWithPassword = internalMutation({
       email: args.email,
       image: args.image,
       passwordHash: args.passwordHash,
+      planId: freePlan?._id,
       status: "active",
       activatedAt: Date.now(),
       createdAt: Date.now(),

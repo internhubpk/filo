@@ -129,7 +129,22 @@ export const getBillingOverview = query({
       .order("desc")
       .first();
 
-    const plan = sub ? await ctx.db.get(sub.planId) : user.planId ? await ctx.db.get(user.planId) : null;
+    // Plan resolution order: active subscription's plan → user's assigned
+    // plan → the Free plan (by tier). The Free fallback keeps usage/limits
+    // meaningful for accounts that simply never subscribed — otherwise the
+    // billing page shows confusing 0/0 limits.
+    let plan: any = null;
+    if (sub) {
+      plan = await ctx.db.get(sub.planId);
+    } else if (user.planId) {
+      plan = await ctx.db.get(user.planId);
+    }
+    if (!plan) {
+      plan = await ctx.db
+        .query("plans")
+        .withIndex("by_tier", (q: any) => q.eq("tier", "free"))
+        .first();
+    }
 
     const payments = await ctx.db
       .query("payments")

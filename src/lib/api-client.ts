@@ -22,6 +22,11 @@ interface User {
   email: string
   image?: string
   planId?: string
+  // Set by /api/auth/login when the user's LIVE Convex record has
+  // isAdmin: true (and an admin session cookie was issued). Used purely for
+  // UX routing (send admins to /admin); every admin API still re-verifies
+  // the live flag server-side.
+  isAdmin?: boolean
   // Payments removed: signups are "active" instantly. "suspended" is
   // admin moderation and revokes AI generation access.
   status?: 'pending_activation' | 'active' | 'suspended'

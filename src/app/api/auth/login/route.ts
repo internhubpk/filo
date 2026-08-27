@@ -170,6 +170,9 @@ export async function POST(request: NextRequest) {
           email: result.user.email,
           status: result.user.status ?? 'active',
           planId: result.user.planId ?? null,
+          // UX hint only: lets the client send DB admins straight to /admin.
+          // Authorization itself is ALWAYS re-verified server-side.
+          isAdmin: adminCookie !== null,
         },
         sessionToken,
       }

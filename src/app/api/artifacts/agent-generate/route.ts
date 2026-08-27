@@ -198,8 +198,9 @@ export async function POST(request: NextRequest) {
         try {
           const convexClient = getConvexClient()
 
-          // Plan limit: explicit plan or sensible default for active users.
-          let planLimit = 500
+          // Plan limit: explicit plan → Free plan (real DB value) → 25.
+          // "No plan assigned" never means "unlimited" — it means Free.
+          let planLimit: number | null = null
           if (livePlanId) {
             try {
               const plan = await convexClient.query(api.plans.getPlanById, {
@@ -209,7 +210,16 @@ export async function POST(request: NextRequest) {
                 planLimit = plan.maxAiGenerations
               }
             } catch (planErr) {
-              console.warn('[AGENT-GENERATE] Plan lookup failed, using default limit:', planErr)
+              console.warn('[AGENT-GENERATE] Plan lookup failed, falling back to Free plan:', planErr)
+            }
+          }
+          if (planLimit === null) {
+            try {
+              const freePlan = await convexClient.query(api.plans.getFreePlan, {})
+              planLimit = freePlan?.maxAiGenerations ?? 25
+            } catch (freeErr) {
+              console.warn('[AGENT-GENERATE] Free plan lookup failed, using default 25:', freeErr)
+              planLimit = 25
             }
           }
 

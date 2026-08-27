@@ -17,7 +17,7 @@
 //   updated in place, missing ones are inserted. Nothing is duplicated.
 // =============================================================================
 
-import { internalMutation } from "./_generated/server";
+import { internalMutation, mutation } from "./_generated/server";
 import { v } from "convex/values";
 
 interface PlanSeed {
@@ -216,5 +216,63 @@ export const seedDefaultPlans = internalMutation({
       `[SEED] plans: inserted=[${inserted.join(", ")}] updated=[${updated.join(", ")}]`
     );
     return { inserted, updated };
+  },
+});
+
+// =============================================================================
+// ensurePlansSeeded — PUBLIC bootstrap for empty deployments.
+// =============================================================================
+// Called by /api/plans when a deployment's plans table turns out to be empty
+// (fresh Convex project that never ran `npm run convex:seed`). This makes a
+// brand-new deployment self-healing instead of showing an empty "Change
+// plan" section.
+//
+// SAFETY: it is a strict no-op unless the plans table has ZERO rows. Once
+// any plan exists (seeded or admin-created), this mutation does nothing —
+// so it can never overwrite admin edits, and it is safe against concurrent
+// callers (worst case: two callers both see empty and insert the same
+// defaults twice, which the admin can prune; in practice the /api/plans
+// route is the only caller and Convex serializes mutations).
+// =============================================================================
+export const ensurePlansSeeded = mutation({
+  args: {},
+  returns: v.object({
+    seeded: v.boolean(),
+    planCount: v.number(),
+  }),
+  handler: async (ctx) => {
+    const existing = await ctx.db.query("plans").collect();
+    if (existing.length > 0) {
+      return { seeded: false, planCount: existing.length };
+    }
+
+    const now = Date.now();
+    for (const plan of DEFAULT_PLANS) {
+      await ctx.db.insert("plans", {
+        name: plan.name,
+        description: plan.description,
+        priceMonthly: plan.priceMonthly,
+        priceYearly: plan.priceYearly,
+        currency: "PKR",
+        features: plan.features,
+        limitations: plan.limitations,
+        popular: plan.popular,
+        active: true,
+        maxAiGenerations: plan.maxAiGenerations,
+        maxStorageMb: plan.maxStorageMb,
+        maxTeamMembers: plan.maxTeamMembers,
+        icon: plan.icon,
+        order: plan.order,
+        contactSales: plan.contactSales,
+        tier: plan.tier,
+        safepayPlanIdMonthly: plan.safepayPlanIdMonthly,
+        safepayPlanIdYearly: plan.safepayPlanIdYearly,
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    console.log(`[SEED] ensurePlansSeeded: inserted ${DEFAULT_PLANS.length} default plans into empty table`);
+    return { seeded: true, planCount: DEFAULT_PLANS.length };
   },
 });

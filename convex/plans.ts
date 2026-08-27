@@ -32,6 +32,19 @@ export const getPlanById = query({
   },
 });
 
+// Get the Free plan (public). Used by quota enforcement as the fallback for
+// accounts without an explicit plan assignment, so "no plan" never means
+// "unlimited".
+export const getFreePlan = query({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.db
+      .query("plans")
+      .withIndex("by_tier", (q) => q.eq("tier", "free"))
+      .first();
+  },
+});
+
 // Get usage stats for a user
 export const getUserUsage = query({
   args: { 

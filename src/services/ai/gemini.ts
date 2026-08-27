@@ -6,7 +6,7 @@
 // Env vars:
 //   GEMINI_API_KEY     (required — from Google AI Studio)
 //   GEMINI_BASE_URL    (optional — default https://generativelanguage.googleapis.com/v1beta)
-//   GEMINI_MODEL       (optional — default gemini-2.0-flash)
+//   GEMINI_MODEL       (optional — default gemini-flash-latest)
 //
 // Notes:
 //   - Keys are read lazily so a missing GEMINI_API_KEY degrades gracefully
@@ -14,6 +14,10 @@
 //   - Uses the REST API via fetch — no SDK dependency, no Node-only APIs,
 //     so it also works inside Convex actions and edge runtimes.
 //   - System messages are hoisted into Gemini's `systemInstruction` field.
+//   - MODEL FALLBACK: Google retires/renames models per project (a key
+//     provisioned at a different time may not see every model). When the
+//     API answers 404 MODEL_NOT_FOUND, the provider transparently retries
+//     the remaining models in GEMINI_MODELS before surfacing an error.
 // =============================================================================
 
 import type {
@@ -24,6 +28,7 @@ import type {
 } from './types'
 import type { AiProvider } from './provider'
 import {
+  AiBaseError,
   ApiKeyMissingError,
   errorFromHttpStatus,
   MalformedResponseError,
@@ -31,16 +36,22 @@ import {
 } from './errors'
 
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
-const DEFAULT_MODEL = 'gemini-2.0-flash'
+const DEFAULT_MODEL = 'gemini-flash-latest'
 
-/** Models we're willing to route to on Gemini, cheapest first. */
+/**
+ * Models we're willing to route to on Gemini, tried in order until one
+ * responds. The `-latest` aliases always resolve to Google's current model
+ * of that family, so they survive per-project model retirements.
+ */
 export const GEMINI_MODELS = [
-  'gemini-2.0-flash', // fast + cheap default
-  'gemini-2.0-flash-lite', // cheapest
-  'gemini-2.5-flash', // newer flash
+  'gemini-flash-latest', // always-current flash alias (default)
+  'gemini-2.5-flash', // current generation flash
+  'gemini-2.0-flash', // previous generation flash (GA)
+  'gemini-flash-lite-latest', // always-current cheap alias
+  'gemini-2.5-flash-lite', // cheap tier
+  'gemini-2.0-flash-lite', // cheapest legacy
+  'gemini-pro-latest', // always-current pro alias (reasoning-heavy)
   'gemini-2.5-pro', // reasoning-heavy work
-  'gemini-1.5-flash', // legacy fallback
-  'gemini-1.5-pro', // legacy fallback
 ] as const
 
 interface GeminiPart {
@@ -104,10 +115,43 @@ export class GeminiProvider implements AiProvider {
 
   async generate(request: AiRequest): Promise<AiResponse> {
     const apiKey = this.getApiKey()
-    const model = request.options?.model || this.defaultModel
+    const requestedModel = request.options?.model || this.defaultModel
     const timeoutMs = request.options?.timeoutMs ?? 60_000
     const startedAt = Date.now()
 
+    // Candidate models: the requested/default model first, then the rest of
+    // the allowed chain. Only an explicit 404 MODEL_NOT_FOUND advances to the
+    // next candidate — every other error surfaces immediately.
+    const candidates = [requestedModel, ...GEMINI_MODELS.filter((m) => m !== requestedModel)]
+
+    let lastError: unknown
+    for (const model of candidates) {
+      try {
+        return await this.generateWithModel(request, model, apiKey, timeoutMs, startedAt)
+      } catch (err) {
+        lastError = err
+        const isModelMissing =
+          err instanceof AiBaseError &&
+          err.code === 'MODEL_NOT_FOUND'
+        if (isModelMissing) {
+          console.warn(
+            `[AI] GEMINI model not found: ${model} — trying next candidate (${candidates.filter((m) => m !== model).length} left)`
+          )
+          continue
+        }
+        throw normalizeAiError('GEMINI', err)
+      }
+    }
+    throw normalizeAiError('GEMINI', lastError)
+  }
+
+  private async generateWithModel(
+    request: AiRequest,
+    model: string,
+    apiKey: string,
+    timeoutMs: number,
+    startedAt: number
+  ): Promise<AiResponse> {
     const body = this.buildRequestBody(request, model)
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
@@ -179,7 +223,7 @@ export class GeminiProvider implements AiProvider {
       // Cheapest possible probe: 1-token generation on the cheapest model.
       await this.generate({
         messages: [{ role: 'user', content: 'ping' }],
-        options: { model: 'gemini-2.0-flash-lite', maxTokens: 1, timeoutMs: 10_000 },
+        options: { model: 'gemini-flash-lite-latest', maxTokens: 1, timeoutMs: 10_000 },
       })
       return { provider: 'GEMINI', configured: true, latencyMs: Date.now() - startedAt }
     } catch (err) {

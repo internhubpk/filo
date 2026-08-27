@@ -32,6 +32,7 @@ export interface SessionUser {
   email: string
   status?: 'pending_activation' | 'active' | 'suspended'
   planId?: string | null
+  isAdmin?: boolean
 }
 
 interface SessionSnapshot {
