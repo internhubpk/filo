@@ -15,6 +15,8 @@ import { NextRequest, NextResponse } from 'next/server'
 import { validateSessionToken } from '@/lib/session'
 import { validateFile, formatFileSize } from '@/services/file-service'
 import { uploadToR2, generateR2Key, generateDownloadUrl } from '@/lib/r2/client'
+import { getConvexClient } from '@/lib/convex-server'
+import { api } from '@convex/_generated/api'
 
 async function requireSession(request: NextRequest) {
   const authHeader = request.headers.get('authorization')
@@ -119,20 +121,40 @@ export async function POST(request: NextRequest) {
       console.warn('[FILES] Could not generate download URL:', urlError)
     }
 
+    // ---- Register metadata in Convex (single source of truth for the file
+    // manager + storage quotas). Ownership = authenticated user. ----
+    let dbFileId: string | null = null
+    if (user.id !== 'dev-user') {
+      try {
+        dbFileId = await getConvexClient().mutation(api.files.registerFile, {
+          userId: user.id as any,
+          originalName: file.name.slice(0, 255),
+          mimeType: validation.metadata.mimeType || mimeType || file.type || 'application/octet-stream',
+          size: file.size,
+          r2Key,
+        }) as unknown as string
+      } catch (dbErr) {
+        console.warn('[FILES] Convex registration failed (file exists in R2):', dbErr)
+      }
+    }
+
+    const uploadWarnings = [
+      ...(dbFileId ? [] : ['Metadata registration in database failed — the file exists in storage but may not appear in your file list.']),
+      ...(validation.warnings.length > 0 ? validation.warnings : []),
+    ]
+
     return NextResponse.json({
       success: true,
-      fileId: r2Key,
+      fileId: dbFileId ?? r2Key,
       filename: file.name,
       size: file.size,
       formattedSize: formatFileSize(file.size),
       mimeType: validation.metadata.mimeType || mimeType || file.type,
       category: validation.metadata.category,
-      // R2-specific fields
       r2Key,
       downloadUrl,
       storageType: 'r2',
-      // Don't include fileData when using R2 - saves bandwidth
-      warnings: validation.warnings.length > 0 ? validation.warnings : undefined,
+      warnings: uploadWarnings.length > 0 ? uploadWarnings : undefined,
     })
 
   } catch (error) {
@@ -148,10 +170,10 @@ export async function POST(request: NextRequest) {
   }
 }
 
-// GET /api/files - List files for workspace/user
+// GET /api/files - List files for the authenticated user (REAL Convex rows)
 export async function GET(request: NextRequest) {
   try {
-    // ---- Auth (was missing) ----
+    // ---- Auth ----
     const user = await requireSession(request)
     if (!user) {
       return NextResponse.json(
@@ -160,20 +182,36 @@ export async function GET(request: NextRequest) {
       )
     }
 
-    const { searchParams } = new URL(request.url)
-    const workspaceId = searchParams.get('workspaceId')
-    const type = searchParams.get('type')
-
-    // Ownership enforced: users can only ever list their own files.
+    let files: any[] = []
+    if (user.id !== 'dev-user') {
+      try {
+        files = (await getConvexClient().query(api.files.getUserFiles, {
+          userId: user.id as any,
+        })) as any[]
+      } catch (listErr) {
+        console.error('[FILES] Convex listing failed:', listErr)
+        return NextResponse.json(
+          { success: false, error: 'Failed to load files', code: 'LIST_ERROR' },
+          { status: 503 }
+        )
+      }
+    }
 
     return NextResponse.json({
       success: true,
-      files: [],
-      total: 0,
-      filters: { workspaceId, ownerId: user.id, type },
-      message: 'File metadata listing is handled by Convex; uploads are stored in R2.',
+      files: files.map((f) => ({
+        id: f._id,
+        name: f.originalName,
+        originalName: f.originalName,
+        mimeType: f.mimeType,
+        size: f.size,
+        r2Key: f.r2Key,
+        createdAt: f.createdAt,
+        uploaded: f.uploaded,
+      })),
+      total: files.length,
+      storageBytes: files.reduce((s, f) => s + (f.size || 0), 0),
     })
-
   } catch (error) {
     console.error('[FILES] List error:', error)
     return NextResponse.json(

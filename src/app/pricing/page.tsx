@@ -1,412 +1,294 @@
-'use client'
+"use client";
 
-import React, { useState } from 'react'
-import Link from 'next/link'
-import { useRouter } from 'next/navigation'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
-import { Button } from '@/components/ui/button'
-import { Badge } from '@/components/ui/badge'
-import { Separator } from '@/components/ui/separator'
+// =============================================================================
+// PRICING (public) — driven ENTIRELY by Convex plans via /api/plans.
+// Logged-in visitors check out directly; visitors are sent to /register.
+// =============================================================================
+
+import { useEffect, useState } from "react";
+import Link from "next/link";
+import { ArrowLeft, Check, Loader2, Sparkles, Crown, Users, Building2 } from "lucide-react";
+import { toast } from "sonner";
+import { cn } from "@/lib/utils";
+import { formatBytes, formatPkr } from "@/lib/format";
+import { apiClient } from "@/lib/api-client";
+import { useFiloSession } from "@/hooks/use-session";
+import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Check,
-  Crown,
-  Users,
-  Building2,
-  ArrowLeft,
-  ArrowRight,
-  Star,
-  Rocket,
-  Shield,
-  Sparkles,
-  CreditCard,
-  Phone,
-  Mail,
-  Sun,
-  Moon,
-  X
-} from 'lucide-react'
-import { getDefaultPlans, currencyConfig, contactSalesUrl, type PlanConfig } from '@/config/plans'
-import { useTheme } from 'next-themes'
+  Accordion,
+  AccordionContent,
+  AccordionItem,
+  AccordionTrigger,
+} from "@/components/ui/accordion";
+import { FadeUp, FadeIn } from "@/components/animations";
 
-// Icon mapping for plans
-const iconMap: Record<string, React.ComponentType<{ className?: string }>> = {
-  Crown,
-  Users,
-  Building2,
-  Star,
-  Rocket,
-  Shield,
-  Sparkles,
+interface PlanRow {
+  _id: string;
+  name: string;
+  description: string;
+  tier?: string;
+  priceMonthly: number;
+  priceYearly: number;
+  currency: string;
+  features: string[];
+  limitations?: string[];
+  popular: boolean;
+  active: boolean;
+  contactSales?: boolean;
+  maxAiGenerations: number;
+  maxStorageMb: number;
 }
 
+const PLAN_ICONS: Record<string, typeof Sparkles> = { free: Sparkles, pro: Crown, team: Users, department: Building2 };
+
+const FAQ = [
+  {
+    q: "How do payments work?",
+    a: "Paid plans are billed in PKR through Safepay, a Pakistani payment platform. After you complete checkout, Safepay notifies our system with a signed webhook and your plan activates automatically — usually within seconds.",
+  },
+  {
+    q: "What happens when I hit my generation limit?",
+    a: "Generation pauses until the next month, or you can upgrade immediately for a higher limit. Failed generations never count against your quota.",
+  },
+  {
+    q: "Can I cancel?",
+    a: "Yes — one click from the billing page. Your plan stays active until the end of the period you've paid for, then your account moves to Free. Your documents are never deleted.",
+  },
+  {
+    q: "Do you offer yearly billing?",
+    a: "Yes — yearly plans save about 17% compared to paying monthly.",
+  },
+];
+
 export default function PricingPage() {
-  const router = useRouter()
-  const [plans] = useState<PlanConfig[]>(getDefaultPlans())
-  const [isAnnual, setIsAnnual] = useState(false)
-  const { theme, setTheme } = useTheme()
+  const { user } = useFiloSession();
+  const [plans, setPlans] = useState<PlanRow[] | null>(null);
+  const [error, setError] = useState(false);
+  const [interval, setInterval] = useState<"monthly" | "yearly">("monthly");
+  const [busy, setBusy] = useState<string | null>(null);
 
-  const handleGetStarted = (_planId: string) => {
-    // Payments are removed for now — plans on this page are informational.
-    // Sending the user to sign up lets them start generating immediately
-    // (every account includes a monthly AI generation allowance).
-    router.push('/?signup=true')
-  }
+  useEffect(() => {
+    let cancelled = false;
+    apiClient
+      .getPlans()
+      .then((res) => {
+        if (cancelled) return;
+        if (res.success && Array.isArray(res.data)) setPlans(((res.data as unknown) as PlanRow[]).filter((p) => p.active));
+        else setError(true);
+      })
+      .catch(() => !cancelled && setError(true));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
-  const handleContactSales = () => {
-    window.open(contactSalesUrl, '_blank')
-  }
-
-  const formatPrice = (amount: number): string => {
-    if (amount === 0) return ''
-    return `${currencyConfig.symbol}${amount}`
+  async function choose(plan: PlanRow) {
+    if (!user) {
+      window.location.href = `/register?plan=${plan.tier ?? plan._id}`;
+      return;
+    }
+    if (plan.tier === "free") {
+      window.location.href = "/dashboard";
+      return;
+    }
+    if (plan.contactSales) {
+      window.location.href = "mailto:sales@filo.app?subject=Filo%20Department%20plan";
+      return;
+    }
+    setBusy(plan._id);
+    try {
+      const res = await apiClient.startCheckout({ planId: plan._id, interval });
+      if (!res.success || !res.data?.checkoutUrl) {
+        toast.error(res.error || "Could not start checkout");
+        return;
+      }
+      window.location.href = res.data.checkoutUrl;
+    } catch {
+      toast.error("Checkout failed — please try again.");
+    } finally {
+      setBusy(null);
+    }
   }
 
   return (
     <div className="min-h-screen bg-background">
-      {/* Header */}
-      <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-        <div className="container mx-auto flex h-16 items-center justify-between px-4">
-          {/* Logo */}
-          <Link href="/" className="flex items-center gap-3 hover:opacity-80 transition-opacity cursor-pointer">
-            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-primary shadow-sm">
-              <Sparkles className="h-5 w-5 text-primary-foreground" />
-            </div>
-            <span className="text-xl font-bold tracking-tight">Filo</span>
+      {/* Nav */}
+      <header className="border-b bg-background/85 backdrop-blur">
+        <nav className="mx-auto flex h-14 max-w-5xl items-center gap-4 px-4 sm:px-6">
+          <Link href="/" className="flex items-center gap-2">
+            <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
+              <Sparkles className="size-4" />
+            </span>
+            <span className="text-[15px] font-semibold tracking-tight">Filo</span>
           </Link>
-
-          {/* Right side actions */}
-          <div className="flex items-center gap-3">
-            {/* Theme toggle */}
-            <Button
-              variant="ghost"
-              size="icon"
-              onClick={() => setTheme(theme === 'dark' ? 'light' : 'dark')}
-              className="cursor-pointer"
-            >
-              <Sun className="h-4 w-4 rotate-0 scale-100 transition-all dark:-rotate-90 dark:scale-0" />
-              <Moon className="absolute h-4 w-4 rotate-90 scale-0 transition-all dark:rotate-0 dark:scale-100" />
-              <span className="sr-only">Toggle theme</span>
-            </Button>
-
-            <Button 
-              variant="ghost" 
-              size="sm" 
-              asChild
-              className="gap-2 cursor-pointer"
-            >
-              <Link href="/">
-                <ArrowLeft className="h-4 w-4" />
-                Back to App
-              </Link>
-            </Button>
-
-            <Button 
-              size="sm" 
-              asChild
-              className="gap-2 cursor-pointer"
-            >
-              <Link href="/?signup=true">
-                Get Started
-              </Link>
-            </Button>
-          </div>
-        </div>
+          <Button asChild variant="ghost" size="sm" className="ml-auto">
+            <Link href="/">
+              <ArrowLeft className="mr-1.5 size-3.5" /> Back home
+            </Link>
+          </Button>
+          <Button asChild size="sm">
+            <Link href={user ? "/dashboard" : "/register"}>{user ? "Dashboard" : "Get started"}</Link>
+          </Button>
+        </nav>
       </header>
 
-      {/* Hero Section */}
-      <section className="relative overflow-hidden border-b bg-gradient-to-br from-background via-background to-muted/30 py-16 lg:py-24">
-        <div className="absolute inset-0 bg-[linear-gradient(to_right,#8882_1px,transparent_1px),linear-gradient(to_bottom,#8882_1px,transparent_1px)] bg-[size:24px_24px] [mask-image:radial-gradient(ellipse_60%_50%_at_50%_0%,#000_70%,transparent_100%)]" />
-        
-        <div className="container relative mx-auto px-4 text-center">
-          <Badge 
-            variant="secondary" 
-            className="mb-6 px-4 py-1.5 text-sm cursor-default select-none"
-          >
-            <Star className="mr-2 h-3.5 w-3.5 text-yellow-500" />
-            Simple, Transparent Pricing
-          </Badge>
-
-          <h1 className="mb-6 text-4xl font-bold tracking-tight sm:text-5xl lg:text-6xl leading-tight">
-            Choose Your
-            <span className="bg-gradient-to-r from-primary to-primary/70 bg-clip-text text-transparent"> Perfect Plan</span>
-          </h1>
-
-          <p className="mx-auto mb-10 max-w-2xl text-lg text-muted-foreground leading-relaxed">
-            All plans include core features. No hidden fees, cancel anytime.
+      <main className="mx-auto max-w-5xl px-4 py-14 sm:px-6 sm:py-20">
+        <FadeIn className="mx-auto max-w-2xl text-center">
+          <p className="text-xs font-semibold uppercase tracking-[0.14em] text-primary">Pricing</p>
+          <h1 className="text-display mt-3 text-4xl sm:text-5xl">Pay for output, not seats you don&apos;t use.</h1>
+          <p className="mt-4 text-[15px] text-muted-foreground">
+            Every plan includes real file exports and secure cloud storage. Prices in PKR, billed securely through Safepay.
           </p>
-
-          {/* Billing Toggle */}
-          <div className="flex items-center justify-center gap-4 mb-8">
-            <span className={`text-sm font-medium ${!isAnnual ? 'text-foreground' : 'text-muted-foreground'}`}>
-              Monthly
-            </span>
-            <button
-              onClick={() => setIsAnnual(!isAnnual)}
-              className={`relative inline-flex h-7 w-12 items-center rounded-full transition-colors cursor-pointer ${
-                isAnnual ? 'bg-primary' : 'bg-muted'
-              }`}
-            >
-              <span
-                className={`inline-block h-5 w-5 transform rounded-full bg-white transition-transform shadow-sm ${
-                  isAnnual ? 'translate-x-6' : 'translate-x-1'
-                }`}
-              />
-            </button>
-            <span className={`text-sm font-medium ${isAnnual ? 'text-foreground' : 'text-muted-foreground'}`}>
-              Annual
-              <Badge variant="secondary" className="ml-2 text-xs cursor-default">Save ~17%</Badge>
-            </span>
-          </div>
-        </div>
-      </section>
-
-      {/* Plans Grid */}
-      <section className="py-12 md:py-16 lg:py-20">
-        <div className="container mx-auto px-4">
-          <div className="grid gap-6 md:gap-8 md:grid-cols-2 lg:grid-cols-3 max-w-6xl mx-auto items-start">
-            {plans.map((plan) => {
-              const IconComponent = iconMap[plan.icon] || Crown
-
-              return (
-                <Card 
-                  key={plan.id}
-                  className={`relative flex flex-col cursor-pointer transition-all duration-300 hover:shadow-xl ${
-                    plan.popular ? 'border-primary shadow-lg md:scale-[1.02] z-10' : ''
-                  } ${plan.contactSales ? 'border-dashed border-primary/30' : ''}`}
-                >
-                  {/* Badge */}
-                  {plan.badge && (
-                    <div className={`absolute -top-3 left-1/2 -translate-x-1/2 z-20 ${
-                      plan.contactSales 
-                        ? '' 
-                        : ''
-                    }`}>
-                      <Badge 
-                        className={`px-2 sm:px-3 py-1 gap-1 cursor-default text-xs ${
-                          plan.popular 
-                            ? 'bg-primary text-primary-foreground' 
-                            : plan.contactSales
-                              ? 'bg-gradient-to-r from-primary/80 to-primary/60 text-primary-foreground'
-                              : 'bg-secondary text-secondary-foreground'
-                        }`}
-                      >
-                        {plan.badge === 'Enterprise' && <Building2 className="h-3 w-3 mr-1" />}
-                        {plan.badge === 'Most Popular' && <Star className="h-3 w-3 mr-1" />}
-                        <span className="hidden xs:inline">{plan.badge}</span>
-                        <span className="xs:hidden">{plan.badge === 'Enterprise' ? 'Ent.' : plan.badge}</span>
-                      </Badge>
-                    </div>
-                  )}
-                  
-                  <CardHeader className="text-center pb-4 px-4 sm:px-6">
-                    <div className={`mx-auto flex h-12 w-12 sm:h-14 sm:w-14 items-center justify-center rounded-xl transition-all duration-200 ${
-                      plan.popular ? 'bg-primary/10' : plan.contactSales ? 'bg-gradient-to-br from-primary/10 to-primary/5' : 'bg-muted'
-                    }`}>
-                      <IconComponent className={`h-6 w-6 sm:h-7 sm:w-7 ${
-                        plan.popular ? 'text-primary' : plan.contactSales ? 'text-primary/80' : 'text-muted-foreground'
-                      }`} />
-                    </div>
-                    
-                    <CardTitle className="mt-3 sm:mt-4 text-lg sm:text-xl">{plan.name}</CardTitle>
-                    <CardDescription className="text-xs sm:text-sm">{plan.description}</CardDescription>
-                    
-                    <div className="mt-3 sm:mt-4">
-                      {plan.contactSales ? (
-                        <div className="text-center space-y-1">
-                          <div className="text-2xl sm:text-3xl font-bold">Custom Pricing</div>
-                          <p className="text-xs sm:text-sm text-muted-foreground">Tailored to your needs</p>
-                        </div>
-                      ) : isAnnual ? (
-                        <div className="text-center">
-                          <div className="flex items-baseline justify-center gap-1">
-                            <span className="text-3xl sm:text-4xl font-bold">{formatPrice(plan.price.yearly)}</span>
-                            <span className="text-xs sm:text-sm text-muted-foreground">/year</span>
-                          </div>
-                          <p className="text-xs sm:text-sm text-muted-foreground mt-1">
-                            ~{formatPrice(Math.round(plan.price.yearly / 12))}/month
-                          </p>
-                          <Badge variant="secondary" className="mt-2 text-xs cursor-default">
-                            Save {formatPrice(plan.price.monthly * 12 - plan.price.yearly)}/yr
-                          </Badge>
-                        </div>
-                      ) : (
-                        <div className="flex items-baseline justify-center gap-1">
-                          <span className="text-3xl sm:text-4xl font-bold">{formatPrice(plan.price.monthly)}</span>
-                          <span className="text-xs sm:text-sm text-muted-foreground">/month</span>
-                        </div>
-                      )}
-                    </div>
-                  </CardHeader>
-
-                  <CardContent className="flex-1 space-y-4">
-                    {/* Features */}
-                    <ul className="space-y-3">
-                      {plan.features.slice(0, plan.contactSales ? 8 : 6).map((feature, idx) => (
-                        <li key={idx} className="flex items-start gap-3">
-                          <Check className="h-5 w-5 text-green-600 shrink-0 mt-0.5" />
-                          <span className="text-sm">{feature}</span>
-                        </li>
-                      ))}
-                      
-                      {plan.limitations && plan.limitations.length > 0 && (
-                        <>
-                          <Separator className="my-2" />
-                          {plan.limitations.map((limitation, idx) => (
-                            <li key={idx} className="flex items-start gap-3">
-                              <X className="h-5 w-5 text-red-500 shrink-0 mt-0.5" />
-                              <span className="text-sm text-muted-foreground">{limitation}</span>
-                            </li>
-                          ))}
-                        </>
-                      )}
-                    </ul>
-
-                    {/* CTA Button */}
-                    <Button 
-                      className="w-full mt-6 cursor-pointer hover:shadow-md transition-all min-h-[44px]"
-                      variant={
-                        plan.contactSales 
-                          ? "outline" 
-                          : plan.popular 
-                            ? "default" 
-                            : "secondary"
-                      }
-                      onClick={() => plan.contactSales ? handleContactSales() : handleGetStarted(plan.id)}
-                    >
-                      {plan.contactSales ? (
-                        <>
-                          <Phone className="mr-2 h-4 w-4" />
-                          {plan.cta}
-                          <Mail className="ml-2 h-4 w-4" />
-                        </>
-                      ) : (
-                        <>
-                          {plan.cta}
-                          <ArrowRight className="ml-2 h-4 w-4" />
-                        </>
-                      )}
-                    </Button>
-                  </CardContent>
-                </Card>
-              )
-            })}
-          </div>
-        </div>
-      </section>
-
-      {/* FAQ Section */}
-      <section id="faq" className="border-t py-12 md:py-16 bg-muted/30">
-        <div className="container mx-auto px-4">
-          <div className="mx-auto max-w-3xl text-center mb-8 md:mb-12">
-            <h2 className="text-2xl sm:text-3xl font-bold mb-4 flex items-center justify-center gap-2">
-              <Shield className="h-7 w-7 sm:h-8 sm:w-8 text-primary" />
-              Frequently Asked Questions
-            </h2>
-            <p className="text-sm sm:text-base text-muted-foreground">
-              Everything you need to know about Filo's pricing
-            </p>
-          </div>
-
-          <div className="grid gap-4 sm:gap-6 md:grid-cols-2 max-w-4xl mx-auto">
-            {[
-              {
-                q: 'Is there a free option available?',
-                a: 'Yes! Payments are removed for now — every account is activated instantly and includes a monthly AI generation allowance so you can try Filo\'s full capabilities.',
-                icon: Sparkles
-              },
-              {
-                q: 'What does my account include?',
-                a: 'Every signup gets instant access to all document types (DOCX, PDF, XLSX, PPTX, CSV) with a monthly AI generation allowance that resets automatically each month.',
-                icon: CreditCard
-              },
-              {
-                q: 'Can I change my plan later?',
-                a: 'Absolutely! You can upgrade or downgrade your plan at any time. Changes take effect at your next billing cycle.',
-                icon: Crown
-              },
-              {
-                q: 'Is there a long-term contract?',
-                a: 'No contracts. You can cancel your subscription at any time. We believe in earning your business every month.',
-                icon: Shield
-              },
-              {
-                q: 'What happens to my data if I cancel?',
-                a: 'Your artifacts and data are preserved for 30 days after cancellation. You can export everything or re-subscribe anytime.',
-                icon: Rocket
-              },
-              {
-                q: 'Do you offer custom enterprise solutions?',
-                a: 'Yes! Our Department plan includes custom pricing with dedicated support, SSO, advanced security, and tailored features.',
-                icon: Building2
-              },
-            ].map((faq, idx) => (
-              <Card key={idx} className="cursor-default hover:shadow-md transition-shadow">
-                <CardContent className="pt-4 sm:pt-6 px-4 sm:px-6">
-                  <div className="flex items-start gap-3">
-                    <div className="flex h-9 w-9 sm:h-10 sm:w-10 items-center justify-center rounded-lg bg-primary/10 shrink-0">
-                      <faq.icon className="h-4 w-4 sm:h-5 sm:w-5 text-primary" />
-                    </div>
-                    <div>
-                      <h3 className="font-semibold mb-1.5 sm:mb-2 text-sm sm:text-base">{faq.q}</h3>
-                      <p className="text-xs sm:text-sm text-muted-foreground leading-relaxed">{faq.a}</p>
-                    </div>
-                  </div>
-                </CardContent>
-              </Card>
+          <div className="mt-6 inline-flex rounded-lg border p-0.5">
+            {(["monthly", "yearly"] as const).map((i) => (
+              <button
+                key={i}
+                onClick={() => setInterval(i)}
+                className={cn(
+                  "rounded-md px-4 py-1.5 text-sm font-medium capitalize transition-colors",
+                  interval === i ? "bg-primary text-primary-foreground" : "text-muted-foreground hover:text-foreground"
+                )}
+                aria-pressed={interval === i}
+              >
+                {i}
+                {i === "yearly" && <span className="ml-1 text-[10px] opacity-80">−17%</span>}
+              </button>
             ))}
           </div>
-        </div>
-      </section>
+        </FadeIn>
 
-      {/* CTA Section */}
-      <section className="py-12 md:py-16 lg:py-20">
-        <div className="container mx-auto px-4 text-center">
-          <Card className="max-w-2xl mx-auto overflow-hidden">
-            <div className="bg-gradient-to-r from-primary/10 via-primary/5 to-transparent p-6 sm:p-8 lg:p-12">
-              <Sparkles className="mx-auto h-10 w-10 sm:h-12 sm:w-12 text-primary mb-3 sm:mb-4" />
-              <h2 className="text-2xl sm:text-3xl font-bold mb-3 sm:mb-4">Ready to get started?</h2>
-              <p className="text-sm sm:text-base text-muted-foreground mb-6 sm:mb-8 max-w-md mx-auto">
-                Join thousands of professionals creating amazing documents with AI.
-              </p>
-              <div className="flex flex-col sm:flex-row gap-4 justify-center">
-                <Button size="lg" asChild className="cursor-pointer gap-2 min-h-[48px]">
-                  <Link href="/?signup=true">
-                    Start Creating for Free
-                    <ArrowRight className="ml-2 h-5 w-5" />
-                  </Link>
-                </Button>
-                <Button size="lg" variant="outline" onClick={handleContactSales} className="cursor-pointer gap-2 min-h-[48px]">
-                  <Phone className="mr-2 h-5 w-5" />
-                  Contact Sales
-                </Button>
-              </div>
+        {/* Plans */}
+        <div className="mt-12 grid gap-5 md:grid-cols-2 xl:grid-cols-4">
+          {error ? (
+            <div className="col-span-full rounded-xl border border-dashed px-6 py-14 text-center text-sm text-muted-foreground">
+              Plans couldn&apos;t load just now. Please refresh the page in a moment.
             </div>
-          </Card>
+          ) : !plans ? (
+            [0, 1, 2, 3].map((i) => <Skeleton key={i} className="h-96 rounded-xl" />)
+          ) : (
+            plans.map((plan, idx) => {
+              const Icon = PLAN_ICONS[plan.tier ?? ""] ?? Sparkles;
+              const price = interval === "yearly" ? plan.priceYearly : plan.priceMonthly;
+              return (
+                <FadeUp key={plan._id} delay={idx * 0.06}>
+                  <div
+                    className={cn(
+                      "relative flex h-full flex-col rounded-xl border bg-card p-6",
+                      plan.popular && "border-primary/50 border-glow"
+                    )}
+                  >
+                    {plan.popular && (
+                      <Badge className="absolute -top-2.5 left-6 rounded-full bg-primary px-2.5 py-0.5 text-[10px] font-semibold">
+                        Most popular
+                      </Badge>
+                    )}
+                    <div className="flex items-center gap-2">
+                      <Icon className="size-4 text-primary" />
+                      <h2 className="font-semibold tracking-tight">{plan.name}</h2>
+                    </div>
+                    <p className="mt-1.5 min-h-10 text-sm text-muted-foreground">{plan.description}</p>
+                    <div className="mt-4 flex items-baseline gap-1">
+                      {plan.contactSales || price === 0 ? (
+                        <span className="text-3xl font-semibold tracking-tight">{plan.contactSales ? "Custom" : "Free"}</span>
+                      ) : (
+                        <>
+                          <span className="text-3xl font-semibold tracking-tight">{formatPkr(price)}</span>
+                          <span className="text-sm text-muted-foreground">/{interval === "yearly" ? "yr" : "mo"}</span>
+                        </>
+                      )}
+                    </div>
+                    <p className="mt-1.5 text-xs text-muted-foreground">
+                      {plan.maxAiGenerations >= 1000000 ? "Unlimited" : plan.maxAiGenerations.toLocaleString()} generations/mo ·{" "}
+                      {formatBytes(plan.maxStorageMb * 1024 * 1024)}
+                    </p>
+                    <ul className="mt-5 flex-1 space-y-2">
+                      {plan.features.map((f) => (
+                        <li key={f} className="flex items-start gap-2 text-sm text-muted-foreground">
+                          <Check className="mt-0.5 size-3.5 shrink-0 text-emerald-500" /> {f}
+                        </li>
+                      ))}
+                    </ul>
+                    <Button
+                      className="mt-6 w-full"
+                      variant={plan.popular ? "default" : "outline"}
+                      disabled={busy === plan._id}
+                      onClick={() => void choose(plan)}
+                    >
+                      {busy === plan._id && <Loader2 className="mr-1.5 size-4 animate-spin" />}
+                      {plan.contactSales
+                        ? "Contact sales"
+                        : price === 0
+                          ? user
+                            ? "Go to dashboard"
+                            : "Start free"
+                          : `Choose ${plan.name}`}
+                    </Button>
+                  </div>
+                </FadeUp>
+              );
+            })
+          )}
         </div>
-      </section>
 
-      {/* Footer */}
-      <footer className="border-t py-8">
-        <div className="container mx-auto px-4">
-          <div className="flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-2 text-sm text-muted-foreground">
-              <Sparkles className="h-4 w-4" />
-              © 2024 Filo. All rights reserved.
+        {/* Comparison */}
+        {plans && (
+          <FadeUp className="mt-14 overflow-hidden rounded-xl border">
+            <div className="border-b bg-muted/50 px-5 py-3">
+              <h2 className="text-sm font-semibold">What&apos;s included</h2>
             </div>
-            <div className="flex items-center gap-6 text-sm">
-              <Link href="#" className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
-                Privacy
-              </Link>
-              <Link href="#" className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
-                Terms
-              </Link>
-              <Link href="#" className="text-muted-foreground hover:text-foreground transition-colors cursor-pointer">
-                Contact
-              </Link>
+            <div className="overflow-x-auto">
+              <table className="w-full min-w-[560px] text-sm">
+                <thead>
+                  <tr className="border-b text-left text-xs text-muted-foreground">
+                    <th className="px-5 py-2.5 font-medium">Feature</th>
+                    {plans.map((p) => (
+                      <th key={p._id} className="px-5 py-2.5 text-center font-medium">{p.name}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    ["AI generations / month", (p: PlanRow) => (p.maxAiGenerations >= 1000000 ? "Unlimited" : p.maxAiGenerations.toLocaleString())],
+                    ["Storage", (p: PlanRow) => formatBytes(p.maxStorageMb * 1024 * 1024)],
+                    ["All export formats", (p: PlanRow) => (p.tier === "free" ? "DOCX, PDF, CSV" : "DOCX, PDF, XLSX, PPTX, CSV")],
+                    ["Priority queue", (p: PlanRow) => (p.tier === "free" ? "—" : "✓")],
+                    ["Brand profiles", (p: PlanRow) => (p.tier === "free" ? "—" : "✓")],
+                    ["Team features", (p: PlanRow) => (p.tier === "team" || p.tier === "department" ? "✓" : "—")],
+                  ].map(([label, get]) => (
+                    <tr key={label as string} className="border-b last:border-0">
+                      <td className="px-5 py-3 font-medium">{label as string}</td>
+                      {plans.map((p) => (
+                        <td key={p._id} className="px-5 py-3 text-center text-muted-foreground">
+                          {(get as (p: PlanRow) => string)(p)}
+                        </td>
+                      ))}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
             </div>
-          </div>
+          </FadeUp>
+        )}
+
+        {/* FAQ */}
+        <div className="mx-auto mt-16 max-w-2xl">
+          <FadeUp>
+            <h2 className="text-display text-center text-2xl">Billing questions</h2>
+          </FadeUp>
+          <FadeUp delay={0.06} className="mt-8">
+            <Accordion type="single" collapsible>
+              {FAQ.map((f) => (
+                <AccordionItem key={f.q} value={f.q}>
+                  <AccordionTrigger className="text-left text-[15px]">{f.q}</AccordionTrigger>
+                  <AccordionContent className="text-sm leading-relaxed text-muted-foreground">{f.a}</AccordionContent>
+                </AccordionItem>
+              ))}
+            </Accordion>
+          </FadeUp>
         </div>
-      </footer>
+      </main>
     </div>
-  )
+  );
 }

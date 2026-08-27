@@ -26,7 +26,11 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { api } from '@convex/_generated/api'
 import { createSessionToken } from '@/lib/session'
+import { createAdminSessionToken, ADMIN_COOKIE_NAME } from '@/lib/admin-auth'
 import { getConvexClient } from '@/lib/convex-server'
+
+// Admin cookie lifetime (matches the admin login flow)
+const SESSION_MAX_AGE = 24 * 60 * 60
 
 export async function POST(request: NextRequest) {
   try {
@@ -138,9 +142,26 @@ export async function POST(request: NextRequest) {
       planId: result.user.planId ?? null,
     })
 
-    console.log('[API /auth/login] Login successful for:', result.user.email)
+    // ---- DB admins additionally receive an admin session cookie ----
+    // The /admin pages are cookie-gated by middleware (Edge runtime, no DB
+    // access). Issuing the cookie here — ONLY after Convex confirmed the
+    // user's live isAdmin flag — lets database admins reach the console.
+    // Every admin API endpoint still re-verifies the LIVE isAdmin flag, so
+    // the cookie alone grants nothing.
+    let adminCookie: string | null = null
+    try {
+      const convexClient = getConvexClient()
+      const liveAdmin = (await convexClient.query('users:getUser' as never, {
+        userId: result.user.id as never,
+      } as never)) as { isAdmin?: boolean; status?: string } | null
+      if (liveAdmin?.isAdmin === true && liveAdmin.status === 'active') {
+        adminCookie = await createAdminSessionToken(result.user.id)
+      }
+    } catch (adminErr) {
+      console.warn('[API /auth/login] admin flag lookup skipped:', adminErr)
+    }
 
-    return NextResponse.json({
+    const loginResponse = NextResponse.json({
       success: true,
       data: {
         user: {
@@ -153,6 +174,19 @@ export async function POST(request: NextRequest) {
         sessionToken,
       }
     })
+
+    if (adminCookie) {
+      loginResponse.cookies.set(ADMIN_COOKIE_NAME, adminCookie, {
+        httpOnly: true,
+        secure: process.env.NODE_ENV === 'production',
+        sameSite: 'lax',
+        maxAge: SESSION_MAX_AGE,
+        path: '/',
+      })
+    }
+
+    console.log('[API /auth/login] Login successful for:', result.user.email)
+    return loginResponse
   } catch (error) {
     console.error('[API /auth/login] Unhandled error:', error)
 

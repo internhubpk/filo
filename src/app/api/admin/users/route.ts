@@ -1,72 +1,55 @@
 // =============================================================================
-// GET /api/admin/users
-// =============================================================================
-// List all users with their activation status. Admin-only endpoint.
-//
-// Returns:
-//   - all users (newest first, capped at 200)
-//   - pending users (status === "pending_activation")
-//   - active users (status === "active")
+// GET /api/admin/users — enriched user table data (plan, sub, usage, storage)
+// PATCH /api/admin/users — role management (body: { userId, isAdmin })
 // =============================================================================
 
-import { NextRequest, NextResponse } from 'next/server'
-import { isAdminRequest } from '@/lib/admin-auth'
-import { api } from '@convex/_generated/api'
-
-// Admin session token validation (cookie-based, set by /api/auth/admin/login)
+import { NextRequest, NextResponse } from "next/server";
+import { requireAdminAccess, serverToken, convexQuery, convexMutation, jsonError } from "@/lib/billing-server";
 
 export async function GET(request: NextRequest) {
   try {
-    if (!(await isAdminRequest(request))) {
-      return NextResponse.json(
-        { success: false, error: 'Admin authentication required', code: 'UNAUTHORIZED' },
-        { status: 401 }
-      )
+    const admin = await requireAdminAccess(request);
+    if (!admin.ok) return admin.response;
+
+    const rows = await convexQuery<Array<Record<string, unknown>>>("admin:adminUsersWithStats", {
+      serverToken: serverToken(),
+      adminUserId: admin.data.adminUserId,
+      limit: 500,
+    });
+
+    return NextResponse.json({ success: true, data: rows });
+  } catch (error) {
+    console.error("[API /admin/users GET] Error:", error);
+    return jsonError(500, "Failed to load users", "FETCH_ERROR");
+  }
+}
+
+/** Grant or revoke admin role. Self-demotion is blocked (lockout protection). */
+export async function PATCH(request: NextRequest) {
+  try {
+    const admin = await requireAdminAccess(request);
+    if (!admin.ok) return admin.response;
+
+    const body = (await request.json().catch(() => null)) as
+      | { userId?: string; isAdmin?: boolean }
+      | null;
+    if (!body?.userId || typeof body.isAdmin !== "boolean") {
+      return jsonError(400, "userId and isAdmin are required", "BAD_REQUEST");
+    }
+    if (body.userId === admin.data.adminUserId && body.isAdmin === false) {
+      return jsonError(400, "You cannot revoke your own admin role", "SELF_DEMOTION");
     }
 
-    const { getConvexClient } = await import('@/lib/convex-server')
-    const convex = getConvexClient()
+    await convexMutation("users:setUserRole", {
+      serverToken: serverToken(),
+      adminUserId: admin.data.adminUserId,
+      targetUserId: body.userId,
+      isAdmin: body.isAdmin,
+    });
 
-    const [all, pending, active] = await Promise.all([
-      convex.query(api.users.getAllUsers, {}),
-      convex.query(api.users.getPendingUsers, {}),
-      convex.query(api.users.getActiveUsers, {}),
-    ])
-
-    // Strip password hashes before sending to the client
-    const strip = (users: any[]) =>
-      users.map((u: any) => ({
-        id: u._id,
-        name: u.name,
-        email: u.email,
-        status: u.status ?? 'pending_activation',
-        planId: u.planId ?? null,
-        activatedAt: u.activatedAt ?? null,
-        activationNote: u.activationNote ?? null,
-        createdAt: u.createdAt,
-        updatedAt: u.updatedAt,
-      }))
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        all: strip(all),
-        pending: strip(pending),
-        active: strip(active),
-        counts: {
-          total: all.length,
-          pending: pending.length,
-          active: active.length,
-          suspended: all.filter((u: any) => u.status === 'suspended').length,
-        },
-      },
-    })
-
+    return NextResponse.json({ success: true });
   } catch (error) {
-    console.error('[ADMIN /api/admin/users] Error:', error)
-    return NextResponse.json(
-      { success: false, error: 'Failed to fetch users', code: 'INTERNAL_ERROR' },
-      { status: 500 }
-    )
+    console.error("[API /admin/users PATCH] Error:", error);
+    return jsonError(500, "Failed to update role", "UPDATE_FAILED");
   }
 }

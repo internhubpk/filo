@@ -14,6 +14,7 @@
 
 import { NextRequest, NextResponse } from 'next/server'
 import { createAdminSessionToken, ADMIN_COOKIE_NAME } from '@/lib/admin-auth'
+import { getConvexClient } from '@/lib/convex-server'
 
 // Session duration (24 hours)
 const SESSION_MAX_AGE = 24 * 60 * 60
@@ -98,8 +99,31 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // ---- Issue HMAC-signed admin session cookie ----
-    const sessionToken = await createAdminSessionToken(envUsername)
+    // ---- Ensure the admin exists as a REAL database admin (isAdmin: true) ----
+    // The credentials are re-verified INSIDE Convex against the Convex env
+    // copies. This gives the env-cred admin a DB identity so every admin
+    // surface can verify the LIVE isAdmin flag server-side (defense in depth:
+    // a stolen cookie alone stops working if the DB admin record is removed).
+    let adminUserId: string | null = null
+    try {
+      const convex = getConvexClient()
+      const boot = (await convex.action('auth:bootstrapEnvAdmin' as never, {
+        username: username.toLowerCase(),
+        password,
+      } as never)) as { success: boolean; userId?: string; error?: string }
+      if (boot.success && boot.userId) {
+        adminUserId = boot.userId
+      } else if (boot.error?.includes('not configured')) {
+        console.warn('[Admin Login] Convex env admin credentials not set; cookie issued without DB identity')
+      } else {
+        console.warn('[Admin Login] bootstrapEnvAdmin:', boot.error)
+      }
+    } catch (bootErr) {
+      console.warn('[Admin Login] DB admin bootstrap skipped:', bootErr)
+    }
+
+    // ---- Issue HMAC-signed admin session cookie (sub = DB userId when known) ----
+    const sessionToken = await createAdminSessionToken(adminUserId ?? `env:${envUsername}`)
 
     const response = NextResponse.json({
       success: true,

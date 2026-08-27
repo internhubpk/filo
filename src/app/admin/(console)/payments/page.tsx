@@ -1,0 +1,73 @@
+"use client";
+
+// =============================================================================
+// ADMIN PAYMENTS — real Safepay payment records with status filters.
+// =============================================================================
+
+import { useMemo, useState } from "react";
+import { apiClient } from "@/lib/api-client";
+import { useApi } from "@/hooks/use-api";
+import { formatDateTime, formatPkr } from "@/lib/format";
+import { PAYMENT_STATUS } from "@/lib/billing-shared";
+import { AdminPageHeader, AdminTable, FilterChip } from "@/components/admin/admin-ui";
+import { StatusBadge } from "@/components/shared";
+
+const FILTERS = ["all", "succeeded", "pending", "failed", "refunded", "disputed"] as const;
+
+export default function AdminPaymentsPage() {
+  const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
+  const payments = useApi<any[]>(
+    () => apiClient.adminPayments(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
+    { pollMs: 15_000 }
+  );
+
+  const rows = useMemo(() => payments.data ?? [], [payments.data]);
+
+  return (
+    <div className="mx-auto max-w-7xl space-y-6">
+      <AdminPageHeader title="Payments" description="Every Safepay transaction recorded through verified webhook events." />
+
+      <div className="flex flex-wrap gap-2">
+        {FILTERS.map((f) => (
+          <FilterChip
+            key={f}
+            label={f === "all" ? "All" : PAYMENT_STATUS[f as keyof typeof PAYMENT_STATUS]?.label ?? f}
+            active={filter === f}
+            onClick={() => setFilter(f)}
+          />
+        ))}
+      </div>
+
+      <AdminTable
+        columns={["Customer", "Amount", "Status", "Plan", "Method", "Safepay reference", "Recorded"]}
+        loading={payments.loading && !payments.data}
+        error={payments.error}
+        onRetry={() => void payments.refresh()}
+        rowsCount={rows.length}
+        searchPlaceholder="Search customers…"
+      >
+        {rows.map((p) => (
+          <tr key={p._id} className="border-b last:border-0 hover:bg-accent/30">
+            <td className="px-4 py-3">
+              <p className="text-sm font-medium">{p.userName}</p>
+              <p className="text-xs text-muted-foreground">{p.userEmail}</p>
+            </td>
+            <td className="px-4 py-3 text-sm font-medium tabular-nums">{formatPkr(p.amount)}</td>
+            <td className="px-4 py-3">
+              <StatusBadge kind="payment" status={String(p.status)} />
+              {p.failureReason ? (
+                <p className="mt-1 max-w-40 truncate text-[11px] text-muted-foreground" title={p.failureReason}>{p.failureReason}</p>
+              ) : null}
+            </td>
+            <td className="px-4 py-3 text-xs text-muted-foreground">{p.planId ? "See subscriber" : "—"}</td>
+            <td className="px-4 py-3 text-xs text-muted-foreground">{p.paymentMethod ?? "—"}</td>
+            <td className="max-w-40 truncate px-4 py-3 font-mono text-xs text-muted-foreground" title={p.safepayTrackingId ?? ""}>
+              {p.safepayTrackingId ?? p.safepayPaymentToken ?? "—"}
+            </td>
+            <td className="px-4 py-3 text-xs text-muted-foreground">{formatDateTime(p.createdAt)}</td>
+          </tr>
+        ))}
+      </AdminTable>
+    </div>
+  );
+}

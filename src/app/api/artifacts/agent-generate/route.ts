@@ -279,10 +279,11 @@ export async function POST(request: NextRequest) {
       }
 
       // Save artifact record to Convex (non-blocking, best-effort)
+      let artifactDbId: string | null = null
       try {
         const convexClient = getConvexClient()
         if (userId !== 'dev-user') {
-          await convexClient.mutation(api.artifacts.saveArtifactRecord, {
+          const saved = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
             userId: userId as any,
             title: result.artifact.title,
             type: result.artifact.type,
@@ -291,10 +292,52 @@ export async function POST(request: NextRequest) {
             status: 'completed',
           }).catch(() => {
             // Non-critical: Don't fail if saving fails
-          })
+            return null as any
+          })) as { saved: boolean; dbId?: string } | null
+          if (saved?.saved && saved.dbId) artifactDbId = saved.dbId
         }
       } catch (saveErr) {
         console.warn('[AGENT-GENERATE] Non-critical: Could not save artifact record')
+      }
+
+      // ---- Persist the rendered file to R2 + link it to the artifact ----
+      // This is what makes artifacts downloadable from the library forever
+      // (not just in the current browser session).
+      if (artifactDbId && userId !== 'dev-user' && result.artifact.fileData) {
+        try {
+          const { uploadToR2, generateR2Key } = await import('@/lib/r2/client')
+          const convexClient = getConvexClient()
+          const buffer = Buffer.from(result.artifact.fileData, 'base64')
+          const r2Key = generateR2Key(userId, result.artifact.fileName || `artifact-${Date.now()}`)
+          await uploadToR2(
+            r2Key,
+            buffer,
+            result.artifact.mimeType || 'application/octet-stream',
+            {
+              originalName: result.artifact.fileName || 'artifact',
+              size: String(result.artifact.fileSize ?? buffer.length),
+              workspaceId: userId,
+              ownerId: userId,
+              uploadedAt: new Date().toISOString(),
+              category: 'artifact',
+            }
+          )
+          const fileDbId = (await convexClient.mutation(api.files.registerFile, {
+            userId: userId as any,
+            originalName: result.artifact.fileName || 'artifact',
+            mimeType: result.artifact.mimeType || 'application/octet-stream',
+            size: result.artifact.fileSize ?? buffer.length,
+            r2Key,
+          })) as unknown as string
+          await convexClient.mutation(api.artifacts.linkFile, {
+            artifactId: artifactDbId as any,
+            userId: userId as any,
+            fileId: fileDbId as any,
+          })
+          console.log(`[AGENT-GENERATE] Artifact file persisted to R2: ${r2Key}`)
+        } catch (persistErr) {
+          console.warn('[AGENT-GENERATE] R2 persistence failed (artifact metadata still saved):', persistErr)
+        }
       }
 
       // Record usage AFTER successful generation only (never on failure)
