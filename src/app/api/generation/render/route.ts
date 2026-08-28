@@ -24,6 +24,7 @@ import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 import { getConvexClient } from '@/lib/convex-server'
 import { renderArtifact } from '@/services/document-renderer'
+import { classifyR2Error, isR2Configured, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 import type { ArtifactSpecification, OutputFormat } from '@/types'
 
 // Rendering is CPU-bound and typically takes a few seconds; allow up to 5
@@ -208,18 +209,56 @@ export async function POST(request: NextRequest) {
     }
 
     // ==================== PERSIST (R2 + Convex records) ==================
+    // R2 FAILURE CONTRACT: any storage failure answers HTTP 503
+    // "File storage temporarily unavailable" (code FILE_STORAGE_UNAVAILABLE)
+    // and RELEASES the render claim so the worker's renderRetry chain and the
+    // browser fallback can re-attempt. Previously an S3 SDK error here
+    // escaped as a generic 500 INTERNAL_ERROR — the claim stayed held for
+    // 100s, every retry was bounced as IN_FLIGHT, and jobs hung at 97%
+    // ("Creating your file") with no user-visible cause.
     const userId = job.userId
     const buffer = Buffer.from(rendered.buffer)
     const { uploadToR2, generateR2Key } = await import('@/lib/r2/client')
     const r2Key = generateR2Key(userId, rendered.filename || `artifact-${Date.now()}`)
-    await uploadToR2(r2Key, buffer, rendered.mimeType || 'application/octet-stream', {
-      originalName: rendered.filename || 'artifact',
-      size: String(rendered.size ?? buffer.length),
-      workspaceId: userId,
-      ownerId: userId,
-      uploadedAt: new Date().toISOString(),
-      category: 'artifact',
-    })
+    try {
+      await uploadToR2(r2Key, buffer, rendered.mimeType || 'application/octet-stream', {
+        originalName: rendered.filename || 'artifact',
+        size: String(rendered.size ?? buffer.length),
+        workspaceId: userId,
+        ownerId: userId,
+        uploadedAt: new Date().toISOString(),
+        category: 'artifact',
+      })
+    } catch (r2Error) {
+      const info = classifyR2Error(r2Error)
+      console.error(
+        `[GENERATION-RENDER] R2 upload failed for job ${jobId} [${info.kind}]${info.retryable ? ' (retryable)' : ''}: ${info.detail}`,
+        r2Error
+      )
+      await convexClient.mutation(api.generation.releaseRenderClaim, {
+        serverToken,
+        jobId: jobId as any,
+        error: `Storage upload failed: ${info.detail.slice(0, 300)}`,
+      }).catch((releaseErr: unknown) => {
+        console.error('[GENERATION-RENDER] Failed to release render claim:', releaseErr)
+      })
+      const hint =
+        info.kind === 'NOT_CONFIGURED'
+          ? ' (R2_* environment variables are not set on the app runtime)'
+          : info.kind === 'AUTH'
+            ? ' (R2 credentials or API-token permissions rejected)'
+            : ''
+      return NextResponse.json(
+        {
+          success: false,
+          error: `${R2_STORAGE_UNAVAILABLE_MESSAGE}${hint}`,
+          code: 'FILE_STORAGE_UNAVAILABLE',
+          kind: info.kind,
+          retryable: info.retryable,
+        },
+        { status: 503 }
+      )
+    }
 
     const saved = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
       userId: userId as any,

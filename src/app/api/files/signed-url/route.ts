@@ -15,6 +15,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { validateSessionToken } from '@/lib/session'
 import { generateUploadUrl, generateDownloadUrl } from '@/lib/r2/client'
+import { classifyR2Error, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 
 const MAX_UPLOAD_BYTES = 50 * 1024 * 1024 // 50MB
 
@@ -105,13 +106,20 @@ export async function POST(request: NextRequest) {
   } catch (error) {
     console.error('[SIGNED-URL] Error generating signed URL:', error)
 
-    // Check if it's a configuration error
-    if (error instanceof Error && error.message.includes('credentials')) {
+    // Classification replaces the old raw-message sniffing for the word
+    // "credentials", which only caught MISSING credentials. Wrong credentials
+    // (InvalidAccessKeyId / SignatureDoesNotMatch), a bad endpoint, or a
+    // Cloudflare outage used to leak a raw SDK message as HTTP 500. All
+    // storage-side failures now follow the contract: R2 failure → HTTP 503
+    // → "File storage temporarily unavailable".
+    const info = classifyR2Error(error)
+    if (info.kind !== 'UNKNOWN') {
       return NextResponse.json(
         {
-          error: 'R2 storage not configured',
-          code: 'R2_NOT_CONFIGURED',
-          message: 'R2 credentials not set in environment variables'
+          error: R2_STORAGE_UNAVAILABLE_MESSAGE,
+          code: info.kind === 'NOT_CONFIGURED' ? 'R2_NOT_CONFIGURED' : 'FILE_STORAGE_UNAVAILABLE',
+          message: info.detail,
+          kind: info.kind,
         },
         { status: 503 } // Service Unavailable
       )

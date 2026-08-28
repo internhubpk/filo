@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { generateDownloadUrl, fileExistsInR2 } from '@/lib/r2/client'
 import { validateSessionToken } from '@/lib/session'
+import { classifyR2Error, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 
 // GET /api/files/[fileId]/download - Generate download URL or redirect
 // This endpoint provides a download link for a specific file.
@@ -41,13 +42,27 @@ export async function GET(
       )
     }
 
-    // Check if file exists in R2 (optional - may fail if R2 not configured)
+    // Check if file exists in R2. fileExistsInR2 only answers "false" for a
+    // genuine 404 (NoSuchKey/NotFound) — every other failure rethrows, so a
+    // bad R2 token can no longer masquerade as "file not found".
     let fileExists = false
     try {
       fileExists = await fileExistsInR2(fileId)
-    } catch {
-      // R2 might not be configured - continue anyway
-      console.warn('[DOWNLOAD] Could not check file existence in R2')
+    } catch (existsError) {
+      const info = classifyR2Error(existsError)
+      console.error(`[DOWNLOAD] R2 existence check failed [${info.kind}]: ${info.detail}`)
+      if (info.kind !== 'UNKNOWN') {
+        return NextResponse.json(
+          {
+            error: R2_STORAGE_UNAVAILABLE_MESSAGE,
+            code: info.kind === 'NOT_CONFIGURED' ? 'STORAGE_NOT_CONFIGURED' : 'FILE_STORAGE_UNAVAILABLE',
+            message: info.detail,
+            kind: info.kind,
+          },
+          { status: 503 }
+        )
+      }
+      throw existsError
     }
 
     if (!fileExists) {
@@ -77,12 +92,18 @@ export async function GET(
   } catch (error) {
     console.error('[DOWNLOAD] Error:', error)
     
-    if (error instanceof Error && error.message.includes('credentials')) {
+    // Contract: R2 failure → HTTP 503 → "File storage temporarily unavailable".
+    // The old word-sniffing check only caught MISSING credentials; wrong-
+    // credential errors (InvalidAccessKeyId / SignatureDoesNotMatch) leaked
+    // as raw SDK messages in a 500.
+    const info = classifyR2Error(error)
+    if (info.kind !== 'UNKNOWN') {
       return NextResponse.json(
         { 
-          error: 'Storage service unavailable', 
-          code: 'STORAGE_UNAVAILABLE',
-          message: 'File storage is not properly configured'
+          error: R2_STORAGE_UNAVAILABLE_MESSAGE, 
+          code: info.kind === 'NOT_CONFIGURED' ? 'STORAGE_NOT_CONFIGURED' : 'FILE_STORAGE_UNAVAILABLE',
+          message: info.detail,
+          kind: info.kind,
         },
         { status: 503 }
       )

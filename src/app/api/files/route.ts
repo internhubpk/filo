@@ -15,6 +15,7 @@ import { NextRequest, NextResponse } from 'next/server'
 import { validateSessionToken } from '@/lib/session'
 import { validateFile, formatFileSize } from '@/services/file-service'
 import { uploadToR2, generateR2Key, generateDownloadUrl } from '@/lib/r2/client'
+import { classifyR2Error, isR2Configured, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 import { getConvexClient } from '@/lib/convex-server'
 import { api } from '@convex/_generated/api'
 
@@ -91,26 +92,46 @@ export async function POST(request: NextRequest) {
       )
     } catch (r2Error) {
       console.error('[FILES] R2 upload failed:', r2Error)
+      const info = classifyR2Error(r2Error)
 
-      // If R2 is not configured, fall back to returning base64 data
-      // This allows the app to work in development without R2 credentials
-      const base64 = buffer.toString('base64')
+      // ONLY a genuinely unconfigured runtime falls back to base64 — that is
+      // the documented development mode (no R2 credentials at all).
+      if (info.kind === 'NOT_CONFIGURED' && !isR2Configured()) {
+        const base64 = buffer.toString('base64')
+        return NextResponse.json({
+          success: true,
+          fileId: r2Key,
+          filename: file.name,
+          size: file.size,
+          mimeType: validation.metadata.mimeType || mimeType || file.type,
+          category: validation.metadata.category,
+          // Fallback: Return base64 when R2 not available
+          fileData: `data:${file.type};base64,${base64}`,
+          storageType: 'fallback',
+          warnings: [
+            'R2 storage not configured - using fallback mode',
+            ...(validation.warnings.length > 0 ? validation.warnings : [])
+          ],
+        })
+      }
 
-      return NextResponse.json({
-        success: true,
-        fileId: r2Key,
-        filename: file.name,
-        size: file.size,
-        mimeType: validation.metadata.mimeType || mimeType || file.type,
-        category: validation.metadata.category,
-        // Fallback: Return base64 when R2 not available
-        fileData: `data:${file.type};base64,${base64}`,
-        storageType: 'fallback',
-        warnings: [
-          'R2 storage not configured - using fallback mode',
-          ...(validation.warnings.length > 0 ? validation.warnings : [])
-        ],
-      })
+      // R2 IS configured but the upload failed (bad key, wrong token
+      // permissions, bucket name mismatch, Cloudflare outage, network).
+      // Surface the user's contract instead of a fake-success base64 body:
+      //   R2 failure → HTTP 503 → "File storage temporarily unavailable"
+      // A silent base64 fallback in production hides quota/permission
+      // breakage and produces files that vanish on the next signed-URL read.
+      return NextResponse.json(
+        {
+          success: false,
+          error: R2_STORAGE_UNAVAILABLE_MESSAGE,
+          code: 'FILE_STORAGE_UNAVAILABLE',
+          kind: info.kind,
+          retryable: info.retryable,
+          detail: info.detail,
+        },
+        { status: 503 }
+      )
     }
 
     // Generate download URL (valid for 1 hour)

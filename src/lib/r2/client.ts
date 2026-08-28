@@ -3,6 +3,7 @@ import {
   PutObjectCommand,
   GetObjectCommand,
   DeleteObjectCommand,
+  HeadObjectCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
@@ -82,9 +83,15 @@ export async function deleteFromR2(key: string): Promise<void> {
 }
 
 // Check if file exists in R2
+// Uses HeadObject (metadata-only, no body transfer). Previously this used
+// GetObject and DOWNLOADED the whole object just to check existence — for a
+// 50MB document that wasted egress and could time out into a false 404.
+// Mis-classification guard: ONLY a genuine 404/NoSuchKey/NotFound means
+// "absent"; every other failure (bad credentials, network, 5xx) rethrows so
+// callers can distinguish "file gone" from "storage unavailable".
 export async function fileExistsInR2(key: string): Promise<boolean> {
   try {
-    const command = new GetObjectCommand({
+    const command = new HeadObjectCommand({
       Bucket: BUCKET_NAME,
       Key: key,
     });
@@ -92,7 +99,10 @@ export async function fileExistsInR2(key: string): Promise<boolean> {
     await r2Client.send(command);
     return true;
   } catch (error) {
-    if ((error as { name?: string }).name === "NoSuchKey") {
+    const err = error as { name?: string; $metadata?: { httpStatusCode?: number } };
+    const name = err?.name ?? "";
+    const status = err?.$metadata?.httpStatusCode;
+    if (name === "NoSuchKey" || name === "NotFound" || status === 404) {
       return false;
     }
     throw error;
