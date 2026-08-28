@@ -12,7 +12,7 @@
 // pages can refresh their lists at exactly the right moment.
 // =============================================================================
 
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import { useQuery } from "convex/react";
 import { Loader2, Sparkles, ArrowRight, CheckCircle2, AlertTriangle } from "lucide-react";
@@ -34,13 +34,15 @@ interface JobLike {
 
 const ACTIVE = new Set(["queued", "planning", "generating", "validating", "rendering"]);
 
-/** Jobs in "rendering" whose render trigger is older than this are retried
+/** Jobs in "rendering" whose last update is older than this are retried
  *  from the browser (the render endpoint is idempotent — double triggers are
  *  harmless). This is the fallback that un-sticks the 97% state when the
  *  worker's server-to-server POST cannot reach the app origin (e.g. the job
- *  was created from localhost). */
-const RENDER_FALLBACK_AFTER_MS = 45_000;
-const MAX_BROWSER_RENDER_ATTEMPTS = 5;
+ *  was created from localhost). Snappy enough that a dev job recovers in
+ *  seconds, still bounded. */
+const RENDER_FALLBACK_AFTER_MS = 20_000;
+const RENDER_RETRY_INTERVAL_MS = 15_000;
+const MAX_BROWSER_RENDER_ATTEMPTS = 8;
 
 export function ActiveGenerations({
   className,
@@ -75,7 +77,10 @@ export function ActiveGenerations({
   // render endpoint from the browser. This is the only caller that can
   // reach a localhost-origin job from a cloud worker situation, and it
   // double-safes every other failure mode (worker POST failed, retries
-  // exhausted, FILO_APP_URL unset).
+  // exhausted, FILO_APP_URL unset). Failures are no longer swallowed:
+  // deterministic misconfiguration (SERVER_SECRET_MISSING) is surfaced on
+  // the banner; everything else is logged for diagnosis.
+  const [renderBlocked, setRenderBlocked] = useState<string | null>(null);
   const attemptsRef = useRef<Map<string, number>>(new Map());
   useEffect(() => {
     if (!ready || !user) return;
@@ -89,7 +94,7 @@ export function ActiveGenerations({
         if (used >= MAX_BROWSER_RENDER_ATTEMPTS) continue;
         attemptsRef.current.set(job._id, used + 1);
         try {
-          await fetch("/api/generation/render", {
+          const res = await fetch("/api/generation/render", {
             method: "POST",
             headers: {
               "Content-Type": "application/json",
@@ -97,11 +102,26 @@ export function ActiveGenerations({
             },
             body: JSON.stringify({ jobId: job._id }),
           });
+          const body = await res.json().catch(() => null as any);
+          if (res.ok && body?.success) continue; // healthy path
+          if (body?.code === "SERVER_SECRET_MISSING") {
+            // Deterministic — retrying cannot fix it; tell the operator.
+            setRenderBlocked(
+              "File assembly is blocked: FILO_SERVER_SECRET is missing on this server. Add it to .env.local (same value as the Convex env) and restart the dev server."
+            );
+            attemptsRef.current.set(job._id, MAX_BROWSER_RENDER_ATTEMPTS);
+          } else {
+            console.warn(
+              "[ActiveGenerations] render trigger failed:",
+              res.status,
+              body?.error ?? body?.code ?? "(no body)"
+            );
+          }
         } catch {
           // Network hiccup — the next tick retries (bounded).
         }
       }
-    }, 30_000);
+    }, RENDER_RETRY_INTERVAL_MS);
     return () => clearInterval(interval);
   }, [active, ready, user]);
 
@@ -129,6 +149,12 @@ export function ActiveGenerations({
         </Link>
       </div>
       <div className="mt-3 space-y-3">
+        {renderBlocked ? (
+          <p className="flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+            <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+            <span>{renderBlocked}</span>
+          </p>
+        ) : null}
         {active.map((job) => (
           <div key={job._id}>
             <div className="flex items-center justify-between gap-3 text-xs">

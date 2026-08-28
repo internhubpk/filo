@@ -106,7 +106,12 @@ export default function CreatePage() {
   const [elapsed, setElapsed] = useState(0);
   const textRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const renderNudgedRef = useRef<Set<string>>(new Set());
+  // Per-job render-fallback attempt counter (bounded retries, see effect below).
+  const renderNudgedRef = useRef<Map<string, number>>(new Map());
+  // Deterministic render failure reason surfaced from the render endpoint
+  // (e.g. SERVER_SECRET_MISSING) — shown on the progress card instead of an
+  // eternal silent 97%.
+  const [renderHint, setRenderHint] = useState<string | null>(null);
 
   // URL params: ?type=presentation or ?prompt=...
   useEffect(() => {
@@ -173,16 +178,63 @@ export default function CreatePage() {
     if (recentTick > 0) void recent.refresh();
   }, [recentTick]);
 
-  // ---- Safety net: nudge the idempotent render endpoint if the job sits
-  //      in "rendering" (covers the rare case where the worker's own POST
-  //      failed and no retry is scheduled). ----
+  // ---- Safety net: the Convex CLOUD worker can never reach a localhost
+  //      app origin, so localhost jobs DEPEND on this page to trigger the
+  //      idempotent render endpoint. The previous implementation nudged
+  //      exactly ONCE per visit and swallowed every failure — one 503/500
+  //      or claim race and the job sat in "rendering" at 97% forever with
+  //      no explanation (the "stuck at 97%" bug). This loop:
+  //        • retries on a short interval while the job stays in rendering
+  //          (bounded per job — the endpoint is idempotent, double triggers
+  //          are harmless);
+  //        • fires immediately when the job looks idle (no updatedAt bump);
+  //        • surfaces DETERMINISTIC configuration failures (e.g. missing
+  //          FILO_SERVER_SECRET) on the card instead of retrying blindly. ----
   useEffect(() => {
-    if (!job || job.status !== "rendering" || !jobId) return;
-    if (!job.renderStartedAt || Date.now() - job.renderStartedAt < 12_000) return;
-    if (renderNudgedRef.current.has(jobId)) return;
-    renderNudgedRef.current.add(jobId);
-    void apiClient.triggerGenerationRender(jobId).catch(() => {});
-  }, [job, jobId]);
+    if (!job || job.status !== "rendering" || !jobId) {
+      setRenderHint(null);
+      return;
+    }
+    let cancelled = false;
+    const tick = async () => {
+      if (cancelled) return;
+      const idleMs = Date.now() - (job.updatedAt ?? job.renderStartedAt ?? 0);
+      if (idleMs < 8_000) return; // render claim is fresh — let it work
+      const used = renderNudgedRef.current.get(jobId) ?? 0;
+      if (used >= 12) return; // bounded; manual Retry remains available
+      renderNudgedRef.current.set(jobId, used + 1);
+      try {
+        const res = await apiClient.triggerGenerationRender(jobId);
+        if (cancelled) return;
+        if (res.success) {
+          setRenderHint(null);
+          return;
+        }
+        if (res.code === "SERVER_SECRET_MISSING") {
+          // Deterministic — retrying cannot fix it; tell the operator.
+          setRenderHint(
+            "File assembly is blocked: FILO_SERVER_SECRET is missing on this server. Add it to .env.local (same value as the Convex env) and restart the dev server."
+          );
+          return;
+        }
+        setRenderHint(
+          `File assembly attempt ${used + 1} failed: ${res.error || res.code || "unknown error"} — retrying automatically.`
+        );
+      } catch {
+        if (!cancelled) {
+          setRenderHint(
+            `File assembly attempt ${used + 1} failed (network) — retrying automatically.`
+          );
+        }
+      }
+    };
+    void tick();
+    const interval = setInterval(tick, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [job?._id, job?.status, job?.updatedAt, job?.renderStartedAt, jobId]);
 
   const selectedType = findType(typeId);
   const canSubmit = prompt.trim().length >= PROMPT_MIN && !starting && !jobActive && !!user && aiAllowed;
@@ -586,6 +638,7 @@ export default function CreatePage() {
                 etaSeconds={etaSeconds}
                 cancelling={cancelling}
                 retrying={retrying}
+                renderHint={renderHint}
                 onCancel={cancelJob}
                 onRetry={retryJob}
                 onReset={resetForNew}
@@ -672,6 +725,7 @@ function JobProgressCard({
   etaSeconds,
   cancelling,
   retrying,
+  renderHint,
   onCancel,
   onRetry,
   onReset,
@@ -681,6 +735,7 @@ function JobProgressCard({
   etaSeconds: number | null;
   cancelling: boolean;
   retrying: boolean;
+  renderHint?: string | null;
   onCancel: () => void;
   onRetry: () => void;
   onReset: () => void;
@@ -821,6 +876,16 @@ function JobProgressCard({
           </p>
         </div>
       </div>
+
+      {/* Render-stage diagnosis: the endpoint told us WHY assembly cannot
+          finish (config problem or repeated failure). Never show this for
+          healthy renders — only when the fallback loop observed a failure. */}
+      {isRendering && renderHint ? (
+        <p className="mt-3 flex items-start gap-1.5 rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+          <AlertTriangle className="mt-0.5 size-3.5 shrink-0" />
+          <span>{renderHint}</span>
+        </p>
+      ) : null}
 
       {/* Controls */}
       <div className="mt-4 flex items-center justify-between gap-3">
