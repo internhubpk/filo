@@ -139,7 +139,13 @@ test('§7 retired provider adapters are deleted from the codebase', () => {
 
 test('§1 generateContent-era adapters are gone; the gateway is OpenAI-style chat', () => {
   assert.match(agentrouter, /chat\/completions/)
-  assert.match(agentrouter, /thinking: \{ type: 'disabled' \}/)
+  // Official AgentRouter.org gateway (the old internal-api.z.ai default never
+  // resolved publicly and failed every call with "fetch failed").
+  assert.match(agentrouter, /agentrouter\.org\/v1/)
+  assert.doesNotMatch(agentrouter, /internal-api\.z\.ai/, 'dead z.ai host must not come back')
+  assert.doesNotMatch(agentrouter, /X-Z-AI-From/, 'z.ai SDK headers must not leak to AgentRouter')
+  assert.doesNotMatch(agentrouter, /thinking:/, 'z.ai-only body extensions must not be sent')
+  assert.match(agentrouter, /looksLikeWafChallenge/, 'WAF interstitials must be detected, not retried')
 })
 
 // ---------------------------------------------------------------------------

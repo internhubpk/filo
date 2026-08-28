@@ -1,25 +1,30 @@
 // =============================================================================
 // FILO AI — Agent Router Provider (CANONICAL PRIMARY)
 // =============================================================================
-// Implements the AiProvider contract against the Agent Router gateway — an
-// OpenAI-compatible multi-model router serving:
+// Implements the AiProvider contract against the AgentRouter.org gateway — a
+// non-profit, OpenAI-compatible multi-model router serving:
 //
 //   deepseek-v4-flash · glm-5.3 · gpt-5.6-sol · claude-opus-4-8 · claude-opus-5
 //
-// Wire protocol (mirrors z-ai-web-dev-sdk, which cannot run on Convex because
-// it loads a config FILE from disk — Convex actions have no such filesystem):
+// Wire protocol (STANDARD OpenAI Chat Completions — see
+// https://agentrouter.org/docs — the gateway is drop-in OpenAI-compatible):
 //
-//   POST {AGENT_ROUTER_BASE_URL}/chat/completions
+//   POST https://agentrouter.org/v1/chat/completions
 //   Authorization: Bearer <key>
-//   X-Z-AI-From: Z
-//   { model, messages, stream: false, thinking: { type: 'disabled' }, ... }
+//   Content-Type: application/json
+//   { model, messages, stream: false, temperature, max_tokens, ... }
+//
+//   ⚠ Historically this adapter pointed at a z.ai-internal gateway host
+//   (plus a custom Z-identity header and a `thinking` body param) that never
+//   resolved on the public internet, so every call died with undici
+//   "fetch failed" (NETWORK_ERROR) before reaching any gateway. The z.ai
+//   SDK quirks are gone for good: plain OpenAI wire format against the
+//   official gateway only.
 //
 // Env vars (read at call time, Convex-runtime owned — never NEXT_PUBLIC_*):
-//   AGENT_ROUTER_API_KEY    (required)
-//   AGENT_ROUTER_BASE_URL   (optional — default https://internal-api.z.ai/v1)
+//   AGENT_ROUTER_API_KEY    (required — sk-… key from agentrouter.org/console/token)
+//   AGENT_ROUTER_BASE_URL   (optional — default https://agentrouter.org/v1)
 //
-// All five model ids verified LIVE against the gateway (2026-08-28):
-// 200 OK, OpenAI-style usage {prompt_tokens, completion_tokens, total_tokens}.
 // Model selection is COST-OPTIMIZED FOR THE OPERATOR (spec: "select for
 // budget to me, not the users"): cheap flash-tier models carry mechanical
 // volume; premium models are reached only as quality escalation.
@@ -32,16 +37,38 @@ import type {
 } from './types'
 import type { AiProvider } from './provider'
 import {
+  AiBaseError,
   ApiKeyMissingError,
   errorFromHttpStatus,
   MalformedResponseError,
   normalizeAiError,
 } from './errors'
 
-const DEFAULT_BASE_URL = 'https://internal-api.z.ai/v1'
+/**
+ * Official AgentRouter.org API base (OpenAI-compatible).
+ * Docs: https://agentrouter.org/docs · Console: https://agentrouter.org/console/token
+ * Override with AGENT_ROUTER_BASE_URL only when routing through a proxy.
+ */
+const DEFAULT_BASE_URL = 'https://agentrouter.org/v1'
 
 /**
- * Agent Router models, cheapest-first. Verified live 2026-08-28.
+ * Detects an Aliyun-WAF anti-bot interstitial (the gateway's edge protection).
+ * When the WAF challenges a server-side datacenter/VPN egress IP, the HTTP
+ * layer returns 200/405 HTML instead of JSON — retries CANNOT clear it (the
+ * challenge needs an interactive browser), so this must fail fast, not burn
+ * the attempt budget.
+ */
+function looksLikeWafChallenge(body: string): boolean {
+  return (
+    body.includes('aliyun_waf_aa') ||
+    body.includes('aliyun_waf_bb') ||
+    (body.includes('Access Verification') && body.includes('slide to')) ||
+    body.includes('访问验证')
+  )
+}
+
+/**
+ * Agent Router models, cheapest-first (operator-designated pool).
  * Cost tiers (operator budget optimization):
  *   deepseek-v4-flash  — cheapest, fast: mechanical volume (fast/json/first generation try)
  *   glm-5.3            — mid: longform + reasoning lead
@@ -108,14 +135,15 @@ export class AgentRouterModule implements AiProvider {
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
-          'X-Z-AI-From': 'Z',
         },
         signal: controller.signal,
+        // Strict OpenAI Chat Completions body — AgentRouter forwards this
+        // verbatim to the upstream provider, so z.ai-specific extensions
+        // (e.g. `thinking`) must NOT be sent here.
         body: JSON.stringify({
           model,
           messages: request.messages,
           stream: false,
-          thinking: { type: 'disabled' },
           temperature: opts?.temperature ?? 0.7,
           max_tokens: opts?.maxTokens,
           top_p: opts?.topP,
@@ -125,12 +153,34 @@ export class AgentRouterModule implements AiProvider {
         }),
       })
 
-      if (!response.ok) {
-        const errText = await response.text().catch(() => '')
-        throw errorFromHttpStatus('AGENT_ROUTER', response.status, errText)
+      // WAF interstitials can arrive with any status (200/403/405). Read the
+      // body BEFORE interpreting the status so the challenge is detected
+      // even when the edge labels it 200 OK.
+      const rawBody = await response.text().catch(() => '')
+      if (looksLikeWafChallenge(rawBody)) {
+        throw new AiBaseError(
+          `${this.id} gateway (${new URL(this.getBaseUrl()).host}) is protected by an anti-bot verification that this network cannot pass. ` +
+            `The API is unreachable from this egress IP — check AGENT_ROUTER_BASE_URL / network egress, or route through a proxy.`,
+          'CONFIGURATION_ERROR',
+          'AGENT_ROUTER',
+          false,
+          response.status
+        )
       }
 
-      const data = (await response.json()) as AgentRouterChatResponse
+      if (!response.ok) {
+        throw errorFromHttpStatus('AGENT_ROUTER', response.status, rawBody)
+      }
+
+      let data: AgentRouterChatResponse
+      try {
+        data = JSON.parse(rawBody) as AgentRouterChatResponse
+      } catch {
+        throw new MalformedResponseError(
+          'AGENT_ROUTER',
+          `non-JSON body (HTTP ${response.status}): ${rawBody.slice(0, 120)}`
+        )
+      }
       const choice = data.choices?.[0]
       if (!choice) {
         throw new MalformedResponseError('AGENT_ROUTER', 'no choices in response')

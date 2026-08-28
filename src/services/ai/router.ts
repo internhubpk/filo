@@ -51,7 +51,8 @@ export type AiTask =
  * retryable failure that exhausts the model's bounded attempts), then falls
  * through to the remaining provider registry entries.
  *
- * AGENT_ROUTER ids verified LIVE against the gateway (2026-08-28, all 200 OK):
+ * AGENT_ROUTER ids are the operator-designated pool served by the
+ * AgentRouter.org gateway (OpenAI-compatible, https://agentrouter.org/v1):
  * deepseek-v4-flash, glm-5.3, gpt-5.6-sol, claude-opus-4-8, claude-opus-5.
  *
  * Selection is COST-OPTIMIZED FOR THE OPERATOR ("budget to me, not the

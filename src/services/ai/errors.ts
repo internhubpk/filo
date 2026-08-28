@@ -133,6 +133,47 @@ export class NetworkError extends AiBaseError {
   }
 }
 
+/**
+ * undici / Node fetch wrap the real socket/DNS failure inside `err.cause`
+ * ("fetch failed" alone is undiagnosable). Extract the deepest cause codes so
+ * log lines answer WHY the network hop failed:
+ *   ENOTFOUND    → hostname does not resolve (bad base URL / private host)
+ *   ECONNREFUSED → nothing listening on the target host/port
+ *   ECONNRESET / ECONNABORTED → connection cut mid-flight (firewall/WAF)
+ *   ETIMEDOUT / UND_ERR_CONNECT_TIMEOUT → packets black-holed (egress block)
+ *   CERT_*       → TLS certificate problem
+ */
+function describeFetchCause(err: unknown, depth = 0): string {
+  if (!err || depth > 3) return ''
+  const e = err as { code?: string; message?: string; cause?: unknown }
+  const code = typeof e.code === 'string' ? e.code : ''
+  const message = typeof e.message === 'string' ? e.message : ''
+  const deeper = describeFetchCause(e.cause, depth + 1)
+  const here = [code, message].filter(Boolean).join(' ')
+  if (here && deeper && !deeper.includes(here)) return `${here} ← ${deeper}`
+  return here || deeper
+}
+
+/** Human-actionable hint for the most common fetch-cause codes. */
+function networkHint(causeText: string): string {
+  if (/ENOTFOUND/i.test(causeText)) {
+    return 'hostname does not resolve — verify the base URL points at the public API host'
+  }
+  if (/ECONNREFUSED/i.test(causeText)) {
+    return 'connection refused — nothing is listening at the target host/port'
+  }
+  if (/ECONNRESET|ECONNABORTED|UND_ERR_SOCKET/i.test(causeText)) {
+    return 'connection reset — a firewall/WAF likely cut the connection'
+  }
+  if (/ETIMEDOUT|CONNECT_TIMEOUT|UND_ERR_CONNECT/i.test(causeText)) {
+    return 'connect timed out — the egress network may be blocking the host'
+  }
+  if (/CERT/i.test(causeText)) {
+    return 'TLS certificate error — check proxy/SSL interception'
+  }
+  return 'check network egress and the configured base URL'
+}
+
 /** Provider returned a payload we could not parse. */
 export class MalformedResponseError extends AiBaseError {
   constructor(provider: ProviderId, detail: string) {
@@ -268,7 +309,11 @@ export function normalizeAiError(provider: ProviderId, err: unknown): AiBaseErro
   if (err instanceof Error) {
     // fetch() throws TypeError on network failure
     if (err.name === 'TypeError' || err.message.includes('fetch failed')) {
-      return new NetworkError(provider, err.message, err)
+      const causeText = describeFetchCause(err)
+      const detail = causeText
+        ? `${err.message} (${causeText} — ${networkHint(causeText)})`
+        : `${err.message} — ${networkHint('')}`
+      return new NetworkError(provider, detail, err)
     }
     // AbortError = our timeout
     if (err.name === 'AbortError') {
