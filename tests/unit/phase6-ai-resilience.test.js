@@ -208,6 +208,21 @@ test('§7 Gemini talks to Google directly — independent of any gateway', () =>
   assert.match(gemini, /ContentFilteredError/, 'promptFeedback blocks are classified as content-filtered')
 })
 
+test('§7 Gemini 3.x uses thinkingLevel — thinkingBudget is a live-verified 400 on 3.x', () => {
+  // VERIFIED LIVE 2026-08-29: thinkingConfig.thinkingBudget: 0 on
+  // gemini-3.6-flash / gemini-3.5-flash-lite → 400 INVALID_ARGUMENT
+  // ("Request contains an invalid argument"), while the pro model (no
+  // thinking params sent) passed validation. Docs: Gemini 3 cannot disable
+  // thinking; thinkingLevel replaces thinkingBudget; unset defaults to HIGH.
+  assert.match(gemini, /thinkingLevel/, 'generationConfig must pin thinkingLevel for Gemini 3.x')
+  assert.doesNotMatch(gemini, /thinkingBudget/, '2.5-era thinkingBudget must never return')
+  assert.match(gemini, /'minimal'/, 'flash tier pinned to minimal (lowest supported)')
+  assert.match(gemini, /'low'/, 'pro tier pinned to low (minimal is unsupported on 3.1 Pro)')
+  assert.match(gemini, /INVALID_REQUEST/, 'a 400 shape error triggers the self-healing bare-body retry')
+  assert.match(gemini, /temperature: opts\?\.temperature/, 'temperature is omitted when the caller sets none (Google 3.x default 1.0 applies)')
+  assert.doesNotMatch(gemini, /\?\? 0\.7/, 'no hard-coded 0.7 temperature default (docs: keep 3.x default 1.0)')
+})
+
 test('§1 generateContent-era adapters are gone; the gateway is OpenAI-style chat', () => {
   assert.match(agentrouter, /chat\/completions/)
   // VERIFIED LIVE (2026-08-29): co.agentrouter.org/v1 answers with API JSON

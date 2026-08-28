@@ -14,9 +14,12 @@
 //   {
 //     systemInstruction?: { parts: [{ text }] },
 //     contents: [{ role: 'user'|'model', parts: [{ text }] }],
-//     generationConfig: { temperature, maxOutputTokens, topP,
-//                         responseMimeType?, thinkingBudget? }
+//     generationConfig: { temperature?, maxOutputTokens, topP?,
+//                         stopSequences?, responseMimeType?,
+//                         thinkingConfig?: { thinkingLevel } }
 //   }
+//   Gemini 3.x: thinkingLevel ∈ minimal|low|medium|high (CANNOT be disabled;
+//   unset ⇒ high). The 2.5-era budget-0 disable flag is a 400 on 3.x models.
 //
 //   → 200 { candidates: [{ content: { parts: [{ text }] }, finishReason }],
 //           usageMetadata: { promptTokenCount, candidatesTokenCount,
@@ -126,45 +129,78 @@ export class GeminiProvider implements AiProvider {
         parts: [{ text: m.content }],
       }))
 
-    // Gemini flash-tier models think by default; thinking burns output budget
-    // and routinely returns empty text at low maxOutputTokens. Disable it for
-    // flash-tier models (pro requires a thinking budget — leave it dynamic).
-    const thinkingConfig = /flash/i.test(model)
-      ? { thinkingConfig: { thinkingBudget: 0 } }
-      : {}
+    // Gemini 3.x thinking control (verified via ai.google.dev/gemini-api/docs
+    // /gemini-3 + live 400s on 2026-08-29):
+    //   • thinking CANNOT be disabled on 3.x — the 2.5-era disable flag
+    //     (budget: 0) returns 400 INVALID_ARGUMENT;
+    //   • the supported knob is `thinkingConfig.thinkingLevel`
+    //     (minimal | low | medium | high) inside generationConfig;
+    //   • leaving it unset defaults to HIGH thinking — slow and expensive —
+    //     so always pin it explicitly.
+    // Per-model supported levels: 3.5-flash-lite / 3.6-flash → minimal;
+    // gemini-3.1-pro-preview → low is the minimum (minimal NOT supported).
+    const thinkingLevel = /pro/i.test(model) ? 'low' : 'minimal'
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
     try {
-      const response = await fetch(
-        `${this.baseUrl}/models/${encodeURIComponent(model)}:generateContent`,
-        {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-goog-api-key': apiKey,
+      const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:generateContent`
+      const headers = {
+        'Content-Type': 'application/json',
+        'x-goog-api-key': apiKey,
+      }
+      // buildBody(true)  — full config incl. thinkingLevel (preferred).
+      // buildBody(false) — bare config, no thinkingConfig (self-healing retry:
+      //     if Google ever 400s our optional params again, retry once with the
+      //     minimal body before letting the router move to the next model).
+      // NOTE: JSON.stringify drops undefined fields, so unset temperature/topP
+      // are genuinely omitted — Google then applies ITS defaults (temp 1.0 is
+      // the strongly recommended default for all Gemini 3 models).
+      const buildBody = (includeThinking: boolean): string =>
+        JSON.stringify({
+          contents,
+          ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+          generationConfig: {
+            temperature: opts?.temperature,
+            maxOutputTokens: opts?.maxTokens,
+            topP: opts?.topP,
+            stopSequences: opts?.stopSequences,
+            responseMimeType:
+              opts?.responseFormat?.type === 'json' ? 'application/json' : undefined,
+            ...(includeThinking ? { thinkingConfig: { thinkingLevel } } : {}),
           },
-          signal: controller.signal,
-          body: JSON.stringify({
-            contents,
-            ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
-            generationConfig: {
-              temperature: opts?.temperature ?? 0.7,
-              maxOutputTokens: opts?.maxTokens,
-              topP: opts?.topP,
-              stopSequences: opts?.stopSequences,
-              responseMimeType:
-                opts?.responseFormat?.type === 'json' ? 'application/json' : undefined,
-              ...thinkingConfig,
-            },
-          }),
-        }
-      )
+        })
+
+      let response = await fetch(url, {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+        body: buildBody(true),
+      })
 
       if (!response.ok) {
         const errText = await response.text().catch(() => '')
-        throw errorFromHttpStatus('GEMINI', response.status, errText)
+        const aiErr = errorFromHttpStatus('GEMINI', response.status, errText)
+        // One self-healing retry for shape errors: a 400 that is NOT auth
+        // means the model rejected a request parameter. Strip thinkingConfig
+        // and try once more — if the optional param was the culprit the call
+        // now succeeds; otherwise the second 400 propagates to the router,
+        // which advances to the next model as usual.
+        if (aiErr.code === 'INVALID_REQUEST' && /API key not valid/i.test(errText) === false) {
+          response = await fetch(url, {
+            method: 'POST',
+            headers,
+            signal: controller.signal,
+            body: buildBody(false),
+          })
+          if (!response.ok) {
+            const retryErrText = await response.text().catch(() => '')
+            throw errorFromHttpStatus('GEMINI', response.status, retryErrText)
+          }
+        } else {
+          throw aiErr
+        }
       }
 
       let data: GeminiGenerateContentResponse
