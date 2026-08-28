@@ -165,6 +165,25 @@ export const adminUsersWithStats = query({
     for (const a of artifacts) {
       artifactCountByUser.set(String(a.userId), (artifactCountByUser.get(String(a.userId)) ?? 0) + 1);
     }
+    // Activity detail: generation job counts + the most recent job per user,
+    // and the last login (latest session createdAt) for a "Last active"
+    // column. All computed from real rows — no fabricated activity data.
+    const jobs = await ctx.db.query("generationJobs").collect();
+    const jobCountByUser = new Map<string, number>();
+    const lastJobByUser = new Map<string, number>();
+    for (const j of jobs) {
+      const key = String(j.userId);
+      jobCountByUser.set(key, (jobCountByUser.get(key) ?? 0) + 1);
+      const prev = lastJobByUser.get(key) ?? 0;
+      if ((j.createdAt ?? 0) > prev) lastJobByUser.set(key, j.createdAt ?? 0);
+    }
+    const sessions = await ctx.db.query("sessions").collect();
+    const lastLoginByUser = new Map<string, number>();
+    for (const s of sessions) {
+      const key = String(s.userId);
+      const prev = lastLoginByUser.get(key) ?? 0;
+      if ((s.createdAt ?? 0) > prev) lastLoginByUser.set(key, s.createdAt ?? 0);
+    }
 
     return users.map((u) => {
       const sub = latestSubByUser.get(String(u._id));
@@ -182,6 +201,9 @@ export const adminUsersWithStats = query({
         subscriptionId: sub?._id ?? null,
         storageBytes: storageByUser.get(String(u._id)) ?? 0,
         artifactCount: artifactCountByUser.get(String(u._id)) ?? 0,
+        generationCount: jobCountByUser.get(String(u._id)) ?? 0,
+        lastGenerationAt: lastJobByUser.get(String(u._id)) ?? null,
+        lastActiveAt: lastLoginByUser.get(String(u._id)) ?? null,
       };
     });
   },

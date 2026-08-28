@@ -21,12 +21,24 @@ const FILTERS = ["all", "active", "pending", "past_due", "paused", "unpaid", "ca
 export default function AdminSubscriptionsPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
   const [activatingId, setActivatingId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
   const subs = useApi<any[]>(
     () => apiClient.adminSubscriptions(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
     { pollMs: 15_000 }
   );
 
-  const rows = useMemo(() => subs.data ?? [], [subs.data]);
+  const rows = useMemo(() => {
+    const all = subs.data ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (s) =>
+        String(s.userName ?? "").toLowerCase().includes(q) ||
+        String(s.userEmail ?? "").toLowerCase().includes(q) ||
+        String(s.planName ?? "").toLowerCase().includes(q) ||
+        String(s.safepaySubscriptionId ?? "").toLowerCase().includes(q)
+    );
+  }, [subs.data, query]);
 
   /**
    * Manual activation for a pending checkout the operator has VERIFIED as
@@ -85,7 +97,9 @@ export default function AdminSubscriptionsPage() {
         error={subs.error}
         onRetry={() => void subs.refresh()}
         rowsCount={rows.length}
-        searchPlaceholder="Search subscribers…"
+        search={query}
+        onSearch={setQuery}
+        searchPlaceholder="Search subscriber, plan or Safepay id…"
       >
         {rows.map((s) => (
           <tr key={s._id} className="border-b last:border-0 hover:bg-accent/30">

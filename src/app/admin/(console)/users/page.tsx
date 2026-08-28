@@ -38,6 +38,9 @@ interface AdminUserRow {
   subscriptionStatus: string | null;
   storageBytes: number;
   artifactCount: number;
+  generationCount?: number;
+  lastGenerationAt?: number | null;
+  lastActiveAt?: number | null;
 }
 
 export default function AdminUsersPage() {
@@ -116,7 +119,7 @@ export default function AdminUsersPage() {
       </div>
 
       <AdminTable
-        columns={["User", "Role", "Plan", "Subscription", "Status", "Documents", "Storage", "Joined", "Actions"]}
+        columns={["User", "Role", "Plan", "Subscription", "Status", "Documents", "Generations", "Storage", "Last active", "Joined", "Actions"]}
         loading={users.loading && !users.data}
         error={users.error}
         onRetry={() => void users.refresh()}
@@ -157,7 +160,13 @@ export default function AdminUsersPage() {
               </span>
             </td>
             <td className="px-4 py-3 text-sm tabular-nums">{u.artifactCount}</td>
+            <td className="px-4 py-3 text-sm tabular-nums" title={u.lastGenerationAt ? `Last generation ${formatDate(u.lastGenerationAt)}` : undefined}>
+              {u.generationCount ?? 0}
+            </td>
             <td className="px-4 py-3 text-sm tabular-nums">{formatBytes(u.storageBytes)}</td>
+            <td className="px-4 py-3 text-xs text-muted-foreground" title={u.lastActiveAt ? formatDate(u.lastActiveAt) : undefined}>
+              {u.lastActiveAt ? timeAgo(u.lastActiveAt) : <span className="opacity-50">never logged in</span>}
+            </td>
             <td className="px-4 py-3 text-xs text-muted-foreground" title={formatDate(u.createdAt)}>{timeAgo(u.createdAt)}</td>
             <td className="px-4 py-3">
               <div className="flex justify-end">

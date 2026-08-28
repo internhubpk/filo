@@ -28,13 +28,24 @@ const FILTERS = ["all", "success", "failed", "retrying", "ignored", "duplicate"]
 export default function AdminWebhooksPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
   const [viewPayload, setViewPayload] = useState<Record<string, unknown> | null>(null);
+  const [query, setQuery] = useState("");
 
   const events = useApi<any[]>(
     () => apiClient.adminWebhookEvents(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
     { pollMs: 10_000 } // live-ish monitor — webhooks arrive in near real time
   );
 
-  const rows = useMemo(() => events.data ?? [], [events.data]);
+  const rows = useMemo(() => {
+    const all = events.data ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (ev) =>
+        String(ev.eventId ?? "").toLowerCase().includes(q) ||
+        String(ev.eventType ?? "").toLowerCase().includes(q) ||
+        String(ev.error ?? "").toLowerCase().includes(q)
+    );
+  }, [events.data, query]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -57,6 +68,9 @@ export default function AdminWebhooksPage() {
         error={events.error}
         onRetry={() => void events.refresh()}
         rowsCount={rows.length}
+        search={query}
+        onSearch={setQuery}
+        searchPlaceholder="Search event id, type or error…"
       >
         {rows.map((ev) => (
           <tr key={ev._id} className="border-b align-middle last:border-0 hover:bg-accent/30">

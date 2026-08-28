@@ -16,6 +16,7 @@ const ACTION_FILTERS = [
   { id: "all", label: "All" },
   { id: "subscription.", label: "Subscriptions" },
   { id: "payment.", label: "Payments" },
+  { id: "billing.", label: "Billing ops" },
   { id: "user.role", label: "Role changes" },
   { id: "user.profile", label: "Profile" },
   { id: "user.password", label: "Password" },

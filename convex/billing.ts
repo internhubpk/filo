@@ -273,10 +273,14 @@ export const adminListPayments = query({
     return await Promise.all(
       rows.map(async (p: any) => {
         const user: any = await ctx.db.get(p.userId);
+        // Real plan name — the UI previously showed a literal "See
+        // subscriber" placeholder in the Plan column when planId existed.
+        const plan: any = p.planId ? await ctx.db.get(p.planId) : null;
         return {
           ...p,
           userName: (user && user.name) || "Unknown",
           userEmail: (user && user.email) || "unknown",
+          planName: (plan && plan.name) || null,
         };
       })
     );
@@ -317,11 +321,21 @@ export const adminListAuditLogs = query({
     await assertAdmin(ctx, args.adminUserId);
     const limit = args.limit ?? 150;
     if (args.action) {
-      return await ctx.db
+      // PREFIX match, not exact. The admin UI sends families like
+      // "subscription." / "payment." / "user.role" — an exact eq() here
+      // matched NOTHING (real actions are e.g. "subscription.activated",
+      // "user.role.granted"), so every filter chip silently returned an
+      // empty table. Scan the newest window and filter by prefix in JS;
+      // audit volume in this stage of the platform is small enough that
+      // this stays well within a single read page.
+      const window = await ctx.db
         .query("auditLogs")
-        .withIndex("by_action", (q: any) => q.eq("action", args.action))
+        .withIndex("by_createdAt")
         .order("desc")
-        .take(limit);
+        .take(1000);
+      return window.filter((log: any) =>
+        String(log.action || "").startsWith(args.action as string)
+      ).slice(0, limit);
     }
     return await ctx.db.query("auditLogs").withIndex("by_createdAt").order("desc").take(limit);
   },

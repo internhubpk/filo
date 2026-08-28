@@ -12,16 +12,37 @@ import { PAYMENT_STATUS } from "@/lib/billing-shared";
 import { AdminPageHeader, AdminTable, FilterChip } from "@/components/admin/admin-ui";
 import { StatusBadge } from "@/components/shared";
 
-const FILTERS = ["all", "succeeded", "pending", "failed", "refunded", "disputed"] as const;
+const FILTERS = [
+  "all",
+  "succeeded",
+  "pending",
+  "failed",
+  "refunded",
+  "disputed",
+  "dispute_won",
+  "dispute_lost",
+] as const;
 
 export default function AdminPaymentsPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
+  const [query, setQuery] = useState("");
   const payments = useApi<any[]>(
     () => apiClient.adminPayments(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
     { pollMs: 15_000 }
   );
 
-  const rows = useMemo(() => payments.data ?? [], [payments.data]);
+  const rows = useMemo(() => {
+    const all = payments.data ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (p) =>
+        String(p.userName ?? "").toLowerCase().includes(q) ||
+        String(p.userEmail ?? "").toLowerCase().includes(q) ||
+        String(p.safepayTrackingId ?? "").toLowerCase().includes(q) ||
+        String(p.safepayPaymentToken ?? "").toLowerCase().includes(q)
+    );
+  }, [payments.data, query]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -44,7 +65,9 @@ export default function AdminPaymentsPage() {
         error={payments.error}
         onRetry={() => void payments.refresh()}
         rowsCount={rows.length}
-        searchPlaceholder="Search customers…"
+        search={query}
+        onSearch={setQuery}
+        searchPlaceholder="Search customer, email or tracking id…"
       >
         {rows.map((p) => (
           <tr key={p._id} className="border-b last:border-0 hover:bg-accent/30">
@@ -59,7 +82,7 @@ export default function AdminPaymentsPage() {
                 <p className="mt-1 max-w-40 truncate text-[11px] text-muted-foreground" title={p.failureReason}>{p.failureReason}</p>
               ) : null}
             </td>
-            <td className="px-4 py-3 text-xs text-muted-foreground">{p.planId ? "See subscriber" : "—"}</td>
+            <td className="px-4 py-3 text-xs text-muted-foreground">{p.planName ?? "—"}</td>
             <td className="px-4 py-3 text-xs text-muted-foreground">{p.paymentMethod ?? "—"}</td>
             <td className="max-w-40 truncate px-4 py-3 font-mono text-xs text-muted-foreground" title={p.safepayTrackingId ?? ""}>
               {p.safepayTrackingId ?? p.safepayPaymentToken ?? "—"}

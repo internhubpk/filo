@@ -188,6 +188,11 @@ export default function LandingPage() {
 
   const primaryHref = user ? "/create" : "/register";
   const dashboardHref = user ? "/dashboard" : "/login";
+  // Hero copy states the free allowance — derive it from the LIVE free plan
+  // so the landing page can never contradict the real billing limits (the
+  // seeded default is 25; admins can change the plan at any time).
+  const freePlan = (plans ?? []).find((p) => p.tier === "free" || p.priceMonthly === 0);
+  const freeGenerations = freePlan?.maxAiGenerations ?? 25;
 
   return (
     <div className="min-h-screen bg-background">
@@ -239,7 +244,7 @@ export default function LandingPage() {
               </Button>
             </motion.div>
             <p className="mt-4 text-xs text-muted-foreground">
-              Free plan includes 25 generations / month · No credit card required
+              Free plan includes {freeGenerations} generations / month · No credit card required
             </p>
           </div>
 
