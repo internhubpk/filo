@@ -19,6 +19,7 @@ interface BillingOverview {
   user: { name: string; email: string; status: string };
   subscription: Record<string, unknown> | null;
   plan: Record<string, unknown> | null;
+  pendingPlan: Record<string, unknown> | null;
   payments: Array<Record<string, unknown>>;
   usage: {
     generations: number;
@@ -57,6 +58,10 @@ export async function GET(request: NextRequest) {
         accountStatus: overview.user.status,
         subscription: overview.subscription,
         plan: overview.plan,
+        // The plan a PENDING checkout would grant once Safepay confirms it.
+        // NEVER used for quota/limit display — `plan` above (== user.planId,
+        // the actually-enforced entitlement) is the only source for that.
+        pendingPlan: overview.pendingPlan,
         payments: overview.payments,
         usage: overview.usage,
         // Convenience quota fields (real values, computed from DB rows):

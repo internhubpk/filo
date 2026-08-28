@@ -129,14 +129,28 @@ export const getBillingOverview = query({
       .order("desc")
       .first();
 
-    // Plan resolution order: active subscription's plan → user's assigned
-    // plan → the Free plan (by tier). The Free fallback keeps usage/limits
-    // meaningful for accounts that simply never subscribed — otherwise the
-    // billing page shows confusing 0/0 limits.
+    // ---- Plan resolution ----
+    // BUG FIXED HERE: this used to resolve `plan` from the LATEST
+    // subscription row regardless of its status. That meant a checkout that
+    // was merely started (status "pending", not yet Safepay-confirmed) made
+    // the billing page display the paid plan's name/price/limits as if it
+    // were already active — a customer who never finished paying would see
+    // "Pro" as their current plan and a 500-generation quota on screen,
+    // even though `user.planId` (the actual enforced entitlement — see
+    // applySubscriptionTransition, which only patches it on "active") was
+    // still Free the entire time. Confusing at best, and it undermines the
+    // "we never grant access before Safepay confirms" guarantee this file's
+    // header promises.
+    //
+    // Fix: `plan` (used for the "Current plan" card AND the quota numbers)
+    // ALWAYS reflects the entitlement actually granted — `user.planId`,
+    // exactly what quota enforcement in generation.ts/subscriptions.ts
+    // reads — never the target of an unconfirmed checkout. A pending
+    // checkout's target plan is returned separately as `pendingPlan` so the
+    // UI can show "Pro checkout pending" without claiming the user IS on
+    // Pro yet.
     let plan: any = null;
-    if (sub) {
-      plan = await ctx.db.get(sub.planId);
-    } else if (user.planId) {
+    if (user.planId) {
       plan = await ctx.db.get(user.planId);
     }
     if (!plan) {
@@ -144,6 +158,14 @@ export const getBillingOverview = query({
         .query("plans")
         .withIndex("by_tier", (q: any) => q.eq("tier", "free"))
         .first();
+    }
+
+    // The plan a PENDING checkout would grant once Safepay confirms it —
+    // shown only in the "waiting for confirmation" banner, never as the
+    // current plan.
+    let pendingPlan: any = null;
+    if (sub && sub.status === "pending" && String(sub.planId) !== String(plan?._id)) {
+      pendingPlan = await ctx.db.get(sub.planId);
     }
 
     const payments = await ctx.db
@@ -175,6 +197,7 @@ export const getBillingOverview = query({
       user: { name: user.name, email: user.email, status: user.status },
       subscription: sub,
       plan,
+      pendingPlan,
       payments,
       usage: {
         generations: usage

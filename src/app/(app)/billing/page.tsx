@@ -77,6 +77,15 @@ interface BillingData {
     features: string[];
     contactSales?: boolean;
   } | null;
+  // The plan a PENDING checkout would grant once Safepay confirms it. Never
+  // the current entitlement — only shown in the "waiting for confirmation"
+  // banner, never on the "Current plan" card or in the quota numbers.
+  pendingPlan?: {
+    _id?: string;
+    name: string;
+    priceMonthly: number;
+    priceYearly: number;
+  } | null;
   payments?: Array<{
     _id: string;
     amount: number;
@@ -371,9 +380,9 @@ function BillingContent() {
               <div className="flex-1 text-sm">
                 <p className="font-medium">Waiting for payment confirmation</p>
                 <p className="mt-0.5 text-muted-foreground">
-                  We check your payment directly with Safepay every few seconds — your plan
-                  activates the moment the payment is confirmed, even if you close this page
-                  and come back later.
+                  {billing.data?.pendingPlan
+                    ? <>You're still on the <span className="font-medium text-foreground">{billing.data.plan?.name ?? "Free"}</span> plan — <span className="font-medium text-foreground">{billing.data.pendingPlan.name}</span> activates the moment Safepay confirms this payment, even if you close this page and come back later.</>
+                    : "We check your payment directly with Safepay every few seconds — your plan activates the moment the payment is confirmed, even if you close this page and come back later."}
                 </p>
                 {lastVerify && (
                   <p
@@ -430,7 +439,15 @@ function BillingContent() {
           <Card className="h-full">
             <CardHeader className="flex-row items-center justify-between pb-3">
               <CardTitle className="text-base">Current plan</CardTitle>
-              {sub ? (
+              {/* This card always reflects the ACTUALLY GRANTED entitlement
+                  (billing.data.plan == user.planId), never a pending
+                  checkout's target plan — so its badge must not show
+                  "pending" either, or it reads as "your current plan is
+                  itself unconfirmed", which isn't true. A pending checkout
+                  for a DIFFERENT plan is surfaced in the banner above, not
+                  here. Only show the subscription's own status badge when
+                  that subscription IS the one backing the displayed plan. */}
+              {sub && sub.status !== "pending" ? (
                 <StatusBadge kind="subscription" status={String(sub.status)} />
               ) : (
                 <Badge variant="outline" className="gap-1.5"><span className="size-1.5 rounded-full bg-emerald-500" /> Active</Badge>
@@ -449,8 +466,9 @@ function BillingContent() {
                     <span className="text-2xl font-semibold tracking-tight">{billing.data?.plan?.name ?? billing.data?.planName ?? "Free"}</span>
                     {billing.data?.plan && !billing.data.plan.contactSales && (billing.data.plan.priceMonthly ?? 0) > 0 ? (
                       <span className="text-sm text-muted-foreground">
-                        {formatPkr(sub?.interval === "yearly" ? billing.data.plan.priceYearly : billing.data.plan.priceMonthly)}
-                        /{sub?.interval === "yearly" ? "year" : "month"}
+                        {/* sub.interval only applies when sub backs the DISPLAYED plan (see badge note above) */}
+                        {formatPkr(sub?.status !== "pending" && sub?.interval === "yearly" ? billing.data.plan.priceYearly : billing.data.plan.priceMonthly)}
+                        /{sub?.status !== "pending" && sub?.interval === "yearly" ? "year" : "month"}
                       </span>
                     ) : (
                       <span className="text-sm text-muted-foreground">
