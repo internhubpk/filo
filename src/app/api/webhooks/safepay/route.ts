@@ -31,7 +31,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { verifyWebhookSignature, normalizeWebhookEvent, type NormalizedEvent } from "@/lib/safepay";
+import { verifyWebhookSignature, normalizeWebhookEvent, type NormalizedEvent, getSafepayConfig } from "@/lib/safepay";
 import { serverToken, convexQuery, convexMutation } from "@/lib/billing-server";
 
 export const runtime = "nodejs";
@@ -103,6 +103,8 @@ async function transitionSubscription(
 }
 
 export async function POST(request: NextRequest) {
+  // Read the RAW body exactly once — the signature is computed over these
+  // exact bytes and the parsed payload is derived from the same string.
   const rawBody = await request.text();
 
   // ---- 1. Signature verification (fail-closed) ----
@@ -127,6 +129,19 @@ export async function POST(request: NextRequest) {
   }
 
   const event = normalizeWebhookEvent(payload);
+
+  // ---- 2b. Merchant guard: the payload carries the sender's merchant API
+  // key (sec_…) — reject events that were signed correctly but belong to a
+  // DIFFERENT Safepay account (e.g. a misconfigured dashboard endpoint).
+  const ourKey = getSafepayConfig().secretKey;
+  if (event.merchantApiKey && ourKey && event.merchantApiKey !== ourKey) {
+    console.error("[SAFEPAY WEBHOOK] REJECTED: merchant_api_key mismatch (event is for another Safepay account)");
+    return NextResponse.json(
+      { success: false, error: "Event does not belong to this merchant account" },
+      { status: 401 }
+    );
+  }
+
   console.info(`[SAFEPAY WEBHOOK] received ${event.eventType} (id=${event.eventId})`);
 
   // ---- 3. Idempotency gate ----
@@ -174,11 +189,15 @@ export async function POST(request: NextRequest) {
     const type = event.eventType;
 
     // Resolve the relevant subscription (created earlier at checkout time).
+    // data.metadata.order_id is OUR subscription id (set as order_id at
+    // checkout) — the most reliable key; falls back to Safepay's subscription
+    // id and finally the user's latest subscription.
     const resolveSub = () =>
       convexQuery<Record<string, unknown> | null>("billing:resolveSubscriptionForWebhook", {
         serverToken: serverToken(),
         userId: user!._id,
         safepaySubscriptionId: event.safepaySubscriptionId,
+        ...(event.filoSubscriptionId ? { subscriptionDbId: event.filoSubscriptionId } : {}),
       });
 
     // Convex optional validators accept undefined but NOT null — build the
@@ -280,7 +299,8 @@ export async function POST(request: NextRequest) {
         });
         break;
       }
-      case "subscription.canceled": {
+      case "subscription.canceled":
+      case "subscription.cancelled": { // docs use both spellings
         const sub = await resolveSub();
         if (sub && ["active", "past_due", "paused"].includes(String(sub.status))) {
           await transitionSubscription(event, sub, "canceled", { cancelAtPeriodEnd: true });

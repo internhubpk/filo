@@ -119,10 +119,10 @@ test('.env.example documents GEMINI_API_KEY as the primary provider', () => {
     /PRIMARY AI provider.*Gemini|Gemini.*PRIMARY/i.test(env),
     '.env.example must mark Gemini as the primary provider'
   )
-  assert.ok(
-    !env.includes('SAFEPAY_SECRET_KEY='),
-    '.env.example must not still require SafePay keys (removed upstream)'
-  )
+  // Real Safepay billing was rebuilt — the current credential set is required.
+  for (const v of ['SAFEPAY_SECRET_KEY=', 'SAFEPAY_WEBHOOK_SECRET=', 'SAFEPAY_PUBLIC_KEY=', 'SAFEPAY_SANDBOX=']) {
+    assert.ok(env.includes(v), `.env.example must document ${v.replace('=', '')}`)
+  }
 })
 
 // ---------- pure-function tests (validators + JSON extraction) ----------

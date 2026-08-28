@@ -41,28 +41,37 @@ test('next.config.ts has ignoreBuildErrors=false', () => {
   )
 })
 
-test('all payment machinery is fully removed', () => {
-  const removedFiles = [
-    'convex/safepay.ts',
-    'convex/safepay-webhook.ts',
-    'convex/payments.ts',
-    'convex/paymentVerifications.ts',
+test('real Safepay billing machinery exists with the verified architecture', () => {
+  // Payments were removed in an early phase and later REBUILT as real Safepay
+  // billing. Assert the CURRENT architecture: verified-webhook state machine,
+  // fail-closed checkout, and NO legacy manual-verification endpoints.
+  const required = [
     'src/app/api/webhooks/safepay/route.ts',
+    'src/lib/safepay.ts',
+    'src/lib/safepay/config.ts',
+    'src/app/api/billing/checkout/route.ts',
+    'src/app/api/billing/return/route.ts',
+    'src/app/api/billing/verify/route.ts',
+    'convex/billing.ts',
+  ]
+  for (const rel of required) {
+    assert.equal(existsSync(resolve(REPO_ROOT, rel)), true, `${rel} must exist (real billing)`)
+  }
+  // Legacy / manual-verification endpoints from the pre-rebuild era stay gone.
+  const stillRemoved = [
     'src/app/api/payments/create-checkout/route.ts',
     'src/app/api/payments/verify/route.ts',
     'src/app/api/payments/submit/route.ts',
     'src/app/api/admin/verifications/route.ts',
-    'src/app/api/admin/verifications/[id]/approve/route.ts',
-    'src/app/api/admin/verifications/[id]/reject/route.ts',
     'src/config/payment.ts',
-    'src/components/billing/billing-page.tsx',
-    'src/app/(dashboard)/billing/page.tsx',
+    'convex/safepay.ts',
+    'convex/payments.ts',
   ]
-  for (const rel of removedFiles) {
+  for (const rel of stillRemoved) {
     assert.equal(
       existsSync(resolve(REPO_ROOT, rel)),
       false,
-      `${rel} should not exist — payments were removed entirely`
+      `${rel} must stay removed (superseded by the Safepay state machine)`
     )
   }
 })
@@ -152,17 +161,23 @@ test('convex/artifacts.ts exposes listUserArtifacts query', () => {
   )
 })
 
-test('UI pages no longer use broken toast-call-with-object pattern', () => {
+test('UI pages use the sonner toast API correctly', () => {
+  // Any page that calls toast.* must import it from the sonner package.
   const pages = [
     'src/app/pricing/page.tsx',
-    'src/components/dashboard/main-dashboard.tsx',
+    'src/app/(app)/billing/page.tsx',
+    'src/app/(app)/create/page.tsx',
   ]
   for (const rel of pages) {
-    const text = readFileSync(resolve(REPO_ROOT, rel), 'utf8')
-    // Pattern that was broken: `toast.error('msg', { description: '...' })`
+    const path = resolve(REPO_ROOT, rel)
+    assert.equal(existsSync(path), true, `${rel} must exist`)
+    const text = readFileSync(path, 'utf8')
+    if (!/toast\.\w+\(/.test(text)) continue // no toast usage → no import needed
+    // sonner's toast accepts (message, { description }) — that pattern is
+    // CORRECT. What IS broken: toast called with no import from "sonner".
     assert.ok(
-      !/toast\.\w+\([^,)]+?,\s*\{\s*description:/.test(text),
-      `${rel} still uses old {description: ...} object arg in toast calls`
+      text.includes('from "sonner"') || text.includes("from 'sonner'"),
+      `${rel} must import toast from the sonner package`
     )
   }
 })

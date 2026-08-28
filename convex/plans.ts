@@ -87,3 +87,44 @@ export const getUserUsage = query({
     return stats;
   },
 });
+
+// -----------------------------------------------------------------------------
+// ADMIN — Safepay plan id mapping (one authoritative Filo plan → Safepay plan)
+// -----------------------------------------------------------------------------
+// Called by POST /api/admin/billing/sync-safepay-plans after the server has
+// created/looked up the matching recurring plans on Safepay. Admin-verified
+// in-Convex (same guarantee as every admin surface).
+
+import { mutation } from "./_generated/server";
+
+async function assertAdminInternal(ctx: any, adminUserId: unknown) {
+  const user = await ctx.db.get(adminUserId as any);
+  if (!user || user.isAdmin !== true || user.status !== "active") {
+    throw new Error("Admin access required");
+  }
+}
+
+export const setSafepayPlanId = mutation({
+  args: {
+    serverToken: v.string(),
+    adminUserId: v.id("users"),
+    planId: v.id("plans"),
+    interval: v.union(v.literal("monthly"), v.literal("yearly")),
+    safepayPlanId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const secret = process.env.FILO_SERVER_SECRET;
+    if (!secret || args.serverToken !== secret) {
+      throw new Error("Unauthorized");
+    }
+    await assertAdminInternal(ctx, args.adminUserId);
+    const plan: any = await ctx.db.get(args.planId);
+    if (!plan) throw new Error("Plan not found");
+    const patch =
+      args.interval === "yearly"
+        ? { safepayPlanIdYearly: args.safepayPlanId }
+        : { safepayPlanIdMonthly: args.safepayPlanId };
+    await ctx.db.patch(args.planId, { ...patch, updatedAt: Date.now() });
+    return { success: true as const };
+  },
+});

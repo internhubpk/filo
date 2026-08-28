@@ -209,16 +209,14 @@ export function jsonError(status: number, error: string, code: string) {
  * return POST landed on a dead host (Vercel 404 DEPLOYMENT_NOT_FOUND) and the
  * activation signal was lost.
  */
-let appUrlWarned = false;
-
-/** True for a per-deployment Vercel URL (project-hash-scope.vercel.app), which dies on the next deploy. */
-function isEphemeralVercelHost(hostname: string): boolean {
-  return /^[a-z0-9-]+-[a-z0-9]{4,12}\.vercel\.app$/i.test(hostname);
-}
+/**
+ * Runtime memo so the "unstable fallback" warning logs at most once.
+ */
+let appUrlFallbackWarned = false;
 
 export interface AppUrlDiagnostics {
   url: string;
-  source: "explicit" | "explicit_ephemeral_fallback" | "vercel_production" | "vercel_deployment_ephemeral" | "localhost";
+  source: "explicit" | "vercel_production" | "vercel_deployment_ephemeral" | "localhost";
   warning?: string;
 }
 
@@ -229,32 +227,28 @@ export interface AppUrlDiagnostics {
  * diagnosing "payment redirects to a 404 after checkout" reports: call
  * GET /api/billing/checkout (or check the `paymentDebug` field on the
  * checkout POST response) and confirm `url` is the REAL production domain.
+ *
+ * NOTE: there is deliberately NO heuristic that second-guesses an explicitly
+ * configured NEXT_PUBLIC_APP_URL. A previous heuristic tried to detect
+ * "ephemeral deployment URLs" by hostname shape and could not be made
+ * reliable — Vercel's stable project domains (`<project>.vercel.app`) and
+ * per-deployment URLs (`<project>-<hash>.vercel.app`) are visually
+ * identical, and the heuristic falsely flagged this project's own STABLE
+ * domain (`filo-ailab99.vercel.app`), overriding the operator's correct
+ * configuration. Configuration is validated by the OPERATOR via these
+ * diagnostics, not guessed by code.
  */
 export function appUrlDiagnostics(): AppUrlDiagnostics {
   const explicit = process.env.NEXT_PUBLIC_APP_URL?.trim();
   if (explicit) {
     try {
-      const host = new URL(explicit).hostname;
-      if (isEphemeralVercelHost(host)) {
-        const productionDomain = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
-        if (productionDomain) {
-          return {
-            url: `https://${productionDomain.replace(/\/+$/, "")}`,
-            source: "explicit_ephemeral_fallback",
-            warning: `NEXT_PUBLIC_APP_URL="${explicit}" is an ephemeral per-deployment Vercel URL. Falling back to the stable production domain. Fix NEXT_PUBLIC_APP_URL in Vercel project settings to stop relying on this fallback.`,
-          };
-        }
-        return {
-          url: explicit.replace(/\/+$/, ""),
-          source: "explicit_ephemeral_fallback",
-          warning: `NEXT_PUBLIC_APP_URL="${explicit}" is an ephemeral per-deployment Vercel URL AND no VERCEL_PROJECT_PRODUCTION_URL fallback is available — Safepay redirects WILL 404 once this deployment is replaced. Set NEXT_PUBLIC_APP_URL to your real production domain now.`,
-        };
-      }
+      // Only surface an obviously broken value (not parseable as URL).
+      new URL(explicit);
     } catch {
       return {
         url: explicit,
         source: "explicit",
-        warning: `NEXT_PUBLIC_APP_URL="${explicit}" is not a valid absolute URL — this will break Safepay redirects.`,
+        warning: `NEXT_PUBLIC_APP_URL="${explicit}" is not a valid absolute URL — this will break Safepay redirects. Set it to the absolute production URL, e.g. https://your-domain.vercel.app`,
       };
     }
     return { url: explicit.replace(/\/+$/, ""), source: "explicit" };
@@ -281,62 +275,27 @@ export function appUrlDiagnostics(): AppUrlDiagnostics {
   return { url: "http://localhost:3000", source: "localhost" };
 }
 
+/**
+ * Canonical public base URL of this deployment — used for Safepay
+ * redirect_url / webhook targets, which MUST survive across deployments.
+ *
+ * Resolution order:
+ *   1. NEXT_PUBLIC_APP_URL            (explicit operator config — preferred)
+ *   2. VERCEL_PROJECT_PRODUCTION_URL  (Vercel's STABLE production domain)
+ *   3. VERCEL_URL                     (EPHEMERAL per-deployment domain —
+ *                                      dies with the deployment; Safepay
+ *                                      redirects to it will 404 later with
+ *                                      DEPLOYMENT_NOT_FOUND. Warned loudly.)
+ *   4. http://localhost:3000          (local dev)
+ *
+ * An explicitly configured value is always trusted — use appUrlDiagnostics()
+ * (GET /api/billing/checkout) to VERIFY the operator set the right one.
+ */
 export function appUrl(): string {
-  const explicit = process.env.NEXT_PUBLIC_APP_URL?.trim();
-  if (explicit) {
-    // Detect the exact misconfiguration that sent a PAID customer to a dead
-    // host: someone pasted a per-deployment URL (project-hash.vercel.app)
-    // into NEXT_PUBLIC_APP_URL. It works today and 404s on the next deploy.
-    //
-    // BUG (fixed here): this used to only WARN and then return the broken
-    // URL anyway — Safepay's post-payment redirect kept landing on a dead
-    // Vercel deployment (DEPLOYMENT_NOT_FOUND 404) even after the warning
-    // was added, because nothing actually stopped using the bad value. Now
-    // we fall through to a stable URL instead of returning the known-bad one.
-    try {
-      const host = new URL(explicit).hostname;
-      if (isEphemeralVercelHost(host)) {
-        const productionDomain = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
-        const fallback = productionDomain
-          ? `https://${productionDomain.replace(/\/+$/, "")}`
-          : null;
-        if (!appUrlWarned) {
-          appUrlWarned = true;
-          console.warn(
-            `[billing] NEXT_PUBLIC_APP_URL="${explicit}" is an EPHEMERAL Vercel deployment URL — ` +
-              `it 404s (DEPLOYMENT_NOT_FOUND) as soon as this deployment is replaced, which breaks ` +
-              `the Safepay post-payment redirect. ${
-                fallback
-                  ? `Using the stable production domain instead (${fallback}) until this is corrected.`
-                  : "No VERCEL_PROJECT_PRODUCTION_URL is available to fall back to — payments will 404 on return."
-              } Set NEXT_PUBLIC_APP_URL to the STABLE production domain on Vercel to silence this.`
-          );
-        }
-        if (fallback) return fallback;
-        // No safe fallback available — better to use the ephemeral URL (it
-        // at least works for THIS deployment) than to silently break checkout.
-      }
-    } catch {
-      /* not a valid URL — the explicit value is used verbatim */
-    }
-    return explicit.replace(/\/+$/, "");
+  const diag = appUrlDiagnostics();
+  if (diag.warning && diag.source === "vercel_deployment_ephemeral" && !appUrlFallbackWarned) {
+    appUrlFallbackWarned = true;
+    console.warn(`[billing] ${diag.warning}`);
   }
-
-  const productionDomain = process.env.VERCEL_PROJECT_PRODUCTION_URL?.trim();
-  if (productionDomain) return `https://${productionDomain.replace(/\/+$/, "")}`;
-
-  const deploymentUrl = process.env.VERCEL_URL?.trim();
-  if (deploymentUrl) {
-    if (!appUrlWarned) {
-      appUrlWarned = true;
-      console.warn(
-        `[billing] NEXT_PUBLIC_APP_URL is NOT set — falling back to the EPHEMERAL deployment URL ` +
-          `(${deploymentUrl}). Safepay redirects/webhooks will break when this deployment is ` +
-          `replaced. Set NEXT_PUBLIC_APP_URL to the STABLE production domain on Vercel.`
-      );
-    }
-    return `https://${deploymentUrl.replace(/\/+$/, "")}`;
-  }
-
-  return "http://localhost:3000";
+  return diag.url;
 }

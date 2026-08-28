@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { useMemo, useState } from "react";
-import { Loader2, Plus, Pencil, Power } from "lucide-react";
+import { Loader2, Plus, Pencil, Power, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
 import { useApi } from "@/hooks/use-api";
@@ -68,6 +68,7 @@ export default function AdminPlansPage() {
   const plans = useApi<PlanRow[]>(() => apiClient.adminPlans().then((r) => (r.success ? (r.data as unknown as PlanRow[]) : null)));
   const [editing, setEditing] = useState<typeof EMPTY_FORM | null>(null);
   const [saving, setSaving] = useState(false);
+  const [syncing, setSyncing] = useState(false);
   const [toggleTarget, setToggleTarget] = useState<PlanRow | null>(null);
 
   const rows = useMemo(() => plans.data ?? [], [plans.data]);
@@ -123,15 +124,63 @@ export default function AdminPlansPage() {
     }
   }
 
+  /**
+   * Create the recurring plans on Safepay (client/plans/v1 API) and store the
+   * returned Safepay plan ids on the plan rows. `force` recreates even when a
+   * mapping already exists (only after the Safepay account's plans were
+   * rebuilt).
+   */
+  async function syncSafepayPlans(force: boolean) {
+    if (
+      force &&
+      !window.confirm("Recreate ALL Safepay plans and overwrite existing mappings? Only do this if the plans on Safepay were deleted.")
+    ) {
+      return;
+    }
+    setSyncing(true);
+    try {
+      const res = await apiClient.adminSyncSafepayPlans({ force });
+      if (!res.success) {
+        toast.error("Safepay plan sync failed", { description: res.error });
+        return;
+      }
+      const failed = (res.data?.results ?? []).filter((r) => r.status === "failed");
+      if (failed.length > 0) {
+        toast.warning(res.data?.summary ?? "Plan sync finished with errors", {
+          description: failed.map((f) => `${f.plan} (${f.interval}): ${f.detail}`).join(" · ").slice(0, 300),
+          duration: 10000,
+        });
+      } else {
+        toast.success("Safepay plans synced", { description: res.data?.summary });
+      }
+      await plans.refresh();
+    } catch {
+      toast.error("Safepay plan sync failed — check the server logs.");
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   return (
     <div className="mx-auto max-w-7xl space-y-6">
       <AdminPageHeader
         title="Plans"
         description="Pricing, limits, and Safepay plan mapping. Stored in Convex — the pricing page reads from here."
         actions={
-          <Button onClick={() => setEditing({ ...EMPTY_FORM })}>
-            <Plus className="mr-1.5 size-4" /> New plan
-          </Button>
+          <>
+            <Button
+              variant="outline"
+              disabled={syncing}
+              onClick={() => void syncSafepayPlans(false)}
+              title="Create recurring plans on Safepay via the plans API and map their ids here"
+            >
+              {syncing ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <RefreshCw className="mr-1.5 size-4" />}
+              Sync Safepay plans
+            </Button>
+            <Button onClick={() => setEditing({ ...EMPTY_FORM })}>
+              <Plus className="mr-1.5 size-4" /> New plan
+            </Button>
+          </>
         }
       />
 

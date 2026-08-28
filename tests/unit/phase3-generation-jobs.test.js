@@ -22,6 +22,7 @@ const REPO_ROOT = resolve(__dirname, '..', '..')
 
 const schema = readFileSync(resolve(REPO_ROOT, 'convex', 'schema.ts'), 'utf8')
 const generation = readFileSync(resolve(REPO_ROOT, 'convex', 'generation.ts'), 'utf8')
+const worker = readFileSync(resolve(REPO_ROOT, 'convex', 'worker.ts'), 'utf8')
 
 test('schema defines generationJobs table with the full spec field set', () => {
   assert.ok(schema.includes('generationJobs: defineTable'), 'generationJobs table missing')
@@ -74,22 +75,23 @@ test('schema defines generationUnits with per-unit retry tracking', () => {
   assert.ok(schema.includes('by_jobId_sequence'), 'generationUnits needs by_jobId_sequence index')
 })
 
-test('public API surface: start, get, list, retry, cancel, finish', () => {
-  const publicFns = [
-    'startGenerationJob',
-    'getJob',
-    'getJobUnits',
-    'listUserJobs',
-    'retryFailedUnits',
-    'cancelGenerationJob',
-    'finishJob',
+test('public API surface: enqueue, resume, cancel, get, list (durable Convex jobs)', () => {
+  // The public surface changed with the durable-worker refactor: users enqueue
+  // a job (mutation, schedules internal.worker.processJob), can cancel/resume,
+  // and read job state via live queries. The worker — not the client — finishes
+  // the job (completeJobRendered is a mutation invoked by the render route).
+  const expected = [
+    'export const enqueueJob = mutation(',
+    'export const resumeUserJob = mutation(',
+    'export const cancelUserJob = mutation(',
+    'export const getJob = query(',
+    'export const getJobUnits = query(',
+    'export const listUserJobs = query(',
+    'export const getActiveUserJob = query(',
+    'export const completeJobRendered = mutation(',
   ]
-  for (const fn of publicFns) {
-    assert.ok(
-      generation.includes(`export const ${fn} = action(`) ||
-        generation.includes(`export const ${fn} = query(`),
-      `missing public function: ${fn}`
-    )
+  for (const decl of expected) {
+    assert.ok(generation.includes(decl), `missing public function declaration: ${decl}`)
   }
 })
 
@@ -111,29 +113,33 @@ test('internal state mutations use internalMutation (not client-callable)', () =
 })
 
 test('every state change routes through internal.generation.* (committed mutations)', () => {
-  // Strip out the internalMutation/internalQuery handler bodies — those are
-  // ALLOWED to use ctx.db (that's what mutations are for). Then check that
-  // the remaining code (the actions + worker functions) contains no ctx.db.
-  const stripped = generation.replace(
-    /internalMutation\(\{[\s\S]*?\n\}\)/g,
-    'internalMutation({ /* stripped */ })'
-  ).replace(
-    /internalQuery\(\{[\s\S]*?\n\}\)/g,
-    'internalQuery({ /* stripped */ })'
-  )
-
-  const actionDbCalls = stripped.match(/^\s*await ctx\.db\./gm) || []
+  // ARCHITECTURE (post durable-worker refactor):
+  //   - generation.ts user-facing entry points are MUTATIONS/QUERIES (ctx.db
+  //     reads are legal there; writes are also legal in Convex mutations —
+  //     the important guarantee is that ACTIONS never touch ctx.db, because
+  //     actions are not committed atomically and can be retried).
+  //   - worker.ts ("use node" ACTIONS) must therefore contain ZERO ctx.db
+  //     calls and route every state change through internal.generation.*
   assert.equal(
-    actionDbCalls.length, 0,
-    `action code calls ctx.db directly (${actionDbCalls.length} hits) — actions must use runMutation/runQuery`
+    (worker.match(/ctx\.db\./g) || []).length,
+    0,
+    'worker.ts is an action module — it must never touch ctx.db directly'
   )
+  for (const internal of [
+    'internal.generation.createJob',
+    'internal.generation.initializeUnits',
+    'internal.generation.setJobStatus',
+    'internal.generation.completeUnit',
+  ]) {
+    const used = generation.includes(internal) || worker.includes(internal)
+    assert.ok(used, `state changes must route through ${internal}`)
+  }
+  // Enqueue schedules the durable worker instead of doing the AI work inline.
   assert.ok(
-    generation.includes('internal.generation.setJobStatus'),
-    'worker must transition status via internal.generation.setJobStatus'
-  )
-  assert.ok(
-    generation.includes('internal.generation.completeUnit'),
-    'worker must persist unit content via internal.generation.completeUnit'
+    generation.includes('ctx.scheduler.runAfter(0, internal.worker.processJob') ||
+      worker.includes('ctx.scheduler.runAfter(0, internal.worker.processJob') ||
+      worker.includes('runAfter(0, internal.worker.processJob'),
+    'enqueue/worker must schedule internal.worker.processJob (durable continuation)'
   )
 })
 
@@ -161,37 +167,39 @@ test('retries are bounded (max 3 per job)', () => {
 
 test('job ownership is enforced on user-facing entry points', () => {
   // Two enforcement patterns are valid:
-  //   Direct:    const job = ...; if (!job || job.userId !== args.userId) return null
-  //   Indirect:  const job = await ctx.runQuery(api.generation.getJob, {jobId, userId});
-  //              if (!job) return NOT_FOUND   // getJob returns null for non-owners
-  // The user-facing functions (getJob, getJobUnits, retryFailedUnits,
-  // cancelGenerationJob, finishJob) must EACH do one of these before mutating.
-
+  //   Direct:    the function compares job.userId !== args.userId
+  //   Server-side: the Next.js API layer resolves the session user and passes
+  //              a serverToken — the mutation trusts only the server token
+  //              (assertServerToken), so ownership is enforced by the userId
+  //              args coming exclusively from the verified session.
+  // Every user-facing entry point (enqueueJob, resumeUserJob, cancelUserJob,
+  // claimRender) must be a mutation guarded by assertServerToken.
+  for (const fn of ['enqueueJob', 'resumeUserJob', 'cancelUserJob', 'claimRender']) {
+    const decl = `export const ${fn} = mutation(`
+    assert.ok(generation.includes(decl), `missing user-facing mutation: ${fn}`)
+    const body = generation.slice(generation.indexOf(decl))
+    const fnSource = body.slice(0, body.indexOf('\n})'))
+    assert.ok(
+      fnSource.includes('assertServerToken'),
+      `${fn} must verify the server token (ownership enforced server-side)`
+    )
+  }
+  // Read paths enforce ownership directly against the query args.
   const directChecks = (generation.match(/job\.userId !== args\.userId/g) || []).length
-  // Indirect pattern: every action that calls api.generation.getJob with the
-  // caller's userId and rejects on null gets ownership enforcement for free.
-  const indirectChecks = (
-    generation.match(/ctx\.runQuery\(api\.generation\.getJob,[\s\S]{0,120}?userId: args\.userId/g) || []
-  ).length
-
   assert.ok(
     directChecks >= 2,
     `expected ≥2 direct ownership checks (getJob/getJobUnits), found ${directChecks}`
   )
-  assert.ok(
-    directChecks + indirectChecks >= 5,
-    `expected ≥5 total ownership checks (2 direct + 3 indirect), found ${directChecks}+${indirectChecks}`
-  )
 })
 
-test('resumability: startGenerationJob supports resumeJobId + crash recovery', () => {
+test('resumability: durable jobs persist blueprint + units and can resume', () => {
   assert.ok(
-    generation.includes('resumeJobId'),
-    'startGenerationJob must accept resumeJobId'
+    generation.includes('resumeUserJob'),
+    'a resume entry point must exist (resumeUserJob)'
   )
   assert.ok(
-    generation.includes('generatePendingUnits'),
-    'worker must expose a unit-loop that can resume from pending units'
+    generation.includes('internal.worker.processJob'),
+    'worker must be scheduled via internal.worker.processJob (durable, survives tab close)'
   )
   // Blueprint is persisted on the job so a resume doesn't re-plan.
   // (The validator was loosened to v.any() — v.object({}) rejects every real
@@ -202,10 +210,11 @@ test('resumability: startGenerationJob supports resumeJobId + crash recovery', (
   )
 })
 
-test('AI calls go through the canonical aiRouter (no raw fetches)', () => {
-  assert.ok(generation.includes('aiRouter.generateJson'), 'must use aiRouter.generateJson')
+test('AI calls go through the canonical aiRouter (no raw provider URLs)', () => {
+  // The AI layer lives in src/services/ai and is imported by the worker.
+  assert.ok(worker.includes('aiRouter'), 'worker must use the canonical aiRouter')
   assert.ok(
-    !generation.includes('https://openrouter.ai') && !generation.includes('generativelanguage.googleapis.com'),
-    'generation.ts must not contain raw provider URLs'
+    !worker.includes('https://openrouter.ai') && !worker.includes('generativelanguage.googleapis.com'),
+    'worker.ts must not contain raw provider URLs — the aiRouter owns endpoints'
   )
 })

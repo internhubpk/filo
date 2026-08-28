@@ -1,75 +1,92 @@
 // =============================================================================
 // FILO × SAFEPAY — Server-side client (NEVER import from client code)
 // =============================================================================
-// Responsibilities:
-//   1. Create sandbox checkout sessions (returns a hosted payment URL).
-//   2. Verify webhook signatures (HMAC-SHA256 over the raw request body).
-//   3. Verify the signature Safepay POSTs back to our redirect_url.
-//   4. Normalize Safepay event payloads into a small typed shape for the
-//      billing state machine in convex/billing.ts.
+// All environment access lives in ./config.ts — this file uses the config
+// object only. Responsibilities:
+//   1. Create checkout sessions (recurring subscription by default).
+//   2. Verify the signed browser return (HMAC-SHA256 over the tracker).
+//   3. Ask Safepay — server-to-server — for live tracker state (Fetch
+//      Tracker API) and classify the answer.
+//   4. Verify webhook signatures (HMAC-SHA512 over the payload, the CURRENT
+//      documented scheme) and normalize event payloads.
 //
-// SECURITY:
-//   - Runs exclusively on the server (API routes). Secret keys never reach
-//     the browser.
-//   - Fail-closed: if SAFEPAY_BEACON_SECRET is missing, checkout throws.
-//   - Webhook signatures are REQUIRED (SAFEPAY_WEBHOOK_SECRET). Setting
-//     SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS=true weakens this for local curl
-//     testing ONLY — never enable in production.
+// OFFICIAL API CONTRACT (verified Aug 2026 against safepay-docs.netlify.app,
+// the official @sfpy/node-core SDK and the official WooCommerce plugin — NOT
+// against this repository's old comments):
 //
-// OFFICIAL API CONTRACT (mirrors @sfpy/node-sdk):
-//   One-time payment (default flow):
-//     POST {api}/order/v1/init
-//       body: { client: <secret key>, amount, currency, environment }
-//       → { data: { token: "track_..." } }
-//     Hosted page: {checkout}/pay?beacon={token}&env=...&order_id=...
-//                  &redirect_url=...&cancel_url=...&source=custom&webhooks=true
-//   Subscription checkout (requires SAFEPAY_V1_SECRET + a Safepay plan id):
-//     POST {api}/client/passport/v1/token   (header X-SFPY-MERCHANT-SECRET)
+//   Credentials (dashboard → Developers): Public Key, Secret Key (sec_…),
+//   Webhook Shared Secret. Mapping lives in ./config.ts.
+//
+//   Recurring subscription checkout (the model Filo sells):
+//     POST {api}/client/passport/v1/token   (header X-SFPY-MERCHANT-SECRET:
+//                                            Secret Key)
 //       → { data: <auth token> }
-//     Hosted page: {checkout}/subscribe?plan_id=...&auth_token=...&env=...
-//                  &redirect_url=...&cancel_url=...
+//     Hosted page: {checkout}/subscribe?plan_id=…&auth_token=…&env=…
+//                  &redirect_url=…&cancel_url=…
+//     The plan MUST exist on Safepay (create via POST /client/plans/v1/ —
+//     see /api/admin/billing/sync-safepay-plans — or the dashboard) and be
+//     mapped on the Filo plan row (safepayPlanIdMonthly/Yearly).
 //
-// ENV:
-//   SAFEPAY_MODE=sandbox|production              (default: sandbox)
-//   SAFEPAY_BEACON_SECRET=sec_xxx                (merchant secret key — required)
-//   SAFEPAY_V1_SECRET=xxx                        (merchant v1 secret — enables
-//                                                the true subscription flow)
-//   SAFEPAY_WEBHOOK_SECRET=whsec_xxx             (webhook signing secret)
-//   SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS=false        (dev escape hatch, default false)
+//   One-time checkout (explicit operator opt-in via SAFEPAY_PAYMENT_MODEL):
+//     POST {api}/order/v1/init  { client: <Secret Key>, amount, currency,
+//                                 environment }
+//       → { data: { token: "track_…" } }
+//     Hosted page: {checkout}/pay?beacon={token}&env=…&order_id=…
+//
+//   IMPORTANT: pass a CLEAN redirect_url (no query string). Safepay appends
+//   its fields as `?tracker=…&sig=…` and does NOT respect an existing query
+//   string — extra state must ride on `order_id` (echoed back on the return
+//   POST and in webhook payloads as data.metadata.order_id), not on the
+//   redirect_url. (This exact bug previously produced
+//   `…&interval=monthly?order_id=…` URLs.)
+//
+//   Signed return (proof of payment, per the official WooCommerce plugin):
+//     sig = hex(HMAC-SHA256(WebhookSharedSecret, tracker)) POSTed with
+//     tracker/order_id/reference to the redirect_url.
+//
+//   Fetch Tracker API (payment verification):
+//     GET {api}/reporter/api/v1/payments/{tracker}
+//     header: X-SFPY-MERCHANT-SECRET: <Secret Key>   (required — anonymous
+//     calls 401; the docs' unauthenticated curl example is stale)
+//     → { ok: true, data: { state: "TRACKER_ENDED" | … } }
+//
+//   Webhooks:
+//     Header `X-SFPY-SIGNATURE` = hex(HMAC-SHA512(WebhookSharedSecret,
+//     JSON payload)). Events: payment.succeeded | payment.failed |
+//     payment.refunded | authorization.succeeded | authorization.reversed |
+//     void.succeeded | subscription.created | subscription.canceled(led) |
+//     subscription.ended | subscription.paused | subscription.resumed |
+//     subscription.payment.succeeded | subscription.payment.failed.
+//     Payload: { token: "evt_…", version, merchant_api_key, type, endpoint,
+//                data: { tracker, state, metadata: { order_id }, … } }.
 // =============================================================================
 
 import { createHmac, timingSafeEqual } from "crypto";
+import {
+  getSafepayConfig,
+  isSafepayConfigured as configIsConfigured,
+  isSubscriptionFlowConfigured as configIsSubscriptionFlow,
+  allowUnsignedWebhooks,
+  getPaymentModel,
+  type SafepayMode,
+} from "@/lib/safepay/config";
 
-export type SafepayMode = "sandbox" | "production";
-
-const SANDBOX_API = "https://sandbox.api.getsafepay.com";
-const PRODUCTION_API = "https://api.getsafepay.com";
-// Official hosted checkout bases (SDK constants CHECKOUT_SANDBOX / _PRODUCTION).
-const SANDBOX_CHECKOUT = "https://sandbox.api.getsafepay.com/checkout";
-const PRODUCTION_CHECKOUT = "https://getsafepay.com/checkout";
+export type { SafepayMode };
 
 export function getSafepayMode(): SafepayMode {
-  return (process.env.SAFEPAY_MODE || "sandbox").toLowerCase() === "production"
-    ? "production"
-    : "sandbox";
+  return getSafepayConfig().mode;
 }
 
 export function isSafepayConfigured(): boolean {
-  return Boolean(process.env.SAFEPAY_BEACON_SECRET);
+  return configIsConfigured();
 }
 
 /** True when the true recurring-subscription flow can be used. */
 export function isSubscriptionFlowConfigured(): boolean {
-  return Boolean(process.env.SAFEPAY_V1_SECRET);
+  return configIsSubscriptionFlow();
 }
 
-function apiBase(): string {
-  return getSafepayMode() === "production" ? PRODUCTION_API : SANDBOX_API;
-}
-
-export function checkoutPageBase(): string {
-  return getSafepayMode() === "production" ? PRODUCTION_CHECKOUT : SANDBOX_CHECKOUT;
-}
+export { getPaymentModel, getSafepayConfig };
 
 // -----------------------------------------------------------------------------
 // Checkout session creation
@@ -77,18 +94,18 @@ export function checkoutPageBase(): string {
 
 export interface CheckoutSessionInput {
   amountPkr: number;
-  orderId: string;          // Filo subscription id (Convex)
+  orderId: string;          // Filo subscription id (Convex) — echoed back as
+                            // order_id on the return POST and in webhook
+                            // metadata; carries our state SAFELY.
   customerEmail?: string;
   customerName?: string;
   customerPhone?: string;
   /** Safepay subscription plan identifier (for recurring subscription checkouts). */
   subscriptionPlanId?: string;
-  /** Full URL Safepay redirects to after payment (POSTs tracker + signature). */
+  /** Full URL Safepay redirects to after payment. MUST be query-free. */
   redirectUrl?: string;
   /** Full URL Safepay redirects to when the payer cancels. */
   cancelUrl?: string;
-  /** Opaque state echoed back to our return URL as query params. */
-  state?: Record<string, string>;
 }
 
 export interface CheckoutSession {
@@ -103,54 +120,43 @@ export interface CheckoutSession {
 /**
  * Create a Safepay checkout session and return the hosted payment URL.
  *
- * Flow selection:
- *   1. SUBSCRIPTION — when a Safepay plan id is mapped AND SAFEPAY_V1_SECRET
- *      is configured. Uses the official passport-token + /checkout/subscribe
- *      flow so Safepay handles recurring renewals.
- *   2. ONE-TIME — official /order/v1/init flow (works with just the secret
- *      key). The first period is charged now; the verified webhook activates
- *      the Filo subscription. Renewal reminders/collection are then handled
- *      by switching the plan to the subscription flow once SAFEPAY_V1_SECRET
- *      and dashboard plan ids are configured.
+ * Model selection (explicit, never a silent downgrade):
+ *   - SAFEPAY_PAYMENT_MODEL=one_time  → one-time order flow (tracker-backed
+ *     verification), regardless of plan mapping.
+ *   - otherwise (default)             → true recurring subscription flow;
+ *     requires a mapped Safepay plan id. Errors propagate — if the passport
+ *     token or the plan mapping is broken the operator sees the real error
+ *     instead of a customer silently being charged once.
  */
 export async function createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSession> {
-  const beaconSecret = process.env.SAFEPAY_BEACON_SECRET;
-  if (!beaconSecret) {
-    throw new Error("SAFEPAY_BEACON_SECRET is not configured — billing is disabled (fail-closed)");
+  const config = getSafepayConfig();
+  if (!config.secretKey) {
+    throw new Error("SAFEPAY_SECRET_KEY is not configured — billing is disabled (fail-closed)");
   }
 
-  // ---- 1. True subscription flow when fully configured ----
-  if (input.subscriptionPlanId && isSubscriptionFlowConfigured()) {
-    try {
-      const session = await createSubscriptionCheckout(input, beaconSecret);
-      return session;
-    } catch (err) {
-      // Fall through to the one-time flow so the customer is never hard
-      // blocked by a transient passport/plan error — but log loudly.
-      console.error(
-        `[SAFEPAY] subscription checkout failed (plan=${input.subscriptionPlanId}); falling back to one-time payment:`,
-        err instanceof Error ? err.message : err
-      );
-    }
+  if (getPaymentModel() === "one_time") {
+    return createOneTimeCheckout(input, config.secretKey, config);
   }
-
-  // ---- 2. Official one-time payment flow ----
-  return createOneTimeCheckout(input, beaconSecret);
+  return createSubscriptionCheckout(input, config.secretKey, config);
 }
 
 /** Official subscription flow: passport token → /checkout/subscribe URL. */
 async function createSubscriptionCheckout(
   input: CheckoutSessionInput,
-  _beaconSecret: string
+  secretKey: string,
+  config: ReturnType<typeof getSafepayConfig>
 ): Promise<CheckoutSession> {
-  const v1Secret = process.env.SAFEPAY_V1_SECRET;
-  if (!v1Secret) throw new Error("SAFEPAY_V1_SECRET is not configured");
+  if (!input.subscriptionPlanId) {
+    throw new Error(
+      "This plan has no Safepay plan id mapped. Create the plans (Admin → Plans → Sync Safepay plans) and map them first."
+    );
+  }
 
-  const tokenRes = await fetch(`${apiBase()}/client/passport/v1/token`, {
+  const tokenRes = await fetch(`${config.apiBase}/client/passport/v1/token`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-SFPY-MERCHANT-SECRET": v1Secret,
+      "X-SFPY-MERCHANT-SECRET": secretKey,
     },
     body: JSON.stringify({}),
     cache: "no-store",
@@ -172,15 +178,16 @@ async function createSubscriptionCheckout(
     throw new Error("Safepay passport token returned no auth token");
   }
 
-  const url = new URL(`${checkoutPageBase()}/subscribe`);
-  url.searchParams.set("plan_id", input.subscriptionPlanId!);
+  const url = new URL(`${config.checkoutBase}/subscribe`);
+  url.searchParams.set("plan_id", input.subscriptionPlanId);
   url.searchParams.set("auth_token", authToken);
-  url.searchParams.set("env", getSafepayMode());
+  url.searchParams.set("env", config.mode);
+  if (input.orderId) url.searchParams.set("order_id", input.orderId);
   if (input.redirectUrl) url.searchParams.set("redirect_url", input.redirectUrl);
   if (input.cancelUrl) url.searchParams.set("cancel_url", input.cancelUrl);
-  if (input.state) {
-    for (const [k, v] of Object.entries(input.state)) url.searchParams.set(k, v);
-  }
+  if (input.customerEmail) url.searchParams.set("email", input.customerEmail);
+  if (input.customerName) url.searchParams.set("name", input.customerName);
+  if (input.customerPhone) url.searchParams.set("phone", input.customerPhone);
 
   return {
     token: authToken,
@@ -194,16 +201,17 @@ async function createSubscriptionCheckout(
 /** Official one-time flow: /order/v1/init → /checkout/pay URL. */
 async function createOneTimeCheckout(
   input: CheckoutSessionInput,
-  beaconSecret: string
+  secretKey: string,
+  config: ReturnType<typeof getSafepayConfig>
 ): Promise<CheckoutSession> {
-  const res = await fetch(`${apiBase()}/order/v1/init`, {
+  const res = await fetch(`${config.apiBase}/order/v1/init`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
-      client: beaconSecret,
+      client: secretKey,
       amount: input.amountPkr, // PKR in major units (rupees)
       currency: "PKR",
-      environment: getSafepayMode(),
+      environment: config.mode,
     }),
     cache: "no-store",
   });
@@ -214,7 +222,7 @@ async function createOneTimeCheckout(
   }
 
   const json = (await res.json().catch(() => null)) as
-    | { data?: { token?: string; tracking_id?: string } ; token?: string; tracking_id?: string; error?: unknown }
+    | { data?: { token?: string; tracking_id?: string }; token?: string; tracking_id?: string; error?: unknown }
     | null;
 
   const token = json?.data?.token ?? json?.token;
@@ -223,9 +231,9 @@ async function createOneTimeCheckout(
   }
   const trackingId = json?.data?.tracking_id ?? json?.tracking_id;
 
-  const url = new URL(`${checkoutPageBase()}/pay`);
+  const url = new URL(`${config.checkoutBase}/pay`);
   url.searchParams.set("beacon", token);
-  url.searchParams.set("env", getSafepayMode());
+  url.searchParams.set("env", config.mode);
   url.searchParams.set("source", "custom");
   url.searchParams.set("webhooks", "true");
   if (input.orderId) url.searchParams.set("order_id", input.orderId);
@@ -234,9 +242,6 @@ async function createOneTimeCheckout(
   if (input.customerEmail) url.searchParams.set("email", input.customerEmail);
   if (input.customerName) url.searchParams.set("name", input.customerName);
   if (input.customerPhone) url.searchParams.set("phone", input.customerPhone);
-  if (input.state) {
-    for (const [k, v] of Object.entries(input.state)) url.searchParams.set(k, v);
-  }
 
   return {
     token,
@@ -255,21 +260,19 @@ async function createOneTimeCheckout(
  * Verify the signature Safepay POSTs (form-encoded) to our redirect_url:
  * HMAC-SHA256 over the tracker token.
  *
- * Which secret signs the redirect differs across Safepay integrations:
- *   - official integration gist: the merchant SECRET KEY (beacon secret)
- *   - @sfpy/node-sdk Verify.signature(): the v1 secret
- *   - official WooCommerce plugin: the webhook shared secret
- * All three are server-only secrets, so accepting a match against ANY of the
- * configured ones preserves the security model while staying compatible with
- * however the merchant's dashboard is wired.
+ * Which secret signs the return differs across official integrations:
+ *   - official WooCommerce plugin: the WEBHOOK shared secret
+ *   - @sfpy/node-sdk Verify.signature(): the "v1" secret (a legacy credential
+ *     the current dashboard no longer exposes; it was historically the same
+ *     class of merchant secret)
+ * Both are server-only secrets; accepting a match against any CONFIGURED one
+ * preserves the security model while staying compatible with how the
+ * merchant's dashboard is wired. Never a client-controlled value.
  */
 export function verifyReturnSignature(tracker: string, signature: string | null | undefined): boolean {
   if (!tracker || !signature) return false;
-  const secrets = [
-    process.env.SAFEPAY_BEACON_SECRET,
-    process.env.SAFEPAY_V1_SECRET,
-    process.env.SAFEPAY_WEBHOOK_SECRET,
-  ].filter((s): s is string => Boolean(s));
+  const config = getSafepayConfig();
+  const secrets = [config.webhookSecret, config.secretKey].filter((s): s is string => Boolean(s));
   if (secrets.length === 0) return false;
   const provided = signature.trim().toLowerCase();
   return secrets.some((secret) => {
@@ -281,10 +284,10 @@ export function verifyReturnSignature(tracker: string, signature: string | null 
 // -----------------------------------------------------------------------------
 // Tracker state — server-to-server payment verification (Fetch Tracker API)
 // -----------------------------------------------------------------------------
-// GET {api}/reporter/api/v1/payments/{tracker} returns the live state of a
-// payment tracker. This is the reconciliation path that unblocks customers
-// when webhook delivery is delayed or misconfigured:
-//   https://safepay-docs.netlify.app/concepts/fetch-tracker
+// GET {api}/reporter/api/v1/payments/{tracker} with the merchant Secret Key
+// in the X-SFPY-MERCHANT-SECRET header (verified against the live sandbox
+// API: anonymous calls 401, and the endpoint's own error enumerates the
+// "strategies/secret" header lookup).
 
 export type TrackerOutcome =
   | { kind: "paid"; state: string }
@@ -322,44 +325,35 @@ export function classifyTrackerState(state: string | undefined | null): TrackerO
 
 /**
  * Ask Safepay (server-to-server) for the current state of a payment tracker.
- *
- * AUTH (verified against the live sandbox API): the reporter endpoint rejects
- * anonymous calls with 401 and its error enumerates the accepted strategies —
- * one of them is `strategies/secret`, which reads the **X-SFPY-MERCHANT-SECRET**
- * header (proven: sending that header changes the error from
- * "merchant webhook secret not found in the request header" to
- * "could not fetch client"). The docs' unauthenticated curl example is stale.
- *
- * Which merchant secret value satisfies the lookup isn't documented, so we
- * try each configured secret — the first that resolves the client wins.
  */
 export async function fetchTrackerState(tracker: string): Promise<TrackerFetchResult> {
   if (!tracker || !tracker.startsWith("track_")) {
     return { ok: false, outcome: { kind: "unknown" }, error: "invalid tracker token" };
   }
-  const url = `${apiBase()}/reporter/api/v1/payments/${encodeURIComponent(tracker)}`;
+  const config = getSafepayConfig();
+  const url = `${config.apiBase}/reporter/api/v1/payments/${encodeURIComponent(tracker)}`;
 
-  const secretCandidates: Array<[string, string | undefined]> = [
-    ["merchant-secret:beacon", process.env.SAFEPAY_BEACON_SECRET],
-    ["merchant-secret:v1", process.env.SAFEPAY_V1_SECRET],
-    ["merchant-secret:webhook", process.env.SAFEPAY_WEBHOOK_SECRET],
-    ["anonymous", undefined],
+  if (!config.secretKey) {
+    return {
+      ok: false,
+      outcome: { kind: "unknown" },
+      error:
+        "SAFEPAY_SECRET_KEY is not configured on this deployment — cannot verify payments server-to-server",
+    };
+  }
+
+  const attempts: Array<[string, Record<string, string>]> = [
+    ["secret-key", { "X-SFPY-MERCHANT-SECRET": config.secretKey }],
+    ["anonymous", {}], // kept last: some environments still allow tracker lookup
   ];
 
   const rejections: string[] = [];
-  for (const [label, secret] of secretCandidates) {
-    if (!secret && label !== "anonymous") {
-      rejections.push(`${label}: not configured`);
-      continue;
-    }
+  for (const [label, headers] of attempts) {
     try {
-      const res = await fetch(url, {
-        headers: secret ? { "X-SFPY-MERCHANT-SECRET": secret } : {},
-        cache: "no-store",
-      });
+      const res = await fetch(url, { headers, cache: "no-store" });
       if (!res.ok) {
         rejections.push(`${label}: HTTP ${res.status}`);
-        continue; // try the next auth variant
+        continue;
       }
       const json = (await res.json().catch(() => null)) as
         | { ok?: boolean; data?: { state?: string }; state?: string; error?: unknown }
@@ -373,17 +367,11 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
       rejections.push(`${label}: ${err instanceof Error ? err.message : "fetch failed"}`);
     }
   }
-  // Report EVERY variant so the operator can see exactly what was tried —
-  // "anonymous rejected" alone hid the fact that the configured secrets were
-  // also rejected (or that webhook/v1 secrets were never set at all).
-  const error = `Safepay tracker API rejected all auth variants — ${rejections
-    .join(" · ")
-    .slice(0, 400)}${
-    rejections.some((r) => r.includes("not configured"))
-      ? " — set SAFEPAY_WEBHOOK_SECRET (and optionally SAFEPAY_V1_SECRET) from your Safepay dashboard on this deployment"
-      : ""
-  }`;
-  return { ok: false, outcome: { kind: "unknown" }, error };
+  return {
+    ok: false,
+    outcome: { kind: "unknown" },
+    error: `Safepay tracker API rejected all auth variants — ${rejections.join(" · ").slice(0, 300)}`,
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -391,9 +379,9 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
 // -----------------------------------------------------------------------------
 
 const SIGNATURE_HEADERS = [
+  "x-sfpy-signature", // CURRENT documented header
   "x-sfpay-signature",
   "x-safepay-signature",
-  "x-sfpy-signature",
   "x-sfpay-hmac",
   "x-signature",
 ];
@@ -418,21 +406,29 @@ function safeCompare(a: string, b: string): boolean {
 /**
  * Verify a Safepay webhook request.
  *
- * Scheme A (OFFICIAL @sfpy/node-sdk v3 — Verify.webhook()):
- *   hex(HMAC-SHA512(webhookSecret, JSON.stringify(parsedBody.data)))
- *   sent in the `x-sfpy-signature` header.
+ * CURRENT DOCUMENTED SCHEME (safepay-docs → Webhooks → Verify HMAC
+ * signatures): header `X-SFPY-SIGNATURE` = hex(HMAC-SHA512(sharedSecret,
+ * payload)) where payload is the JSON body as sent. Because the exact bytes
+ * Safepay signs have varied across integration versions (raw body vs
+ * re-stringified object vs the nested `data` object), we verify against the
+ * documented candidates in order — all of them are server-side computations
+ * over the same body with the same secret, so accepting any of them does not
+ * weaken the guarantee that only Safepay could have produced the signature.
  *
- * Scheme B (legacy/fallback):
- *   HMAC-SHA256 over the raw body bytes vs any known signature header,
- *   hex or base64, with or without a `v1=`/`sha256=` prefix.
- *
- * Returns { verified: true } or { verified: false, reason }.
+ * Order (first match wins):
+ *   A1. SHA-512 hex over the RAW body bytes
+ *   A2. SHA-512 hex over JSON.stringify(parsedBody)          (docs literal)
+ *   A3. SHA-512 hex over JSON.stringify(parsedBody.data)     (@sfpy/node-sdk v3)
+ *   B1. SHA-256 hex/base64 over the raw body                  (legacy)
+ * Prefixes like `v1=`, `sha256=`, `sha512=` are tolerated, as are comma-
+ * separated multi-signature headers (key-rotation window).
  */
 export function verifyWebhookSignature(rawBody: string, headers: Headers): { verified: boolean; reason?: string } {
-  const secret = process.env.SAFEPAY_WEBHOOK_SECRET;
+  const config = getSafepayConfig();
+  const secret = config.webhookSecret;
 
   if (!secret) {
-    if (process.env.SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS === "true") {
+    if (allowUnsignedWebhooks()) {
       console.warn("[SAFEPAY WEBHOOK] signature check SKIPPED (SAFEPAY_ALLOW_UNSIGNED_WEBHOOKS=true)");
       return { verified: true };
     }
@@ -441,43 +437,51 @@ export function verifyWebhookSignature(rawBody: string, headers: Headers): { ver
 
   const provided = extractSignature(headers);
   if (!provided) {
-    return { verified: false, reason: "missing signature header" };
+    return { verified: false, reason: "missing X-SFPY-SIGNATURE header" };
   }
 
   const candidates = provided
     .split(",")
     .map((part) => part.trim())
     .flatMap((part) => {
-      const stripped = part.replace(/^(v1|sha256|hmac-sha256|hmac-sha512)\s*=\s*/i, "");
+      const stripped = part.replace(/^(v1|sha256|sha512|hmac-sha256|hmac-sha512)\s*=\s*/i, "");
       return [part, stripped];
     });
 
-  // ---- Scheme A: official SDK (SHA-512 over JSON.stringify(body.data)) ----
+  // Precompute the payload variants.
+  let parsed: unknown;
+  let parsedDataJson: string | undefined;
+  let parsedJson: string | undefined;
   try {
-    const parsed = JSON.parse(rawBody) as { data?: unknown };
-    if (parsed && typeof parsed === "object" && "data" in parsed) {
-      const dataJson = JSON.stringify(parsed.data);
-      const expectedSha512Hex = createHmac("sha512", secret).update(dataJson, "utf8").digest("hex");
-      const expectedSha512B64 = createHmac("sha512", secret).update(dataJson, "utf8").digest("base64");
-      for (const candidate of candidates) {
-        if (
-          safeCompare(candidate.toLowerCase(), expectedSha512Hex.toLowerCase()) ||
-          safeCompare(candidate, expectedSha512B64)
-        ) {
-          return { verified: true };
-        }
-      }
+    parsed = JSON.parse(rawBody);
+    if (parsed && typeof parsed === "object") {
+      parsedJson = JSON.stringify(parsed);
+      const data = (parsed as Record<string, unknown>).data;
+      if (data !== undefined) parsedDataJson = JSON.stringify(data);
     }
   } catch {
-    // body is not JSON — scheme A cannot apply
+    // body is not JSON — only the raw-body schemes can apply
   }
 
-  // ---- Scheme B: HMAC-SHA256 over the raw body ----
-  const expectedHex = createHmac("sha256", secret).update(rawBody, "utf8").digest("hex");
-  const expectedB64 = createHmac("sha256", secret).update(rawBody, "utf8").digest("base64");
+  const expectedValues: string[] = [];
+  // A1: raw body, SHA-512 (hex)
+  expectedValues.push(createHmac("sha512", secret).update(rawBody, "utf8").digest("hex"));
+  if (parsedJson) {
+    // A2: re-stringified object, SHA-512 (hex)
+    expectedValues.push(createHmac("sha512", secret).update(parsedJson, "utf8").digest("hex"));
+  }
+  if (parsedDataJson) {
+    // A3: nested data object, SHA-512 (hex + base64)
+    expectedValues.push(createHmac("sha512", secret).update(parsedDataJson, "utf8").digest("hex"));
+    expectedValues.push(createHmac("sha512", secret).update(parsedDataJson, "utf8").digest("base64"));
+  }
+  // B1: raw body, SHA-256 (hex + base64) — legacy integrations
+  expectedValues.push(createHmac("sha256", secret).update(rawBody, "utf8").digest("hex"));
+  expectedValues.push(createHmac("sha256", secret).update(rawBody, "utf8").digest("base64"));
 
+  const expectedLower = new Set(expectedValues.map((v) => v.toLowerCase()));
   for (const candidate of candidates) {
-    if (safeCompare(candidate.toLowerCase(), expectedHex) || safeCompare(candidate, expectedB64)) {
+    if (expectedLower.has(candidate.toLowerCase())) {
       return { verified: true };
     }
   }
@@ -495,6 +499,12 @@ export interface NormalizedEvent {
   eventId: string;
   trackingId?: string;
   paymentToken?: string;
+  /** Safepay tracker state string, e.g. TRACKER_ENDED (when present). */
+  safepayState?: string;
+  /** Our own subscription id (data.metadata.order_id) when Safepay echoes it. */
+  filoSubscriptionId?: string;
+  /** merchant_api_key from the payload (validated by the webhook route). */
+  merchantApiKey?: string;
   safepaySubscriptionId?: string;
   customerId?: string;
   customerEmail?: string;
@@ -506,7 +516,7 @@ export interface NormalizedEvent {
   meta: Record<string, unknown>;
 }
 
-const SECRET_KEY_PATTERN = /(secret|password|token_key|beacon|api_key|apikey|signature)/i;
+const SECRET_KEY_PATTERN = /(secret|password|token_key|beacon|api_key|apikey|signature|merchant_api_key)/i;
 
 export function sanitizePayload(payload: unknown, depth = 0): Record<string, unknown> {
   if (depth > 4 || payload === null || typeof payload !== "object") {
@@ -537,10 +547,14 @@ function pick(source: Record<string, unknown>, ...keys: string[]): string | unde
 }
 
 /**
- * Normalize any of Safepay's event shapes (colon or dot notation, flat or
- * nested data payloads) into one typed structure. Unknown events are passed
- * through with their normalized type so the state machine can ignore them
- * explicitly (recorded, status "ignored").
+ * Normalize Safepay's event payloads into one typed structure.
+ *
+ * Handles the CURRENT documented shape
+ *   { token: "evt_…", type: "payment.succeeded",
+ *     data: { tracker, state, metadata: { order_id }, … } }
+ * as well as older colon-notation and nested variants. Unknown events are
+ * passed through with their normalized type so the state machine can ignore
+ * them explicitly (recorded, status "ignored").
  */
 export function normalizeWebhookEvent(payload: Record<string, unknown>): NormalizedEvent {
   const rawType =
@@ -550,11 +564,13 @@ export function normalizeWebhookEvent(payload: Record<string, unknown>): Normali
   const payment = (data.payment ?? data) as Record<string, unknown>;
   const subscription = (data.subscription ?? payment.subscription ?? {}) as Record<string, unknown>;
   const customer = (data.customer ?? payment.customer ?? {}) as Record<string, unknown>;
+  const metadata = (data.metadata ?? payment.metadata ?? {}) as Record<string, unknown>;
 
-  // Event id: prefer Safepay's, else derive a stable id from type+tracking.
-  const trackingId = pick(payment, "tracking_id", "track_id", "trackingId");
-  const derivedId = `${rawType}:${trackingId ?? pick(payment, "token") ?? JSON.stringify(payload).slice(0, 64)}`;
-  const eventId = pick(payload, "id", "event_id", "eventId", "uuid") ?? derivedId;
+  // Event id: prefer Safepay's evt_ token, else derive a stable id.
+  const trackingId = pick(payment, "tracking_id", "track_id", "trackingId", "tracker");
+  const paymentToken = pick(payment, "token", "payment_token");
+  const derivedId = `${rawType}:${trackingId ?? paymentToken ?? JSON.stringify(payload).slice(0, 64)}`;
+  const eventId = pick(payload, "token", "id", "event_id", "eventId", "uuid") ?? derivedId;
 
   const amountRaw = payment.amount ?? data.amount ?? payload.amount;
   const amountPkr = typeof amountRaw === "number" ? amountRaw : typeof amountRaw === "string" ? parseFloat(amountRaw) || undefined : undefined;
@@ -563,14 +579,17 @@ export function normalizeWebhookEvent(payload: Record<string, unknown>): Normali
     eventType: rawType,
     eventId,
     trackingId,
-    paymentToken: pick(payment, "token", "payment_token"),
+    paymentToken,
+    safepayState: pick(payment, "state") || pick(data, "state"),
+    filoSubscriptionId: pick(metadata, "order_id", "orderId", "subscriptionId") || pick(data, "order_id"),
+    merchantApiKey: pick(payload, "merchant_api_key", "merchantApiKey"),
     safepaySubscriptionId: pick(subscription, "id", "subscription_id", "plan") || pick(data, "subscription_id"),
     customerId: pick(customer, "id", "customer_id") || pick(data, "customer_id"),
     customerEmail: (pick(customer, "email") || pick(data, "email") || pick(payload, "email"))?.toLowerCase(),
     amountPkr,
     currency: pick(payment, "currency", "currency_iso") || pick(data, "currency") || "PKR",
     paymentMethod: pick(payment, "payment_method", "instrument", "source") || pick(data, "payment_method"),
-    failureReason: pick(payment, "failure_reason", "error_message", "decline_reason") || pick(data, "reason"),
+    failureReason: pick(payment, "failure_reason", "error_message", "decline_reason", "message") || pick(data, "reason"),
     meta: sanitizePayload(payload),
   };
 }

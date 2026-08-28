@@ -509,6 +509,20 @@ class ApiClient {
     })
   }
 
+  /**
+   * Create the recurring plans on Safepay via the plans API and store the
+   * returned Safepay plan ids on the Filo plan rows (admin-only).
+   */
+  async adminSyncSafepayPlans(input: { force?: boolean }): Promise<ApiResponse<{
+    summary: string
+    results: Array<{ plan: string; interval: string; status: string; safepayPlanId?: string; detail?: string }>
+  }>> {
+    return this.request('/admin/billing/sync-safepay-plans', {
+      method: 'POST',
+      body: JSON.stringify(input ?? {}),
+    })
+  }
+
   async adminPayments(status?: string): Promise<ApiResponse<any[]>> {
     return this.request(`/admin/payments${status ? `?status=${status}` : ''}`)
   }

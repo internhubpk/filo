@@ -167,7 +167,7 @@ function describeVerify(v: VerifyPayload | null): { line: string; tone: "info" |
   }
   if (v.reason === "tracker_unavailable") {
     return {
-      line: `We couldn't read this payment from Safepay right now${v.detail ? ` (${v.detail})` : ""}. We'll keep retrying automatically — if this persists, check that SAFEPAY_MODE on the server matches where you paid.`,
+      line: `We couldn't read this payment from Safepay right now${v.detail ? ` (${v.detail})` : ""}. We'll keep retrying automatically — if this persists, verify the Safepay credentials (SAFEPAY_SECRET_KEY) on the server and that SAFEPAY_SANDBOX matches where you paid.`,
       tone: "warn",
     };
   }
@@ -401,8 +401,8 @@ function BillingContent() {
                     Payments environment: <span className="font-medium text-foreground">{lastVerify.mode}</span>
                     {" · "}
                     {lastVerify.subscriptionFlowConfigured
-                      ? "recurring subscriptions ON (the Safepay dashboard plan must exist)"
-                      : "one-time payments (no Safepay dashboard plan required)"}
+                      ? "recurring subscriptions (Safepay-managed plans)"
+                      : "payments not fully configured"}
                   </p>
                 )}
                 <div className="mt-3 flex flex-wrap items-center gap-2">
@@ -570,7 +570,7 @@ function BillingContent() {
         {!billingEnabled && (
           <div className="mb-4 flex items-start gap-2 rounded-lg border bg-muted/50 p-3 text-xs text-muted-foreground">
             <Info className="mt-0.5 size-3.5 shrink-0" />
-            Online payments aren&apos;t configured on this deployment yet (SAFEPAY_BEACON_SECRET missing).
+            Online payments aren&apos;t configured on this deployment yet (SAFEPAY_SECRET_KEY missing).
             Plans below are shown for reference.
           </div>
         )}
@@ -644,6 +644,17 @@ function BillingContent() {
           })}
           {plans.loading && !plans.data &&
             [0, 1, 2, 3].map((i) => <div key={i} className="skeleton-shimmer h-72 rounded-xl border bg-card" />)}
+          {!plans.loading && !plans.data && (
+            <div className="col-span-full flex flex-col items-center rounded-xl border border-dashed px-6 py-10 text-center">
+              <p className="text-sm font-medium">Plans could not be loaded</p>
+              <p className="mt-1 max-w-md text-xs text-muted-foreground">
+                {plans.error ?? "The plans service returned no data."} You can retry — this does not affect your current plan or entitlement.
+              </p>
+              <Button size="sm" variant="outline" className="mt-3" onClick={() => void plans.refresh()}>
+                Retry
+              </Button>
+            </div>
+          )}
         </div>
       </div>
 

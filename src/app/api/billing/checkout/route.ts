@@ -21,7 +21,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, serverToken, convexQuery, convexMutation, jsonError, appUrl, appUrlDiagnostics } from "@/lib/billing-server";
-import { createCheckoutSession, isSafepayConfigured, isSubscriptionFlowConfigured } from "@/lib/safepay";
+import { createCheckoutSession, isSafepayConfigured, isSubscriptionFlowConfigured, getPaymentModel } from "@/lib/safepay";
 
 interface PlanRow {
   _id: string;
@@ -90,9 +90,12 @@ export async function POST(request: NextRequest) {
 
     const safepayPlanId =
       interval === "yearly" ? plan.safepayPlanIdYearly : plan.safepayPlanIdMonthly;
-    if (!safepayPlanId) {
+    // The recurring-subscription model REQUIRES a mapped Safepay plan id
+    // (one authoritative Filo-plan → Safepay-plan mapping). The explicit
+    // one-time model (SAFEPAY_PAYMENT_MODEL=one_time) does not.
+    if (!safepayPlanId && getPaymentModel() !== "one_time") {
       console.error(
-        `[billing/checkout] plan "${plan.name}" is missing its Safepay plan id for interval "${interval}". Configure it in the Safepay dashboard + plans table.`
+        `[billing/checkout] plan "${plan.name}" is missing its Safepay plan id for interval "${interval}". Create the plans on Safepay (Admin → Plans → Sync Safepay plans) and map them.`
       );
       return jsonError(
         503,
@@ -122,30 +125,21 @@ export async function POST(request: NextRequest) {
     if (diag.warning) {
       console.warn(`[billing/checkout] appUrl diagnostics: source=${diag.source} url=${diag.url} — ${diag.warning}`);
     }
-    // Safepay POSTs tracker+signature here; the route then 303-redirects the
-    // browser back to the billing page. Query params carry our opaque state.
-    const stateQuery = new URLSearchParams({
-      source: "filo-subscription",
-      subscriptionId: String(subscriptionId),
-      userId: user.id,
-      planTier: plan.tier ?? "",
-      interval,
-    }).toString();
+    // SECURITY + COMPATIBILITY: the redirect_url MUST be query-free. Safepay
+    // appends its fields as `?tracker=…&sig=…` and does NOT respect an
+    // existing query string — extra state used to be appended with a second
+    // `?`, producing URLs like `…&interval=monthly?order_id=…` that broke
+    // parsing downstream. Our state rides on `order_id` (= subscriptionId,
+    // echoed back on the return POST and in webhook metadata.order_id).
+    const redirectUrl = `${returnBase}/api/billing/return`;
     const session = await createCheckoutSession({
       amountPkr: amount,
       orderId: String(subscriptionId),
       customerEmail: user.email,
       customerName: user.name,
-      subscriptionPlanId: safepayPlanId,
-      redirectUrl: `${returnBase}/api/billing/return?${stateQuery}`,
+      subscriptionPlanId: getPaymentModel() === "one_time" ? undefined : safepayPlanId,
+      redirectUrl,
       cancelUrl: `${returnBase}/billing?checkout=cancelled`,
-      state: {
-        source: "filo-subscription",
-        subscriptionId: String(subscriptionId),
-        userId: user.id,
-        planTier: plan.tier ?? "",
-        interval,
-      },
     });
 
     await convexMutation("billing:recordCheckoutStarted", {
@@ -174,6 +168,7 @@ export async function POST(request: NextRequest) {
         amount,
         currency: plan.currency || "PKR",
         flow: session.flow,
+        paymentModel: getPaymentModel(),
         subscriptionFlowConfigured: isSubscriptionFlowConfigured(),
         returnUrl: `${returnBase}/billing?checkout=return`,
         // Diagnostic only — safe to expose (no secrets), lets an operator

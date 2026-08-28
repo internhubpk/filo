@@ -95,8 +95,10 @@ const DEFAULT_PLANS: PlanSeed[] = [
     icon: "Crown",
     order: 1,
     aiChatEnabled: true,
-    safepayPlanIdMonthly: "pro-monthly",
-    safepayPlanIdYearly: "pro-yearly",
+    // safepayPlanIdMonthly/Yearly are intentionally NOT seeded: real Safepay
+    // plan ids come from the Safepay plans API. Run Admin → Plans →
+    // "Sync Safepay plans" (POST /api/admin/billing/sync-safepay-plans) —
+    // it creates the recurring plans on Safepay and maps the ids here.
   },
   {
     name: "Team",
@@ -124,8 +126,7 @@ const DEFAULT_PLANS: PlanSeed[] = [
     icon: "Users",
     order: 2,
     aiChatEnabled: true,
-    safepayPlanIdMonthly: "team-monthly",
-    safepayPlanIdYearly: "team-yearly",
+    // safepayPlanId* filled by Admin → Plans → "Sync Safepay plans".
   },
   {
     name: "Department",
