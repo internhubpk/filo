@@ -346,19 +346,19 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
     ["anonymous", undefined],
   ];
 
-  let lastError = "unreachable";
+  const rejections: string[] = [];
   for (const [label, secret] of secretCandidates) {
-    if (!secret && label !== "anonymous") continue;
+    if (!secret && label !== "anonymous") {
+      rejections.push(`${label}: not configured`);
+      continue;
+    }
     try {
       const res = await fetch(url, {
         headers: secret ? { "X-SFPY-MERCHANT-SECRET": secret } : {},
         cache: "no-store",
       });
       if (!res.ok) {
-        lastError =
-          res.status === 401 || res.status === 403
-            ? `${label} rejected (HTTP ${res.status})`
-            : `HTTP ${res.status}`;
+        rejections.push(`${label}: HTTP ${res.status}`);
         continue; // try the next auth variant
       }
       const json = (await res.json().catch(() => null)) as
@@ -370,13 +370,20 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
       }
       return { ok: true, outcome: classifyTrackerState(state) };
     } catch (err) {
-      lastError = err instanceof Error ? err.message : "fetch failed";
+      rejections.push(`${label}: ${err instanceof Error ? err.message : "fetch failed"}`);
     }
   }
-  if (lastError.includes("rejected")) {
-    lastError += " — set the Safepay secrets (SAFEPAY_BEACON_SECRET / SAFEPAY_V1_SECRET) on this deployment";
-  }
-  return { ok: false, outcome: { kind: "unknown" }, error: lastError };
+  // Report EVERY variant so the operator can see exactly what was tried —
+  // "anonymous rejected" alone hid the fact that the configured secrets were
+  // also rejected (or that webhook/v1 secrets were never set at all).
+  const error = `Safepay tracker API rejected all auth variants — ${rejections
+    .join(" · ")
+    .slice(0, 400)}${
+    rejections.some((r) => r.includes("not configured"))
+      ? " — set SAFEPAY_WEBHOOK_SECRET (and optionally SAFEPAY_V1_SECRET) from your Safepay dashboard on this deployment"
+      : ""
+  }`;
+  return { ok: false, outcome: { kind: "unknown" }, error };
 }
 
 // -----------------------------------------------------------------------------

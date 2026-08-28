@@ -1178,3 +1178,122 @@ export const reconcileCheckoutFromTracker = mutation({
     return { applied: true, paymentStatus: "succeeded" as const, subscriptionStatus };
   },
 });
+
+/**
+ * ADMIN MANUAL ACTIVATION — apply a PAID outcome to a pending checkout after
+ * the operator has personally verified the payment as Complete in the Safepay
+ * dashboard (e.g. when the tracker API / webhook / return channels all failed
+ * for a payment that Safepay's own dashboard shows as completed).
+ *
+ * Guardrails:
+ *   - serverToken + in-Convex admin re-verification (same as every admin
+ *     surface) — the browser can still never grant itself a plan.
+ *   - Only a PENDING payment can transition (idempotent like reconciliation).
+ *   - The plan/amount applied come from our own payment/subscription rows.
+ *   - Every activation is audit-logged with the admin's identity.
+ */
+export const adminActivatePendingCheckout = mutation({
+  args: {
+    serverToken: v.string(),
+    adminUserId: v.id("users"),
+    subscriptionId: v.optional(v.string()),
+    userId: v.optional(v.id("users")),
+    /** Free-text note recorded in the audit log (e.g. Safepay order id). */
+    note: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    await assertAdmin(ctx, args.adminUserId);
+    if (!args.subscriptionId && !args.userId) {
+      throw new Error("subscriptionId or userId is required");
+    }
+    const now = Date.now();
+
+    // Find the pending payment: by subscription first, else latest pending
+    // payment for the user.
+    let payment: any = null;
+    if (args.subscriptionId) {
+      let rows: any[] = [];
+      try {
+        rows = await ctx.db
+          .query("payments")
+          .withIndex("by_subscriptionId", (q: any) =>
+            q.eq("subscriptionId", args.subscriptionId as never)
+          )
+          .order("desc")
+          .collect();
+      } catch {
+        // Invalid id format (or index not pushed yet) — filter fallback.
+        rows = await ctx.db
+          .query("payments")
+          .filter((q: any) => q.eq(q.field("subscriptionId"), args.subscriptionId))
+          .collect();
+      }
+      payment = rows.find((p) => p.status === "pending") ?? null;
+    }
+    if (!payment && args.userId) {
+      const rows = await ctx.db
+        .query("payments")
+        .withIndex("by_userId", (q: any) => q.eq("userId", args.userId!))
+        .order("desc")
+        .collect();
+      payment = (rows as any[]).find((p) => p.status === "pending") ?? null;
+    }
+    if (!payment) {
+      return { applied: false, reason: "no_pending_payment" as const };
+    }
+    // Belt-and-braces: an explicit subscriptionId must own this payment.
+    if (args.subscriptionId && String(payment.subscriptionId) !== String(args.subscriptionId)) {
+      return { applied: false, reason: "subscription_mismatch" as const };
+    }
+
+    const sub: any = payment.subscriptionId ? await ctx.db.get(payment.subscriptionId) : null;
+
+    // Mark the payment succeeded.
+    await ctx.db.patch(payment._id, { status: "succeeded", updatedAt: now });
+
+    let subscriptionStatus: string | null = sub ? sub.status : null;
+    if (sub && sub.status === "pending") {
+      const others = await ctx.db
+        .query("subscriptions")
+        .withIndex("by_userId", (q: any) => q.eq("userId", sub.userId))
+        .filter((q: any) =>
+          q.and(q.neq(q.field("_id"), sub._id), q.eq(q.field("status"), "active"))
+        )
+        .collect();
+      for (const other of others as any[]) {
+        await ctx.db.patch(other._id, { status: "ended", endedAt: now, updatedAt: now });
+      }
+
+      const periodEnd =
+        sub.interval === "yearly" ? now + 365 * 24 * 60 * 60 * 1000 : now + 30 * 24 * 60 * 60 * 1000;
+      await ctx.db.patch(sub._id, {
+        status: "active",
+        currentPeriodStart: now,
+        currentPeriodEnd: periodEnd,
+        activatedAt: now,
+        updatedAt: now,
+      });
+      subscriptionStatus = "active";
+      await ctx.db.patch(sub.userId, { planId: sub.planId, updatedAt: now });
+    }
+
+    await ctx.db.insert("auditLogs", {
+      actorId: args.adminUserId,
+      actorType: "admin",
+      action: "billing.manual_activation",
+      targetType: "payment",
+      targetId: payment._id,
+      metadata: {
+        subscriptionId: sub ? sub._id : null,
+        userId: payment.userId,
+        tracker: payment.safepayPaymentToken ?? payment.safepayTrackingId ?? null,
+        amount: payment.amount,
+        note: args.note ?? null,
+      },
+      createdAt: now,
+    });
+
+    return { applied: true, paymentStatus: "succeeded" as const, subscriptionStatus };
+  },
+});

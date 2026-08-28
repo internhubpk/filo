@@ -493,6 +493,22 @@ class ApiClient {
     return this.request(`/admin/subscriptions${status ? `?status=${status}` : ''}`)
   }
 
+  /**
+   * Admin manual activation: mark a pending checkout as paid + activate its
+   * subscription after the operator verified the payment as Complete in the
+   * Safepay dashboard. Audited server-side; admin-only.
+   */
+  async adminActivatePendingCheckout(input: {
+    subscriptionId?: string
+    userId?: string
+    note?: string
+  }): Promise<ApiResponse<{ paymentStatus?: string; subscriptionStatus?: string | null; message: string }>> {
+    return this.request('/admin/billing/activate-pending', {
+      method: 'POST',
+      body: JSON.stringify(input),
+    })
+  }
+
   async adminPayments(status?: string): Promise<ApiResponse<any[]>> {
     return this.request(`/admin/payments${status ? `?status=${status}` : ''}`)
   }
