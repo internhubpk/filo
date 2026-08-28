@@ -32,13 +32,12 @@ test('canonical AI layer exists with the required module layout', () => {
   const required = [
     'provider.ts',
     'router.ts',
-    'gemini.ts',
+    'agentrouter.ts',
     'schemas.ts',
     'prompts.ts',
     'errors.ts',
     'types.ts',
     'index.ts',
-    'openrouter.ts',
     'openai.ts',
   ]
   for (const f of required) {
@@ -46,23 +45,32 @@ test('canonical AI layer exists with the required module layout', () => {
   }
 })
 
-test('Gemini is the FIRST provider in the fallback chain (canonical primary)', () => {
+test('Agent Router is the FIRST provider in the fallback chain (canonical primary)', () => {
   const router = readFileSync(resolve(AI_DIR, 'router.ts'), 'utf8')
   const match = router.match(/PROVIDER_FALLBACK_ORDER:\s*ProviderId\[\]\s*=\s*\[([\s\S]*?)\]/)
   assert.ok(match, 'PROVIDER_FALLBACK_ORDER not found in router.ts')
   const first = match[1].trim().split(',')[0].trim()
-  assert.equal(first, "'GEMINI'", 'Gemini must be the first entry in PROVIDER_FALLBACK_ORDER')
+  assert.equal(first, "'AGENT_ROUTER'", 'Agent Router must be the first entry in PROVIDER_FALLBACK_ORDER')
 })
 
-test('Gemini provider reads GEMINI_API_KEY lazily and never at module load', () => {
-  const gemini = readFileSync(resolve(AI_DIR, 'gemini.ts'), 'utf8')
-  // The module-level constant must not capture process.env (which would break
-  // lazy config). Look for module-scope const DEFAULT_* only.
-  assert.ok(gemini.includes('GEMINI_API_KEY'), 'gemini.ts must reference GEMINI_API_KEY')
+test('Agent Router provider reads AGENT_ROUTER_API_KEY lazily and never at module load', () => {
+  const agent = readFileSync(resolve(AI_DIR, 'agentrouter.ts'), 'utf8')
+  assert.ok(agent.includes('AGENT_ROUTER_API_KEY'), 'agentrouter.ts must reference AGENT_ROUTER_API_KEY')
   assert.ok(
-    !/^const\s+\w+\s*=\s*process\.env\.GEMINI_API_KEY/m.test(gemini),
-    'gemini.ts must not capture the API key at module scope (lazy read required)'
+    !/^const\s+\w+\s*=\s*process\.env\.AGENT_ROUTER_API_KEY/m.test(agent),
+    'agentrouter.ts must not capture the API key at module scope (lazy read required)'
   )
+})
+
+test('Agent Router registry is the LIVE-verified cost-optimized set', () => {
+  const agent = readFileSync(resolve(AI_DIR, 'agentrouter.ts'), 'utf8')
+  const registry = agent.match(/export const AGENT_ROUTER_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
+  assert.ok(registry.length > 0, 'AGENT_ROUTER_MODELS registry found')
+  for (const id of ['deepseek-v4-flash', 'glm-5.3', 'gpt-5.6-sol', 'claude-opus-4-8', 'claude-opus-5']) {
+    assert.ok(registry.includes(`'${id}'`), `registry must contain ${id}`)
+  }
+  const first = registry.match(/\[\s*'([a-z0-9.-]+)'/)?.[1]
+  assert.equal(first, 'deepseek-v4-flash', 'cheapest model must lead (operator budget optimization)')
 })
 
 test('router retries only retryable errors and falls through on non-retryable', () => {
@@ -112,12 +120,12 @@ test('legacy ai.ts is a shim that re-exports the canonical layer', () => {
   )
 })
 
-test('.env.example documents GEMINI_API_KEY as the primary provider', () => {
+test('.env.example documents AGENT_ROUTER_API_KEY as the primary provider', () => {
   const env = readFileSync(resolve(REPO_ROOT, '.env.example'), 'utf8')
-  assert.ok(env.includes('GEMINI_API_KEY='), '.env.example must document GEMINI_API_KEY')
+  assert.ok(env.includes('AGENT_ROUTER_API_KEY='), '.env.example must document AGENT_ROUTER_API_KEY')
   assert.ok(
-    /PRIMARY AI provider.*Gemini|Gemini.*PRIMARY/i.test(env),
-    '.env.example must mark Gemini as the primary provider'
+    /PRIMARY AI provider.*Agent Router|Agent Router.*PRIMARY/i.test(env),
+    '.env.example must mark the Agent Router as the primary provider'
   )
   // Real Safepay billing was rebuilt — the current credential set is required.
   for (const v of ['SAFEPAY_SECRET_KEY=', 'SAFEPAY_WEBHOOK_SECRET=', 'SAFEPAY_PUBLIC_KEY=', 'SAFEPAY_SANDBOX=']) {

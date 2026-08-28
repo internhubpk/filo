@@ -169,7 +169,7 @@ export function ArtifactLibrary({
         title={title}
         description={description}
         actions={
-          <Button asChild>
+          <Button asChild className="press shadow-md shadow-primary/20">
             <Link href={createHref}>
               <typeMeta.icon className="mr-1.5 size-4" /> {createLabel}
             </Link>
@@ -264,7 +264,7 @@ export function ArtifactLibrary({
             title={`No ${title.toLowerCase()} yet`}
             description={`Generate your first one with AI — it takes about a minute.`}
             action={
-              <Button asChild>
+              <Button asChild className="press shadow-lg shadow-primary/25">
                 <Link href={createHref}>
                   <Sparkles className="mr-1.5 size-4" /> {createLabel}
                 </Link>
@@ -276,7 +276,7 @@ export function ArtifactLibrary({
         <StaggerContainer className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
           {rows.map((row) => (
             <StaggerItem key={row._id}>
-              <div className="group flex h-full flex-col rounded-xl border bg-card p-4 transition-colors hover:border-primary/40">
+              <div className="lift group flex h-full flex-col rounded-xl border bg-card p-4 shadow-sm hover:border-primary/40">
                 <div className="flex items-start justify-between">
                   <span className={cn("inline-flex size-9 items-center justify-center rounded-lg", typeMeta.chip)}>
                     <typeMeta.icon className="size-4.5" />

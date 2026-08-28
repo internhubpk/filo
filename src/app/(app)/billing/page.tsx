@@ -711,7 +711,7 @@ function BillingContent() {
                   ))}
                 </ul>
                 <Button
-                  className="mt-4 w-full"
+                  className={cn("press mt-4 w-full", !isCurrent && plan.popular && "shadow-lg shadow-primary/25")}
                   variant={isCurrent ? "outline" : plan.popular ? "default" : "secondary"}
                   disabled={isCurrent || busy || plans.loading || (activePlanIds.size === 0)}
                   onClick={() => void startCheckout(plan)}

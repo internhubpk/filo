@@ -8,12 +8,12 @@
 //
 // Responsibilities:
 //   1. Pick a task-appropriate model (model selection table below).
-//   2. Try the primary provider (Gemini). On retryable failure, retry with
+//   2. Try the primary provider (Agent Router). On retryable failure, retry with
 //      exponential backoff + jitter.
 //   3. After retries exhaust, fall through to the next configured provider.
 //   4. Aggregate failures into AllProvidersFailedError with every attempt.
 //
-// Fallback order: GEMINI → OPENROUTER → OPENAI (skipping unconfigured ones).
+// Fallback order: AGENT_ROUTER → OPENAI (skipping unconfigured ones).
 // =============================================================================
 
 import type {
@@ -51,46 +51,34 @@ export type AiTask =
  * retryable failure that exhausts the model's bounded attempts), then falls
  * through to the remaining provider registry entries.
  *
- * GEMINI ids verified 2026-08-28 (Google docs + runtime evidence):
- *   • 2.0 ids are DEAD (shut down June 1, 2026) — never referenced.
- *   • Pro ids are PAID-TIER ONLY since April 1, 2026 (404 on free keys) —
- *     they sit at the TAIL so free-tier deployments never waste their
- *     attempt budget on them.
- *   • Leads are the `-latest` aliases + the current GA flash model
- *     (gemini-3.5-flash); gemini-2.5-flash sunsets Oct 16, 2026.
+ * AGENT_ROUTER ids verified LIVE against the gateway (2026-08-28, all 200 OK):
+ * deepseek-v4-flash, glm-5.3, gpt-5.6-sol, claude-opus-4-8, claude-opus-5.
  *
- * OPENROUTER slugs verified against the LIVE public catalog
- * (GET https://openrouter.ai/api/v1/models, 2026-08-28): the previous
- * 'anthropic/claude-3.5-sonnet' and 'google/gemini-2.0-flash-001' slugs are
- * RETIRED (404 MODEL_NOT_FOUND on every call).
+ * Selection is COST-OPTIMIZED FOR THE OPERATOR ("budget to me, not the
+ * users"): the cheapest capable model leads every task; premium models are
+ * reached only as quality escalation after bounded failures.
  */
 export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly string[]>>> = {
   fast: {
-    GEMINI: ['gemini-flash-lite-latest', 'gemini-flash-latest'],
-    OPENROUTER: ['openai/gpt-4o-mini', 'google/gemini-2.5-flash'],
+    AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3'],
     OPENAI: ['gpt-4o-mini'],
   },
   generation: {
-    GEMINI: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-flash-lite-latest'],
-    OPENROUTER: ['openai/gpt-4o-mini', 'google/gemini-2.5-flash'],
+    AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3', 'gpt-5.6-sol'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   reasoning: {
-    // Pro ids come LAST: planning wants reasoning quality, but on the free
-    // tier pro models 404 since 2026-04-01 — flash aliases carry planning
-    // instead, and paid-tier keys still reach the pro alias as a tail option.
-    GEMINI: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-pro-latest'],
-    OPENROUTER: ['anthropic/claude-sonnet-4.5', 'openai/gpt-5-mini'],
+    // Planning wants structure quality; the mid-tier model leads, premium
+    // models escalate only after bounded failures.
+    AGENT_ROUTER: ['glm-5.3', 'gpt-5.6-sol', 'claude-opus-4-8'],
     OPENAI: ['gpt-4o', 'gpt-4.1'],
   },
   json: {
-    GEMINI: ['gemini-flash-latest', 'gemini-flash-lite-latest'],
-    OPENROUTER: ['openai/gpt-4o-mini'],
+    AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   longform: {
-    GEMINI: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.5-flash'],
-    OPENROUTER: ['anthropic/claude-sonnet-4.5', 'google/gemini-2.5-flash'],
+    AGENT_ROUTER: ['glm-5.3', 'deepseek-v4-flash', 'gpt-5.6-sol'],
     OPENAI: ['gpt-4o'],
   },
 }
@@ -184,7 +172,7 @@ export function providerHealthSnapshot(): Array<{
   state: ProviderHealthState
   cooldownRemainingMs: number
 }> {
-  return (['GEMINI', 'OPENROUTER', 'OPENAI'] as ProviderId[]).map((id) => {
+  return (['AGENT_ROUTER', 'OPENAI'] as ProviderId[]).map((id) => {
     const entry = currentHealth(id)
     return {
       provider: id,
@@ -196,8 +184,7 @@ export function providerHealthSnapshot(): Array<{
 
 /** Provider fallback order. Unconfigured providers are skipped at runtime. */
 export const PROVIDER_FALLBACK_ORDER: ProviderId[] = [
-  'GEMINI',
-  'OPENROUTER',
+  'AGENT_ROUTER',
   'OPENAI',
 ]
 
@@ -261,7 +248,7 @@ class AiRouter {
 
     // ---------- REQUEST VALIDATION FIRST (spec §13) ----------
     // User/request errors must NEVER be fanned out to every provider: an
-    // empty prompt is invalid for Gemini AND OpenRouter AND OpenAI alike.
+    // empty prompt is invalid for the Agent Router AND OpenAI alike.
     const messages = Array.isArray(request?.messages) ? request.messages : []
     const hasContent = messages.some((m) => String(m?.content ?? '').trim().length > 0)
     if (!hasContent) {

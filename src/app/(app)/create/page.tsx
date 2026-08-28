@@ -547,7 +547,7 @@ export default function CreatePage() {
                       <Loader2 className="size-4 animate-spin" /> Starting…
                     </Button>
                   ) : (
-                    <Button className="gap-1.5" onClick={generate} disabled={!canSubmit}>
+                    <Button className="press gap-1.5 shadow-lg shadow-primary/25" onClick={generate} disabled={!canSubmit}>
                       Generate <ArrowRight className="size-4" />
                     </Button>
                   )}

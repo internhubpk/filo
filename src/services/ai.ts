@@ -30,7 +30,7 @@ export * from './ai/index'
 
 /**
  * Legacy interface kept for artifact-engine.ts. All methods delegate to the
- * canonical aiRouter, which adds provider fallback (Gemini primary) that the
+ * canonical aiRouter, which adds provider fallback (Agent Router primary) that the
  * old implementation never had.
  */
 class LegacyAiServiceAdapter {
@@ -56,7 +56,7 @@ class LegacyAiServiceAdapter {
     return this.toLegacy(response)
   }
 
-  /** Legacy provider getter — reports the primary provider (Gemini). */
+  /** Legacy provider getter — reports the primary provider (Agent Router). */
   getCurrentProvider(): AiProvider {
     // The legacy @/types union predates Gemini. The canonical primary is
     // Gemini, so we widen via a cast (shim-only; new code should read

@@ -2,13 +2,13 @@
 // FILO AI — Shared Types
 // =============================================================================
 // The canonical, provider-agnostic type system for all AI calls in Filo.
-// Every provider implementation (Gemini, OpenRouter, OpenAI, ...) converts
+// Every provider implementation (Agent Router, OpenAI, ...) converts
 // to/from these types so the rest of the application never sees
 // provider-specific payloads.
 // =============================================================================
 
 /** Identifiers for every provider Filo can route to. */
-export type ProviderId = 'GEMINI' | 'OPENROUTER' | 'OPENAI'
+export type ProviderId = 'AGENT_ROUTER' | 'OPENAI'
 
 /** Chat role (OpenAI-style; providers translate internally). */
 export type AiRole = 'system' | 'user' | 'assistant'
@@ -27,7 +27,7 @@ export type ResponseFormat =
 
 /** Per-request generation options (all optional — providers apply defaults). */
 export interface AiRequestOptions {
-  /** Provider-specific model id, e.g. 'gemini-2.0-flash'. */
+  /** Provider-specific model id, e.g. 'deepseek-v4-flash'. */
   model?: string
   temperature?: number
   maxTokens?: number

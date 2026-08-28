@@ -48,10 +48,7 @@ export async function POST(request: NextRequest) {
       // Forward the server's AI keys so a retry works even without Convex env
       // keys (same fallback policy as enqueue).
       aiKeys: {
-        gemini: process.env.GEMINI_API_KEY || undefined,
-        geminiBaseUrl: process.env.GEMINI_BASE_URL || undefined,
-        geminiModel: process.env.GEMINI_MODEL || undefined,
-        openrouter: process.env.OPENROUTER_API_KEY || undefined,
+        agentRouter: process.env.AGENT_ROUTER_API_KEY || undefined,
         openai: process.env.OPENAI_API_KEY || undefined,
       },
     })) as { success: boolean; jobId?: string; error?: string; code?: string }

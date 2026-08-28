@@ -202,7 +202,7 @@ export default function FilesPage() {
         title="Files"
         description="Your uploads and generated artifacts — stored in encrypted cloud storage."
         actions={
-          <Button onClick={() => inputRef.current?.click()} disabled={upload.active}>
+          <Button onClick={() => inputRef.current?.click()} disabled={upload.active} className="press shadow-md shadow-primary/20">
             <Upload className="mr-1.5 size-4" /> Upload
           </Button>
         }

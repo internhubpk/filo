@@ -254,12 +254,9 @@ export async function POST(request: NextRequest) {
       attachedFileNames: safeFiles.map((f) => f.filename),
       // Fallback keys so the worker can call AI even before the keys are
       // configured on the Convex deployment. Recommended production setup:
-      // `npx convex env set GEMINI_API_KEY ...` (then these stay unused).
+      // `npx convex env set AGENT_ROUTER_API_KEY ...` (then these stay unused).
       aiKeys: {
-        gemini: process.env.GEMINI_API_KEY || undefined,
-        geminiBaseUrl: process.env.GEMINI_BASE_URL || undefined,
-        geminiModel: process.env.GEMINI_MODEL || undefined,
-        openrouter: process.env.OPENROUTER_API_KEY || undefined,
+        agentRouter: process.env.AGENT_ROUTER_API_KEY || undefined,
         openai: process.env.OPENAI_API_KEY || undefined,
       },
     })) as { success: boolean; jobId?: string; error?: string; code?: string }

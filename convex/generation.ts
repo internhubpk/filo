@@ -480,10 +480,7 @@ export const enqueueJob = mutation({
     // forwarded only to the scheduled worker invocation.
     aiKeys: v.optional(
       v.object({
-        gemini: v.optional(v.string()),
-        geminiBaseUrl: v.optional(v.string()),
-        geminiModel: v.optional(v.string()),
-        openrouter: v.optional(v.string()),
+        agentRouter: v.optional(v.string()),
         openai: v.optional(v.string()),
       })
     ),
@@ -589,10 +586,7 @@ export const resumeUserJob = mutation({
     userId: v.id("users"),
     aiKeys: v.optional(
       v.object({
-        gemini: v.optional(v.string()),
-        geminiBaseUrl: v.optional(v.string()),
-        geminiModel: v.optional(v.string()),
-        openrouter: v.optional(v.string()),
+        agentRouter: v.optional(v.string()),
         openai: v.optional(v.string()),
       })
     ),

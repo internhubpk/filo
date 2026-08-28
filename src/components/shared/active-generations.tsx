@@ -20,6 +20,7 @@ import { api } from "@convex/_generated/api";
 import { useFiloSession } from "@/hooks/use-session";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
+import { apiClient } from "@/lib/api-client";
 
 interface JobLike {
   _id: string;
@@ -28,9 +29,18 @@ interface JobLike {
   progress: number;
   totalUnits: number;
   completedUnits: number;
+  updatedAt?: number;
 }
 
 const ACTIVE = new Set(["queued", "planning", "generating", "validating", "rendering"]);
+
+/** Jobs in "rendering" whose render trigger is older than this are retried
+ *  from the browser (the render endpoint is idempotent — double triggers are
+ *  harmless). This is the fallback that un-sticks the 97% state when the
+ *  worker's server-to-server POST cannot reach the app origin (e.g. the job
+ *  was created from localhost). */
+const RENDER_FALLBACK_AFTER_MS = 45_000;
+const MAX_BROWSER_RENDER_ATTEMPTS = 5;
 
 export function ActiveGenerations({
   className,
@@ -59,6 +69,41 @@ export function ActiveGenerations({
     }
     hadActiveRef.current = has;
   }, [active.length, onSettled]);
+
+  // ---------- BROWSER RENDER TRIGGER (97%-stuck safety net) ----------
+  // If a job sits in "rendering" with no progress, hit the SAME idempotent
+  // render endpoint from the browser. This is the only caller that can
+  // reach a localhost-origin job from a cloud worker situation, and it
+  // double-safes every other failure mode (worker POST failed, retries
+  // exhausted, FILO_APP_URL unset).
+  const attemptsRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (!ready || !user) return;
+    const interval = setInterval(async () => {
+      const now = Date.now();
+      for (const job of active) {
+        if (job.status !== "rendering") continue;
+        const idleFor = now - (job.updatedAt ?? 0);
+        if (idleFor < RENDER_FALLBACK_AFTER_MS) continue;
+        const used = attemptsRef.current.get(job._id) ?? 0;
+        if (used >= MAX_BROWSER_RENDER_ATTEMPTS) continue;
+        attemptsRef.current.set(job._id, used + 1);
+        try {
+          await fetch("/api/generation/render", {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              ...apiClient.getAuthHeaders(),
+            },
+            body: JSON.stringify({ jobId: job._id }),
+          });
+        } catch {
+          // Network hiccup — the next tick retries (bounded).
+        }
+      }
+    }, 30_000);
+    return () => clearInterval(interval);
+  }, [active, ready, user]);
 
   if (!ready || !user || active.length === 0) return null;
 
@@ -96,6 +141,12 @@ export function ActiveGenerations({
               </span>
             </div>
             <Progress value={Math.max(2, Math.min(99, job.progress ?? 0))} className="mt-1.5 h-1.5" />
+            {job.status === "rendering" && (job.updatedAt ?? 0) < Date.now() - 180_000 ? (
+              <p className="mt-1 flex items-center gap-1 text-[11px] text-amber-600 dark:text-amber-400">
+                <AlertTriangle className="size-3" />
+                Finishing is taking longer than usual — the file is being assembled. You can keep working; we will retry automatically.
+              </p>
+            ) : null}
           </div>
         ))}
       </div>

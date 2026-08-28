@@ -13,6 +13,7 @@ import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
 import { useApi } from "@/hooks/use-api";
 import { formatPkr } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import { AdminPageHeader, AdminTable } from "@/components/admin/admin-ui";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -128,8 +129,8 @@ export default function AdminPlansPage() {
     void refreshAiStatus();
   }, [refreshAiStatus]);
 
-  /** LIVE probes from the Convex runtime (Gemini ListModels + 1-token call;
-   *  OpenRouter /key). Reports HTTP status/latency/error codes — no secrets. */
+  /** LIVE probes from the Convex runtime (Agent Router default + per-model
+   *  chat pings). Reports HTTP status/latency/error codes — no secrets. */
   async function probeAiProviders() {
     setAiProbing(true);
     try {
@@ -140,19 +141,21 @@ export default function AdminPlansPage() {
       }
       const status = res.data as unknown as AiStatus;
       setAiStatus(status);
-      const gemini = status.providers?.find((p) => p.id === "GEMINI") as AiProviderRow | undefined;
-      const ping = gemini?.ping;
+      const agentRouter = status.providers?.find((p) => p.id === "AGENT_ROUTER") as AiProviderRow | undefined;
+      const ping = agentRouter?.ping as
+        | { ok?: boolean; model?: string; latencyMs?: number; errorCode?: string; httpStatus?: number; error?: string }
+        | undefined;
       if (ping?.ok) {
-        toast.success("Gemini reachable from Convex", {
+        toast.success("Agent Router reachable from Convex", {
           description: `${ping.model} answered in ${ping.latencyMs}ms`,
         });
       } else if (ping) {
-        toast.error("Gemini probe FAILED", {
+        toast.error("Agent Router probe FAILED", {
           description: `${ping.errorCode ?? "ERROR"}${ping.httpStatus ? ` (HTTP ${ping.httpStatus})` : ""}: ${ping.error ?? "unknown"}`,
           duration: 20000,
         });
       } else {
-        toast.warning("Probe ran — Gemini not configured or skipped", { duration: 10000 });
+        toast.warning("Probe ran — Agent Router not configured (set AGENT_ROUTER_API_KEY in Convex)", { duration: 10000 });
       }
     } finally {
       setAiProbing(false);
@@ -431,8 +434,11 @@ export default function AdminPlansPage() {
       </div>
 
       {/* AI providers — generation runs in Convex, so this is the truthful
-          view of what the AI layer can actually reach (AI-repair spec §17). */}
-      <div className="rounded-lg border bg-card p-4">
+          view of what the AI layer can actually reach (AI-repair spec §17).
+          Rows render GENERALLY from the API payload, so any provider
+          (AGENT_ROUTER, OPENAI, …) displays consistently with model chips,
+          a configured badge and live ping status. */}
+      <div className="card-sheen rounded-xl border bg-card p-4 shadow-sm">
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <Bot className="size-4 text-muted-foreground" />
@@ -445,65 +451,90 @@ export default function AdminPlansPage() {
             {aiStatusLoading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
           </div>
           <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={() => void refreshAiStatus()} disabled={aiStatusLoading}>
+            <Button variant="outline" size="sm" className="press" onClick={() => void refreshAiStatus()} disabled={aiStatusLoading}>
               {aiStatusLoading ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <RefreshCw className="mr-1.5 size-4" />}
               Refresh
             </Button>
-            <Button variant="outline" size="sm" onClick={() => void probeAiProviders()} disabled={aiProbing}>
+            <Button variant="outline" size="sm" className="press" onClick={() => void probeAiProviders()} disabled={aiProbing}>
               {aiProbing ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <Bot className="mr-1.5 size-4" />}
               Run live AI probe
             </Button>
           </div>
         </div>
         {aiStatus && (
-          <div className="mt-3 space-y-2">
+          <div className="mt-3 space-y-2.5">
             {(aiStatus.routerHealth ?? []).map((h) => (
               <span key={h.provider} className="mr-3 inline-block font-mono text-[11px] text-muted-foreground">
-                {h.provider}: {h.state}
+                router {h.provider}: {h.state}
                 {h.cooldownRemainingMs > 0 ? ` (cooldown ${Math.ceil(h.cooldownRemainingMs / 1000)}s)` : ""}
               </span>
             ))}
-            {(aiStatus.providers ?? []).map((p) => (
-              <div key={p.id} className="rounded-md border bg-muted/40 p-2.5 text-xs">
-                <div className="flex flex-wrap items-center gap-2">
-                  <span className="font-medium">{p.displayName}</span>
-                  {p.configured ? (
-                    <Badge className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">configured</Badge>
-                  ) : (
-                    <Badge variant="outline">not configured</Badge>
+            {(aiStatus.providers ?? []).map((p) => {
+              const models = p.models ?? [];
+              return (
+                <div key={p.id} className="rounded-lg border bg-muted/40 p-3 text-xs">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="text-sm font-medium">{p.displayName}</span>
+                    <span className="font-mono text-[11px] text-muted-foreground">{p.id}</span>
+                    {p.configured ? (
+                      <Badge className="border-transparent bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">
+                        configured
+                      </Badge>
+                    ) : (
+                      <Badge variant="outline">not configured</Badge>
+                    )}
+                    {p.configured === false && p.status && (
+                      <span className="text-muted-foreground">{p.status}</span>
+                    )}
+                  </div>
+                  {models.length > 0 && (
+                    <div className="mt-2 flex flex-wrap items-center gap-1.5">
+                      {models.map((m) => (
+                        <span
+                          key={m}
+                          className={cn(
+                            "rounded-md border px-1.5 py-0.5 font-mono text-[11px]",
+                            m === p.defaultModel
+                              ? "border-primary/30 bg-primary/10 text-primary"
+                              : "bg-background text-muted-foreground"
+                          )}
+                        >
+                          {m}
+                          {m === p.defaultModel ? " · default" : ""}
+                        </span>
+                      ))}
+                    </div>
                   )}
-                  {p.configured === false && p.status && (
-                    <span className="text-muted-foreground">{p.status}</span>
+                  {p.ping && (
+                    <p className={`mt-2 ${p.ping.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
+                      ping: {p.ping.ok ? "ok" : "failed"}
+                      {p.ping.latencyMs != null ? ` · ${p.ping.latencyMs}ms` : ""}
+                      {p.ping.httpStatus != null ? ` · HTTP ${p.ping.httpStatus}` : ""}
+                      {p.ping.model ? ` · ${p.ping.model}` : ""}
+                      {p.ping.errorCode ? ` · ${p.ping.errorCode}` : ""}
+                      {p.ping.error ? <span className="block whitespace-pre-wrap font-sans text-muted-foreground">{p.ping.error}</span> : null}
+                    </p>
                   )}
-                  <span className="font-mono text-[11px] text-muted-foreground">default: {p.defaultModel}</span>
+                  {p.listModels && (
+                    <p className="mt-1 text-muted-foreground">
+                      models valid: {p.listModels.availableConfiguredModels.length}/{p.listModels.availableConfiguredModels.length + p.listModels.missingConfiguredModels.length}
+                      {p.listModels.missingConfiguredModels.length > 0 ? ` · missing: ${p.listModels.missingConfiguredModels.join(", ")}` : ""}
+                      {p.listModels.error ? ` · ${p.listModels.error}` : ""}
+                    </p>
+                  )}
+                  {p.keyInfo && (
+                    <p className={`mt-1 ${p.keyInfo.valid ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
+                      {p.displayName} key: {p.keyInfo.valid ? "VALID" : "INVALID"}
+                      {p.keyInfo.httpStatus != null ? ` (HTTP ${p.keyInfo.httpStatus})` : ""}
+                      {p.keyInfo.isFreeTier ? " · free tier" : ""}
+                      {p.keyInfo.usage != null ? ` · used ${p.keyInfo.usage}` : ""}
+                      {p.keyInfo.limit != null ? ` / ${p.keyInfo.limit}` : ""}
+                      {p.keyInfo.error ? <span className="block whitespace-pre-wrap font-sans text-muted-foreground">{p.keyInfo.error}</span> : null}
+                    </p>
+                  )}
                 </div>
-                {p.ping && (
-                  <p className={`mt-1 ${p.ping.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
-                    generateContent probe: {p.ping.ok ? "PASS" : "FAIL"}
-                    {p.ping.httpStatus != null ? ` (HTTP ${p.ping.httpStatus})` : ""} · {p.ping.model} · {p.ping.latencyMs}ms
-                    {p.ping.errorCode ? ` · ${p.ping.errorCode}` : ""}
-                    {p.ping.error ? <span className="block whitespace-pre-wrap font-sans text-muted-foreground">{p.ping.error}</span> : null}
-                  </p>
-                )}
-                {p.listModels && (
-                  <p className="mt-1 text-muted-foreground">
-                    models valid: {p.listModels.availableConfiguredModels.length}/{p.listModels.availableConfiguredModels.length + p.listModels.missingConfiguredModels.length}
-                    {p.listModels.missingConfiguredModels.length > 0 ? ` · missing: ${p.listModels.missingConfiguredModels.join(", ")}` : ""}
-                    {p.listModels.error ? ` · ${p.listModels.error}` : ""}
-                  </p>
-                )}
-                {p.keyInfo && (
-                  <p className={`mt-1 ${p.keyInfo.valid ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
-                    OpenRouter key: {p.keyInfo.valid ? "VALID" : "INVALID"}
-                    {p.keyInfo.httpStatus != null ? ` (HTTP ${p.keyInfo.httpStatus})` : ""}
-                    {p.keyInfo.isFreeTier ? " · free tier" : ""}
-                    {p.keyInfo.usage != null ? ` · used ${p.keyInfo.usage}` : ""}
-                    {p.keyInfo.limit != null ? ` / ${p.keyInfo.limit}` : ""}
-                    {p.keyInfo.error ? <span className="block whitespace-pre-wrap font-sans text-muted-foreground">{p.keyInfo.error}</span> : null}
-                  </p>
-                )}
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </div>

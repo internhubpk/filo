@@ -12,9 +12,10 @@
 //   - config snapshot: which providers have keys in the Convex environment
 //     (booleans only — the key VALUES never leave the server)
 //   - in-isolate router health (quota cooldown / degraded state)
-//   - LIVE probes (opt-in): Gemini ListModels + one 1-token generateContent
-//     call; OpenRouter GET /key (validity + credits, zero token spend);
-//     OpenAI reported as disabled when unconfigured
+//   - LIVE probes (opt-in): one minimal Agent Router chat call per
+//     configured model (verifies every model id against the real key) +
+//     OpenAI ping when configured; OpenAI reported as disabled when
+//     unconfigured
 //
 // Recorded per probe: HTTP status, latency, model, provider error code.
 // NEVER recorded/returned: API keys, secrets, authorization headers.
@@ -23,8 +24,7 @@
 import { v } from "convex/values";
 import { action } from "./_generated/server";
 import { aiRouter, providerHealthSnapshot } from "../src/services/ai";
-import { GeminiProvider } from "../src/services/ai/gemini";
-import { OpenRouterProvider } from "../src/services/ai/openrouter";
+import { AgentRouterModule } from "../src/services/ai/agentrouter";
 import { OpenAiProvider } from "../src/services/ai/openai";
 
 // -----------------------------------------------------------------------------
@@ -56,15 +56,14 @@ function assertServerToken(token: unknown) {
 export const probeAiProviders = action({
   args: {
     serverToken: v.string(),
-    /** Run network probes (Gemini 1-token call, OpenRouter /key). */
+    /** Run network probes (Agent Router chat calls — default + per-model). */
     probe: v.optional(v.boolean()),
   },
   handler: async (_ctx, args) => {
     assertServerToken(args.serverToken);
     const doProbe = args.probe === true;
 
-    const gemini = new GeminiProvider();
-    const openrouter = new OpenRouterProvider();
+    const agentRouter = new AgentRouterModule();
     const openai = new OpenAiProvider();
 
     const result: Record<string, unknown> = {
@@ -77,28 +76,19 @@ export const probeAiProviders = action({
 
     const providers: Array<Record<string, unknown>> = [];
 
-    // ---------- GEMINI (primary) ----------
-    const geminiEntry: Record<string, unknown> = {
-      id: "GEMINI",
-      displayName: "Google Gemini",
-      configured: gemini.isConfigured(),
-      defaultModel: gemini.defaultModel,
-      models: gemini.availableModels,
+    // ---------- AGENT ROUTER (primary) ----------
+    const agentEntry: Record<string, unknown> = {
+      id: "AGENT_ROUTER",
+      displayName: "Agent Router",
+      configured: agentRouter.isConfigured(),
+      defaultModel: agentRouter.defaultModel,
+      models: agentRouter.availableModels,
     };
-    if (gemini.isConfigured() && doProbe) {
-      // (a) ListModels — proves reachability + key validity + model registry.
-      const diag = await gemini.diagnose();
-      geminiEntry.listModels = {
-        httpStatus: diag.httpStatus,
-        latencyMs: diag.latencyMs,
-        availableConfiguredModels: diag.availableConfiguredModels,
-        missingConfiguredModels: diag.missingConfiguredModels,
-        error: diag.error,
-      };
-      // (b) One minimal generateContent call — proves the exact request path
-      // generation uses (auth + model + format + not rate-limited/503).
-      const ping = await gemini.ping();
-      geminiEntry.ping = {
+    if (agentRouter.isConfigured() && doProbe) {
+      // Ping the DEFAULT model through the exact request path generation
+      // uses (auth + model + format + not rate-limited).
+      const ping = await agentRouter.ping();
+      agentEntry.ping = {
         ok: ping.ok,
         httpStatus: ping.httpStatus,
         latencyMs: ping.latencyMs,
@@ -106,32 +96,23 @@ export const probeAiProviders = action({
         errorCode: ping.errorCode,
         error: ping.error,
       };
+      // Verify EVERY configured model id against the real key (tiny calls,
+      // ~10 tokens each) — catches retired/renamed model ids immediately.
+      const perModel: unknown[] = [];
+      for (const model of agentRouter.availableModels) {
+        const m = await agentRouter.ping(model);
+        perModel.push({
+          model,
+          ok: m.ok,
+          httpStatus: m.httpStatus,
+          latencyMs: m.latencyMs,
+          errorCode: m.errorCode,
+          error: m.error,
+        });
+      }
+      agentEntry.modelProbes = perModel;
     }
-    providers.push(geminiEntry);
-
-    // ---------- OPENROUTER (secondary) ----------
-    const orEntry: Record<string, unknown> = {
-      id: "OPENROUTER",
-      displayName: "OpenRouter",
-      configured: openrouter.isConfigured(),
-      defaultModel: openrouter.defaultModel,
-      models: openrouter.availableModels,
-    };
-    if (openrouter.isConfigured() && doProbe) {
-      // GET /key — validity + credits without spending tokens.
-      const keyInfo = await openrouter.fetchKeyInfo();
-      orEntry.keyInfo = {
-        valid: keyInfo.valid,
-        httpStatus: keyInfo.httpStatus,
-        latencyMs: keyInfo.latencyMs,
-        label: keyInfo.label,
-        usage: keyInfo.usage,
-        limit: keyInfo.limit ?? null,
-        isFreeTier: keyInfo.isFreeTier,
-        error: keyInfo.error,
-      };
-    }
-    providers.push(orEntry);
+    providers.push(agentEntry);
 
     // ---------- OPENAI (optional) ----------
     const oaiEntry: Record<string, unknown> = {

@@ -5,7 +5,7 @@
 //
 //   import { aiRouter, buildBlueprintPrompt, BLUEPRINT_SCHEMA } from '@/services/ai'
 //
-// Direct imports of provider files (./gemini, ./openrouter, ./openai) are
+// Direct imports of provider files (./agentrouter, ./openai) are
 // internal implementation details — do NOT import them from app code.
 // =============================================================================
 
@@ -28,8 +28,7 @@ export {
 } from './provider'
 export type { AiProvider } from './provider'
 
-export { GeminiProvider, GEMINI_MODELS } from './gemini'
-export { OpenRouterProvider, OPENROUTER_MODELS } from './openrouter'
+export { AgentRouterModule, AGENT_ROUTER_MODELS } from './agentrouter'
 export { OpenAiProvider, OPENAI_MODELS } from './openai'
 
 export * from './errors'

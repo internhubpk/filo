@@ -186,3 +186,89 @@ export const adminUsersWithStats = query({
     });
   },
 });
+
+/**
+ * AI usage / context accounting for admins (per-generation input+output
+ * tokens, model, provider, status) plus rollup totals. Backs the admin
+ * dashboard's "AI usage" panel — answers "how much context is each user
+ * consuming" without exposing any prompt content.
+ */
+export const adminAiUsage = query({
+  args: {
+    serverToken: v.string(),
+    adminUserId: v.id("users"),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    assertServerAndAdmin(args.serverToken, args.adminUserId);
+    const admin = await ctx.db.get(args.adminUserId);
+    if (!admin || admin.isAdmin !== true) throw new Error("Forbidden: admin required");
+
+    const jobs = await ctx.db
+      .query("generationJobs")
+      .order("desc")
+      .take(args.limit ?? 50);
+
+    const rows = await Promise.all(
+      jobs.map(async (j) => {
+        const owner = await ctx.db.get(j.userId);
+        return {
+          jobId: j._id,
+          userEmail: owner?.email ?? "unknown",
+          userName: owner?.name ?? owner?.email ?? "unknown",
+          status: j.status,
+          artifactType: j.artifactType ?? "document",
+          outputFormat: j.outputFormat ?? "DOCX",
+          model: j.model ?? null,
+          provider: j.provider ?? null,
+          inputTokens: j.inputTokens ?? 0,
+          outputTokens: j.outputTokens ?? 0,
+          totalTokens: (j.inputTokens ?? 0) + (j.outputTokens ?? 0),
+          totalUnits: j.totalUnits ?? 0,
+          completedUnits: j.completedUnits ?? 0,
+          failedUnits: j.failedUnits ?? 0,
+          autoRetries: j.autoRetries ?? 0,
+          retryCount: j.retryCount ?? 0,
+          createdAt: j.createdAt,
+          completedAt: j.completedAt ?? null,
+        };
+      })
+    );
+
+    const totals = rows.reduce(
+      (acc, r) => {
+        acc.inputTokens += r.inputTokens;
+        acc.outputTokens += r.outputTokens;
+        acc.totalTokens += r.totalTokens;
+        acc.jobs += 1;
+        if (r.status === "completed") acc.completed += 1;
+        if (r.status === "failed") acc.failed += 1;
+        return acc;
+      },
+      { jobs: 0, completed: 0, failed: 0, inputTokens: 0, outputTokens: 0, totalTokens: 0 }
+    );
+
+    // Per-user rollup — the "context used per user" view.
+    const byUser = new Map<string, { email: string; jobs: number; inputTokens: number; outputTokens: number; totalTokens: number }>();
+    for (const r of rows) {
+      const cur = byUser.get(r.userEmail) ?? {
+        email: r.userEmail,
+        jobs: 0,
+        inputTokens: 0,
+        outputTokens: 0,
+        totalTokens: 0,
+      };
+      cur.jobs += 1;
+      cur.inputTokens += r.inputTokens;
+      cur.outputTokens += r.outputTokens;
+      cur.totalTokens += r.totalTokens;
+      byUser.set(r.userEmail, cur);
+    }
+
+    return {
+      totals,
+      perUser: [...byUser.values()].sort((a, b) => b.totalTokens - a.totalTokens),
+      recent: rows,
+    };
+  },
+});

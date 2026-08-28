@@ -5,8 +5,9 @@
 //       429→RATE_LIMITED, 5xx→PROVIDER_UNAVAILABLE, Google's 400
 //       "API key not valid" → AUTH (never UNAVAILABLE for all of these).
 //   §5  Bounded retry: 2 attempts per model, hard cap of 4 per provider.
-//   §6  Gemini model registry lives in ONE place and uses -latest aliases.
-//   §7  OpenRouter slugs are the LIVE-verified ones (no retired models).
+//   §6  Agent Router model registry lives in ONE place, LIVE-verified, and
+//       is cost-ordered (operator budget optimization).
+//   §7  Retired provider adapters (gemini.ts, openrouter.ts) are DELETED.
 //   §8  Quota exhaustion stops the provider for the request + cooldown.
 //   §10 OpenAI optional: unconfigured = skipped, not attempted.
 //   §13 Request validation happens BEFORE any provider call.
@@ -21,7 +22,7 @@
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 
@@ -33,8 +34,8 @@ const read = (...p) => readFileSync(resolve(REPO_ROOT, ...p), 'utf8')
 
 const errors = read('src', 'services', 'ai', 'errors.ts')
 const router = read('src', 'services', 'ai', 'router.ts')
-const gemini = read('src', 'services', 'ai', 'gemini.ts')
-const openrouter = read('src', 'services', 'ai', 'openrouter.ts')
+const agentrouter = read('src', 'services', 'ai', 'agentrouter.ts')
+const openai = read('src', 'services', 'ai', 'openai.ts')
 const worker = read('convex', 'worker.ts')
 const aiDiagnostics = read('convex', 'aiDiagnostics.ts')
 const aiStatusRoute = read('src', 'app', 'api', 'admin', 'ai', 'status', 'route.ts')
@@ -77,10 +78,9 @@ test("§4 Google's 400 'API key not valid' is classified as AUTH, not INVALID_RE
   )
 })
 
-test('§4 CONFIGURATION_ERROR exists for bad server-side config (bad base URL)', () => {
+test('§4 CONFIGURATION_ERROR exists for bad server-side config', () => {
   assert.match(errors, /'CONFIGURATION_ERROR'/, 'code registered in the union')
   assert.match(errors, /class ConfigurationError extends AiBaseError/)
-  assert.match(gemini, /ConfigurationError\(\s*'GEMINI'/, 'gemini.ts throws it for an invalid GEMINI_BASE_URL')
 })
 
 // ---------------------------------------------------------------------------
@@ -102,88 +102,44 @@ test('§5 backoff uses exponential delay with jitter', () => {
 })
 
 // ---------------------------------------------------------------------------
-// §6 — Gemini model registry
+// §6 — Agent Router model registry (LIVE-verified 2026-08-28)
 // ---------------------------------------------------------------------------
 
-test('§6 Gemini registry keeps the always-current -latest aliases', () => {
-  assert.match(gemini, /'gemini-flash-latest'/)
-  assert.match(gemini, /'gemini-flash-lite-latest'/)
-  assert.match(gemini, /'gemini-2\.5-flash'/)
+test('§6 Agent Router registry is the live-verified, cost-ordered set', () => {
+  const registry = agentrouter.match(/export const AGENT_ROUTER_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
+  assert.ok(registry.length > 0, 'AGENT_ROUTER_MODELS registry found')
+  const ids = [...registry.matchAll(/'([a-z0-9.-]+)'/g)].map((m) => m[1])
+  assert.deepEqual(ids, [
+    'deepseek-v4-flash',
+    'glm-5.3',
+    'gpt-5.6-sol',
+    'claude-opus-4-8',
+    'claude-opus-5',
+  ], 'registry must be exactly the 5 verified ids in cost order')
 })
 
-test('§6 Gemini registry leads with the current GA flash model', () => {
-  const registry = gemini.match(/export const GEMINI_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
-  assert.ok(registry.length > 0, 'GEMINI_MODELS registry found')
-  assert.match(registry, /'gemini-3\.5-flash'/, 'current GA flash model present')
-  const first = registry.match(/\[\s*'([a-z0-9.-]+)'/)?.[1]
-  assert.equal(first, 'gemini-flash-latest', 'the always-current alias leads the registry')
-})
-
-test('§6 no dead Gemini model ids remain (2.0 shut down 2026-06-01)', () => {
-  const registry = gemini.match(/export const GEMINI_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
+test('§6 task matrices lead with cheap models (operator budget optimization)', () => {
   const matrix = router.match(/export const MODEL_MATRIX[\s\S]*?\n\}/)?.[0] ?? ''
-  for (const block of [registry, matrix]) {
-    assert.doesNotMatch(block, /gemini-2\.0-flash/, '2.0 Flash shut down June 1, 2026')
-    assert.doesNotMatch(block, /gemini-1\.5/, '1.5 models are retired')
-  }
-})
-
-test('§6 pro-tier ids never lead a task matrix (free tier blocks them since 2026-04-01)', () => {
-  const matrix = router.match(/export const MODEL_MATRIX[\s\S]*?\n\}/)?.[0] ?? ''
-  const geminiRows = matrix.match(/GEMINI: \[[^\]]*\]/g) ?? []
-  assert.ok(geminiRows.length >= 5, 'all five task rows have GEMINI chains')
-  for (const row of geminiRows) {
+  assert.ok(matrix.length > 0, 'MODEL_MATRIX found')
+  const agentRows = matrix.match(/AGENT_ROUTER: \[[^\]]*\]/g) ?? []
+  assert.ok(agentRows.length >= 5, 'all five task rows have AGENT_ROUTER chains')
+  for (const row of agentRows) {
     const first = row.match(/\['([a-z0-9.-]+)'/)?.[1]
     assert.ok(
-      first && !/pro/.test(first),
-      `GEMINI task chain must lead with a flash model (got ${first})`
+      first === 'deepseek-v4-flash' || first === 'glm-5.3',
+      `task chains must lead with a cheap-tier model (got ${first})`
     )
   }
 })
 
-test('§6 the Gemini adapter performs ONE model call per generate (no hidden walk)', () => {
-  const gen = gemini.match(/async generate\(request: AiRequest\): Promise<AiResponse> \{[\s\S]*?\n  \}/)?.[0] ?? ''
-  assert.ok(gen.length > 0, 'generate() found')
-  assert.doesNotMatch(gen, /candidates/, 'no internal candidate walk in the adapter')
-  assert.doesNotMatch(gen, /model not found/, 'no mislabeled model-not-found log in the adapter')
+test('§7 retired provider adapters are deleted from the codebase', () => {
+  assert.equal(existsSync(resolve(REPO_ROOT, 'src', 'services', 'ai', 'gemini.ts')), false, 'gemini.ts removed')
+  assert.equal(existsSync(resolve(REPO_ROOT, 'src', 'services', 'ai', 'openrouter.ts')), false, 'openrouter.ts removed')
 })
 
-test('§6 the ROUTER extends each provider chain with its registry tail', () => {
-  assert.match(
-    router,
-    /availableModels\.filter\(\(m\) => !matrix\.includes\(m\)\)/,
-    'stale matrix entries can never strand a provider while valid ids remain'
-  )
-})
-
-test('§6 no retired Gemini 1.5 model ids remain', () => {
-  assert.doesNotMatch(gemini, /gemini-1\.5/, '1.5 models are retired — must not be referenced')
-})
-
-test('§1 generateContent is the documented API surface with an Interactions-API decision note', () => {
-  assert.match(gemini, /generateContent/)
-  assert.match(gemini, /Interactions API/, 'the evaluation must be documented, not silently ignored')
-})
-
-// ---------------------------------------------------------------------------
-// §7 — OpenRouter model registry (live-verified 2026-08-28)
-// ---------------------------------------------------------------------------
-
-test('§7 retired OpenRouter slugs are gone from the ACTIVE registries', () => {
-  const orModels = openrouter.match(/export const OPENROUTER_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
-  const matrix = router.match(/export const MODEL_MATRIX[\s\S]*?\n\}/)?.[0] ?? ''
-  assert.ok(orModels.length > 0 && matrix.length > 0, 'registries found')
-  for (const block of [orModels, matrix]) {
-    assert.doesNotMatch(block, /claude-3\.5-sonnet/, 'retired from the live catalog')
-    assert.doesNotMatch(block, /gemini-2\.0-flash-001/, 'retired from the live catalog')
-  }
-})
-
-test('§7 current OpenRouter slugs are the LIVE-verified ones', () => {
-  assert.match(openrouter, /'anthropic\/claude-sonnet-4\.5'/)
-  assert.match(router, /'anthropic\/claude-sonnet-4\.5'/)
-  assert.match(router, /'openai\/gpt-5-mini'/)
-  assert.match(router, /'google\/gemini-2\.5-flash'/)
+test('§1 generateContent-era adapters are gone; the gateway is OpenAI-style chat', () => {
+  assert.match(agentrouter, /chat\/completions/)
+  assert.match(agentrouter, /thinking: \{ type: 'disabled' \}/)
 })
 
 // ---------------------------------------------------------------------------
@@ -223,11 +179,11 @@ test('§10 unconfigured providers are skipped with a diagnostic line, not attemp
   assert.match(worker, /userSafeAiMessage/)
 })
 
-test('§12 fallback order is deterministic: GEMINI → OPENROUTER → OPENAI', () => {
+test('§12 fallback order is deterministic: AGENT_ROUTER → OPENAI', () => {
   const order = router.match(/PROVIDER_FALLBACK_ORDER: ProviderId\[\] = \[[\s\S]*?\]/)
   assert.ok(order, 'fallback order is an explicit constant')
-  const ids = order[0].match(/'(GEMINI|OPENROUTER|OPENAI)'/g)
-  assert.deepEqual(ids, ["'GEMINI'", "'OPENROUTER'", "'OPENAI'"])
+  const ids = order[0].match(/'(AGENT_ROUTER|OPENAI)'/g)
+  assert.deepEqual(ids, ["'AGENT_ROUTER'", "'OPENAI'"])
 })
 
 // ---------------------------------------------------------------------------
@@ -254,7 +210,7 @@ test('§16 userSafeAiMessage exists and never leaks provider internals', () => {
   assert.ok(returned.length >= 6, `covers the main categories (got ${returned.length})`)
   for (const sentence of returned) {
     assert.ok(
-      !/(GEMINI|OPENROUTER|OPENAI):/.test(sentence) &&
+      !/(AGENT_ROUTER|OPENAI):/.test(sentence) &&
         !/(PROVIDER_UNAVAILABLE|MODEL_NOT_FOUND|QUOTA_EXCEEDED|AUTH_FAILED|RATE_LIMITED)/.test(sentence),
       `user-safe message must not contain provider codes: ${sentence}`
     )
@@ -287,19 +243,18 @@ test('§17 the Convex probe action is server-token gated (fail-closed)', () => {
 
 test('§17 diagnostics never expose key material', () => {
   for (const file of [aiDiagnostics, aiStatusRoute]) {
-    assert.doesNotMatch(file, /GEMINI_API_KEY.*\$\{.*key/, 'no interpolated key output')
+    assert.doesNotMatch(file, /(GEMINI|AGENT_ROUTER)_API_KEY.*\$\{.*key/, 'no interpolated key output')
   }
   assert.match(aiDiagnostics, /environment: "Convex"/, 'reports the runtime, per spec §2')
 })
 
-test('§17 OpenRouter probe validates key + credits without spending tokens', () => {
-  assert.match(openrouter, /fetchKeyInfo/)
-  assert.match(openrouter, /\/key/, 'GET /api/v1/key')
+test('§17 Agent Router probe verifies every configured model id', () => {
+  assert.match(aiDiagnostics, /modelProbes/, 'per-model probes are reported')
+  assert.match(agentrouter, /async ping\(/)
 })
 
-test('§6 Gemini probe validates the configured model registry via ListModels', () => {
-  assert.match(gemini, /async diagnose\(\)/)
-  assert.match(gemini, /missingConfiguredModels/, 'reports which configured models do not exist')
+test('§6 the admin surface reports the Agent Router model registry', () => {
+  assert.match(aiDiagnostics, /models: agentRouter\.availableModels/)
 })
 
 test('§17 the admin plans console renders the AI providers card', () => {
@@ -339,7 +294,7 @@ test('§23 autoRetries is a distinct, optional job field (not user retryCount)',
 })
 
 test('§22 every provider request is timeout-bounded via AbortController', () => {
-  for (const [name, file] of [['gemini', gemini], ['openrouter', openrouter]]) {
+  for (const [name, file] of [['agentrouter', agentrouter], ['openai', openai]]) {
     assert.match(file, /AbortController/, `${name} uses AbortController`)
     assert.match(file, /controller\.abort\(\)/, `${name} aborts on timeout`)
   }
@@ -350,8 +305,8 @@ test('§22 every provider request is timeout-bounded via AbortController', () =>
 // ---------------------------------------------------------------------------
 
 test('§24 no NEXT_PUBLIC_* AI key variables anywhere', () => {
-  assert.doesNotMatch(envExample, /NEXT_PUBLIC_(GEMINI|OPENROUTER|OPENAI)_API_KEY/)
-  assert.match(envExample, /npx convex env set GEMINI_API_KEY/, 'Convex ownership documented')
+  assert.doesNotMatch(envExample, /NEXT_PUBLIC_(AGENT_ROUTER|OPENAI)_API_KEY/)
+  assert.match(envExample, /npx convex env set AGENT_ROUTER_API_KEY/, 'Convex ownership documented')
 })
 
 test('§24 .env.example documents that generation runs in Convex', () => {

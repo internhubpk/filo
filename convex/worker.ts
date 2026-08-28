@@ -37,10 +37,10 @@
 //   • FILO_SERVER_SECRET is read from the Convex environment (already
 //     required by billing).
 //   • AI keys are read from the Convex environment when set
-//     (`npx convex env set GEMINI_API_KEY ...` — recommended). As a fallback
-//     the Next.js enqueue route passes the server's own keys as scheduler
-//     args (aiKeys); they are applied to process.env for this invocation only
-//     and never written to the database.
+//     (`npx convex env set AGENT_ROUTER_API_KEY ...` — recommended). As a
+//     fallback the Next.js enqueue route passes the server's own keys as
+//     scheduler args (aiKeys); they are applied to process.env for this
+//     invocation only and never written to the database.
 // =============================================================================
 
 import { v } from "convex/values";
@@ -62,10 +62,7 @@ import {
 // ==================== TYPES ====================
 
 interface AiKeys {
-  gemini?: string;
-  geminiBaseUrl?: string;
-  geminiModel?: string;
-  openrouter?: string;
+  agentRouter?: string;
   openai?: string;
 }
 
@@ -80,10 +77,7 @@ export const processJob = internalAction({
     jobId: v.id("generationJobs"),
     aiKeys: v.optional(
       v.object({
-        gemini: v.optional(v.string()),
-        geminiBaseUrl: v.optional(v.string()),
-        geminiModel: v.optional(v.string()),
-        openrouter: v.optional(v.string()),
+        agentRouter: v.optional(v.string()),
         openai: v.optional(v.string()),
       })
     ),
@@ -502,6 +496,23 @@ async function callRenderEndpoint(ctx: any, jobId: string, retryAttempt = 0) {
   const base = (job?.appBaseUrl || process.env.FILO_APP_URL || "").replace(/\/+$/, "");
   const serverToken = process.env.FILO_SERVER_SECRET;
 
+  // A Convex CLOUD worker can never reach a dev machine. If the job was
+  // enqueued from localhost (or any private address), skip the pointless
+  // POST + retry storm entirely — the browser fallback trigger in the UI
+  // (ActiveGenerations) calls the SAME idempotent endpoint from the user's
+  // machine, which is exactly what can reach it.
+  if (
+    base &&
+    /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[a-z0-9-]+\.local)\b/i.test(
+      base
+    )
+  ) {
+    console.warn(
+      `[WORKER] job ${jobId}: render origin ${base} is not reachable from Convex cloud — deferring to the browser render trigger`
+    );
+    return;
+  }
+
   if (!base || !serverToken) {
     // Cannot render server-to-server right now. Leave the job in
     // "rendering": the client triggers the SAME idempotent endpoint as soon
@@ -554,9 +565,8 @@ function normalizeFormat(outputFormat: unknown, artifactType: string): DocumentF
  *  when the keys are not configured on the Convex deployment itself). */
 function applyAiKeys(keys?: AiKeys) {
   if (!keys) return;
-  if (keys.gemini && !process.env.GEMINI_API_KEY) process.env.GEMINI_API_KEY = keys.gemini;
-  if (keys.geminiBaseUrl && !process.env.GEMINI_BASE_URL) process.env.GEMINI_BASE_URL = keys.geminiBaseUrl;
-  if (keys.geminiModel && !process.env.GEMINI_MODEL) process.env.GEMINI_MODEL = keys.geminiModel;
-  if (keys.openrouter && !process.env.OPENROUTER_API_KEY) process.env.OPENROUTER_API_KEY = keys.openrouter;
+  if (keys.agentRouter && !process.env.AGENT_ROUTER_API_KEY) {
+    process.env.AGENT_ROUTER_API_KEY = keys.agentRouter;
+  }
   if (keys.openai && !process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = keys.openai;
 }

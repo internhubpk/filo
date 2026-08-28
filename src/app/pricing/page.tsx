@@ -175,7 +175,7 @@ export default function PricingPage() {
                 <FadeUp key={plan._id} delay={idx * 0.06}>
                   <div
                     className={cn(
-                      "relative flex h-full flex-col rounded-xl border bg-card p-6",
+                      "lift relative flex h-full flex-col rounded-xl border bg-card p-6 shadow-sm",
                       plan.popular && "border-primary/50 border-glow"
                     )}
                   >
@@ -211,7 +211,7 @@ export default function PricingPage() {
                       ))}
                     </ul>
                     <Button
-                      className="mt-6 w-full"
+                      className={cn("press mt-6 w-full", plan.popular && "shadow-lg shadow-primary/25")}
                       variant={plan.popular ? "default" : "outline"}
                       disabled={busy === plan._id}
                       onClick={() => void choose(plan)}
