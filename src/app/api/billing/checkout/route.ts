@@ -20,7 +20,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { requireUser, serverToken, convexQuery, convexMutation, jsonError, appUrl } from "@/lib/billing-server";
+import { requireUser, serverToken, convexQuery, convexMutation, jsonError, appUrl, appUrlDiagnostics } from "@/lib/billing-server";
 import { createCheckoutSession, isSafepayConfigured, isSubscriptionFlowConfigured } from "@/lib/safepay";
 
 interface PlanRow {
@@ -118,6 +118,10 @@ export async function POST(request: NextRequest) {
 
     // ---- Create the Safepay checkout session (secret stays server-side) ----
     const returnBase = appUrl();
+    const diag = appUrlDiagnostics();
+    if (diag.warning) {
+      console.warn(`[billing/checkout] appUrl diagnostics: source=${diag.source} url=${diag.url} — ${diag.warning}`);
+    }
     // Safepay POSTs tracker+signature here; the route then 303-redirects the
     // browser back to the billing page. Query params carry our opaque state.
     const stateQuery = new URLSearchParams({
@@ -172,6 +176,11 @@ export async function POST(request: NextRequest) {
         flow: session.flow,
         subscriptionFlowConfigured: isSubscriptionFlowConfigured(),
         returnUrl: `${returnBase}/billing?checkout=return`,
+        // Diagnostic only — safe to expose (no secrets), lets an operator
+        // confirm from the Network tab exactly which domain Safepay will
+        // redirect back to, instead of digging through Vercel function logs.
+        // This is the #1 thing to check for "payment redirects to a 404".
+        paymentDebug: { appUrl: diag.url, appUrlSource: diag.source, warning: diag.warning },
       },
     });
   } catch (error) {
@@ -180,4 +189,26 @@ export async function POST(request: NextRequest) {
     // Surface the real cause to the caller (Vercel logs carry the full stack).
     return jsonError(500, `Checkout failed: ${message}`, "CHECKOUT_ERROR");
   }
+}
+
+/**
+ * GET /api/billing/checkout — read-only diagnostics (no session required).
+ * Confirms, without starting a real checkout, exactly what appUrl() will
+ * resolve to on THIS deployment. Use this first when debugging a Safepay
+ * post-payment 404: if `source` is anything other than "explicit" or
+ * "vercel_production", or `warning` is non-empty, that's the bug — fix
+ * NEXT_PUBLIC_APP_URL in Vercel project settings, it is not a code issue.
+ */
+export async function GET() {
+  const diag = appUrlDiagnostics();
+  return NextResponse.json({
+    success: true,
+    data: {
+      appUrl: diag.url,
+      source: diag.source,
+      warning: diag.warning ?? null,
+      redirectUrlWouldBe: `${diag.url}/api/billing/return`,
+      safepayConfigured: isSafepayConfigured(),
+    },
+  });
 }

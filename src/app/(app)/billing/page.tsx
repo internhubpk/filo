@@ -305,6 +305,17 @@ function BillingContent() {
         toast.error(res.error || "Could not start checkout");
         return;
       }
+      // Surface any appUrl misconfiguration BEFORE the user pays — this is
+      // the exact condition that causes a 404 after the card is submitted,
+      // and it's much cheaper to catch here than after a real payment.
+      const debug = res.data.paymentDebug;
+      if (debug?.warning) {
+        console.warn("[billing] payment redirect misconfiguration:", debug);
+        toast.warning("Payment redirect may be misconfigured", {
+          description: `${debug.warning} You can still continue, but the return page may 404.`,
+          duration: 10000,
+        });
+      }
       toast.info("Redirecting to Safepay…", { description: "Complete the sandbox payment to activate your plan." });
       // Give the toast a beat, then leave for Safepay's hosted page.
       setTimeout(() => {

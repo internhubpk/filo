@@ -441,6 +441,7 @@ class ApiClient {
     amount: number
     currency: string
     plan: { id: string; name: string; tier?: string }
+    paymentDebug?: { appUrl: string; appUrlSource: string; warning?: string }
   }>> {
     return this.request('/billing/checkout', {
       method: 'POST',
