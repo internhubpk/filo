@@ -305,6 +305,35 @@ export const failUnit = internalMutation({
   },
 });
 
+/**
+ * Roll a job back to "queued" after a TRANSIENT AI outage during planning
+ * (spec §5/§14/§23) and count the automatic retry. Deliberately patches the
+ * document instead of going through setJobStatus — "queued" is a BACKWARD
+ * transition by design here (the worker will re-plan from committed state;
+ * nothing is duplicated because the blueprint was never written).
+ * Terminal states remain sticky.
+ */
+export const bumpAutoRetry = internalMutation({
+  args: {
+    jobId: v.id("generationJobs"),
+    currentStage: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const job = await ctx.db.get(args.jobId);
+    if (!job) return false;
+    const terminal = ["completed", "failed", "cancelled"];
+    if (terminal.includes(job.status)) return false;
+    await ctx.db.patch(args.jobId, {
+      status: "queued",
+      currentStage: args.currentStage,
+      error: undefined,
+      autoRetries: (job.autoRetries ?? 0) + 1,
+      updatedAt: Date.now(),
+    });
+    return true;
+  },
+});
+
 /** Transition job status (with guard: terminal states are sticky). */
 export const setJobStatus = internalMutation({
   args: {

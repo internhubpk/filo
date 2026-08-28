@@ -47,7 +47,17 @@ export type AiTask =
 
 /**
  * Model preference per task, per provider. First entry is preferred; the
- * router walks the list only if a model 404s.
+ * router walks the list on model-level failure (404 MODEL_NOT_FOUND, or a
+ * retryable failure that exhausts the model's bounded attempts), then falls
+ * through to the remaining provider registry entries.
+ *
+ * GEMINI ids verified 2026-08-28 (Google docs + runtime evidence):
+ *   • 2.0 ids are DEAD (shut down June 1, 2026) — never referenced.
+ *   • Pro ids are PAID-TIER ONLY since April 1, 2026 (404 on free keys) —
+ *     they sit at the TAIL so free-tier deployments never waste their
+ *     attempt budget on them.
+ *   • Leads are the `-latest` aliases + the current GA flash model
+ *     (gemini-3.5-flash); gemini-2.5-flash sunsets Oct 16, 2026.
  *
  * OPENROUTER slugs verified against the LIVE public catalog
  * (GET https://openrouter.ai/api/v1/models, 2026-08-28): the previous
@@ -56,45 +66,52 @@ export type AiTask =
  */
 export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly string[]>>> = {
   fast: {
-    GEMINI: ['gemini-2.0-flash-lite', 'gemini-2.0-flash'],
+    GEMINI: ['gemini-flash-lite-latest', 'gemini-flash-latest'],
     OPENROUTER: ['openai/gpt-4o-mini', 'google/gemini-2.5-flash'],
     OPENAI: ['gpt-4o-mini'],
   },
   generation: {
-    GEMINI: ['gemini-2.0-flash', 'gemini-2.5-flash'],
+    GEMINI: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-flash-lite-latest'],
     OPENROUTER: ['openai/gpt-4o-mini', 'google/gemini-2.5-flash'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   reasoning: {
-    GEMINI: ['gemini-2.5-pro', 'gemini-2.5-flash'],
+    // Pro ids come LAST: planning wants reasoning quality, but on the free
+    // tier pro models 404 since 2026-04-01 — flash aliases carry planning
+    // instead, and paid-tier keys still reach the pro alias as a tail option.
+    GEMINI: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-pro-latest'],
     OPENROUTER: ['anthropic/claude-sonnet-4.5', 'openai/gpt-5-mini'],
     OPENAI: ['gpt-4o', 'gpt-4.1'],
   },
   json: {
-    GEMINI: ['gemini-2.0-flash', 'gemini-2.5-flash'],
+    GEMINI: ['gemini-flash-latest', 'gemini-flash-lite-latest'],
     OPENROUTER: ['openai/gpt-4o-mini'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   longform: {
-    GEMINI: ['gemini-2.5-flash', 'gemini-flash-latest'], // 1.5 models are retired
+    GEMINI: ['gemini-flash-latest', 'gemini-3.5-flash', 'gemini-2.5-flash'],
     OPENROUTER: ['anthropic/claude-sonnet-4.5', 'google/gemini-2.5-flash'],
     OPENAI: ['gpt-4o'],
   },
 }
 
 /** Default retry policy — bounded, spec §5: attempt → short backoff →
- *  attempt → fallback. Two tries per model, four per provider at most. */
+ *  attempt → next model / fallback. Two tries per model; the provider
+ *  budget below decides how many DISTINCT models get a shot. Base delay is
+ *  2s because Google's 503 "high demand" spikes rarely clear in <1s. */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
   maxAttempts: 2,
-  baseDelayMs: 1_000,
+  baseDelayMs: 2_000,
   maxDelayMs: 30_000,
   backoffMultiplier: 2,
 }
 
 /** Hard cap on total attempts per provider per generate() call (all models
- *  combined) — no provider ever eats more than 4 round trips of one user
- *  request. */
-export const MAX_ATTEMPTS_PER_PROVIDER = 4
+ *  combined) — no provider ever eats more than 6 round trips of one user
+ *  request. With 2 attempts per model that is ≥3 DISTINCT models per
+ *  provider; cheap non-retryable 404 advances leave more budget for live
+ *  candidates. */
+export const MAX_ATTEMPTS_PER_PROVIDER = 6
 
 // ==================== PROVIDER HEALTH (short-lived, in-isolate) ====================
 // Spec §14: quota exhaustion and repeated 5xx temporarily demote a provider
@@ -463,17 +480,21 @@ class AiRouter {
     const provider = getProvider(providerId)
     if (!provider) return []
 
-    // 1. Explicit model pin wins.
+    // 1. Explicit model pin wins (a pinned model is a deliberate choice —
+    //    we do NOT silently substitute it).
     const pinned = opts.model || request.options?.model
     if (pinned) return [pinned]
 
-    // 2. Task-based matrix.
+    // 2. Task-based matrix first…
     const task = opts.task || 'generation'
-    const matrix = MODEL_MATRIX[task]?.[providerId]
-    if (matrix && matrix.length > 0) return [...matrix]
-
-    // 3. Provider default.
-    return [provider.defaultModel]
+    const matrix = MODEL_MATRIX[task]?.[providerId] ?? []
+    // 3. …then the rest of the provider's registry as a tail safety net.
+    //    Keys provisioned at different times see different model sets, so a
+    //    stale matrix entry must never strand the provider while a valid id
+    //    remains. Dedup preserves priority order.
+    const tail = provider.availableModels.filter((m) => !matrix.includes(m))
+    const chain = [...matrix, ...tail]
+    return chain.length > 0 ? chain : [provider.defaultModel]
   }
 
   private sleep(ms: number): Promise<void> {

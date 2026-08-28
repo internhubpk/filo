@@ -91,8 +91,8 @@ test('§5 retry policy is bounded: 2 attempts per model', () => {
   assert.match(router, /DEFAULT_RETRY_POLICY: RetryPolicy = \{\s*maxAttempts: 2,/)
 })
 
-test('§5 provider attempt budget caps total attempts at 4', () => {
-  assert.match(router, /MAX_ATTEMPTS_PER_PROVIDER = 4/)
+test('§5 provider attempt budget caps total attempts at 6', () => {
+  assert.match(router, /MAX_ATTEMPTS_PER_PROVIDER = 6/)
   assert.match(router, /providerAttemptsUsed >= MAX_ATTEMPTS_PER_PROVIDER/)
 })
 
@@ -109,6 +109,51 @@ test('§6 Gemini registry keeps the always-current -latest aliases', () => {
   assert.match(gemini, /'gemini-flash-latest'/)
   assert.match(gemini, /'gemini-flash-lite-latest'/)
   assert.match(gemini, /'gemini-2\.5-flash'/)
+})
+
+test('§6 Gemini registry leads with the current GA flash model', () => {
+  const registry = gemini.match(/export const GEMINI_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
+  assert.ok(registry.length > 0, 'GEMINI_MODELS registry found')
+  assert.match(registry, /'gemini-3\.5-flash'/, 'current GA flash model present')
+  const first = registry.match(/\[\s*'([a-z0-9.-]+)'/)?.[1]
+  assert.equal(first, 'gemini-flash-latest', 'the always-current alias leads the registry')
+})
+
+test('§6 no dead Gemini model ids remain (2.0 shut down 2026-06-01)', () => {
+  const registry = gemini.match(/export const GEMINI_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
+  const matrix = router.match(/export const MODEL_MATRIX[\s\S]*?\n\}/)?.[0] ?? ''
+  for (const block of [registry, matrix]) {
+    assert.doesNotMatch(block, /gemini-2\.0-flash/, '2.0 Flash shut down June 1, 2026')
+    assert.doesNotMatch(block, /gemini-1\.5/, '1.5 models are retired')
+  }
+})
+
+test('§6 pro-tier ids never lead a task matrix (free tier blocks them since 2026-04-01)', () => {
+  const matrix = router.match(/export const MODEL_MATRIX[\s\S]*?\n\}/)?.[0] ?? ''
+  const geminiRows = matrix.match(/GEMINI: \[[^\]]*\]/g) ?? []
+  assert.ok(geminiRows.length >= 5, 'all five task rows have GEMINI chains')
+  for (const row of geminiRows) {
+    const first = row.match(/\['([a-z0-9.-]+)'/)?.[1]
+    assert.ok(
+      first && !/pro/.test(first),
+      `GEMINI task chain must lead with a flash model (got ${first})`
+    )
+  }
+})
+
+test('§6 the Gemini adapter performs ONE model call per generate (no hidden walk)', () => {
+  const gen = gemini.match(/async generate\(request: AiRequest\): Promise<AiResponse> \{[\s\S]*?\n  \}/)?.[0] ?? ''
+  assert.ok(gen.length > 0, 'generate() found')
+  assert.doesNotMatch(gen, /candidates/, 'no internal candidate walk in the adapter')
+  assert.doesNotMatch(gen, /model not found/, 'no mislabeled model-not-found log in the adapter')
+})
+
+test('§6 the ROUTER extends each provider chain with its registry tail', () => {
+  assert.match(
+    router,
+    /availableModels\.filter\(\(m\) => !matrix\.includes\(m\)\)/,
+    'stale matrix entries can never strand a provider while valid ids remain'
+  )
 })
 
 test('§6 no retired Gemini 1.5 model ids remain', () => {
@@ -269,6 +314,28 @@ test('§17 the admin plans console renders the AI providers card', () => {
 test('§21 requestId propagates into AI logs', () => {
   assert.match(router, /generateOptions\.requestId \|\| request\.options\?\.requestId/)
   assert.match(router, /traceTag/)
+})
+
+// ---------------------------------------------------------------------------
+// §5/§23 — job-level transient-outage auto-retry (worker)
+// ---------------------------------------------------------------------------
+
+test('§23 planning-phase transient outages auto-retry with backoff instead of failing', () => {
+  assert.match(worker, /bumpAutoRetry/, 'rolls the job back to queued')
+  assert.match(worker, /transientCodes/, 'explicit retryable-code allowlist')
+  assert.match(worker, /!job\.blueprint/, 'planning phase only — nothing to duplicate')
+  assert.match(worker, /\(job\.autoRetries \?\? 0\) < 2/, 'bounded to 2 automatic retries')
+  assert.match(worker, /runAfter\(delayMs, internal\.worker\.processJob/, 're-invokes the worker after a delay')
+})
+
+test('§23 transient unit failures requeue on a delay, not instantly', () => {
+  assert.match(worker, /transientRequeue \? 45_000 : 0/, '45s delay on transient unit requeue')
+  assert.match(worker, /async function scheduleNext\([\s\S]*?delayMs = 0/, 'scheduleNext takes a delay')
+})
+
+test('§23 autoRetries is a distinct, optional job field (not user retryCount)', () => {
+  const schema = read('convex', 'schema.ts')
+  assert.match(schema, /autoRetries: v\.optional\(v\.number\(\)\)/)
 })
 
 test('§22 every provider request is timeout-bounded via AbortController', () => {

@@ -14,10 +14,25 @@
 //   - Uses the REST API via fetch — no SDK dependency, no Node-only APIs,
 //     so it also works inside Convex actions and edge runtimes.
 //   - System messages are hoisted into Gemini's `systemInstruction` field.
-//   - MODEL FALLBACK: Google retires/renames models per project (a key
-//     provisioned at a different time may not see every model). When the
-//     API answers 404 MODEL_NOT_FOUND, the provider transparently retries
-//     the remaining models in GEMINI_MODELS before surfacing an error.
+//   - MODEL FALLBACK lives in the ROUTER (single source of truth): this
+//     adapter performs EXACTLY ONE model call per generate() and throws on
+//     any failure. Walking candidates inside the adapter hid the real
+//     attempt count from the router's bounded budget — an earlier version
+//     silently walked up to 8 models per "attempt" and aborted the walk on
+//     the first non-404 error, stranding healthy cheaper models whenever
+//     the lead alias returned 503 high-demand.
+//
+// MODEL REGISTRY — verified 2026-08-28 against Google's docs + runtime
+// evidence (Convex logs + Admin AI probe):
+//   • Gemini 2.0 Flash / 2.0 Flash-Lite: SHUT DOWN June 1, 2026 — removed.
+//   • Pro-tier models (2.5 Pro, pro-latest): BLOCKED on the Gemini API free
+//     tier since April 1, 2026 — they 404 for free-tier keys. Kept at the
+//     TAIL of the registry for paid-tier keys only.
+//   • gemini-2.5-flash / gemini-2.5-flash-lite: scheduled shutdown Oct 16,
+//     2026; already 404 for some newer keys — kept near the tail.
+//   • gemini-3.5-flash is the current GA flash model.
+//   • The `-latest` aliases always resolve to the current model of their
+//     family and are verified live (HTTP 200/503-model-level, never 404).
 //
 // API SURFACE DECISION (AI-repair spec §1 — evaluated 2026-08, do not
 // migrate blindly):
@@ -38,7 +53,6 @@ import type {
 } from './types'
 import type { AiProvider } from './provider'
 import {
-  AiBaseError,
   ApiKeyMissingError,
   ConfigurationError,
   errorFromHttpStatus,
@@ -78,19 +92,22 @@ export function normalizeGeminiBaseUrl(raw: string): string {
 }
 
 /**
- * Models we're willing to route to on Gemini, tried in order until one
- * responds. The `-latest` aliases always resolve to Google's current model
- * of that family, so they survive per-project model retirements.
+ * Models we're willing to route to on Gemini, in priority order. The router
+ * walks this list (task matrix first, then the remaining ids below) with
+ * bounded attempts — see router.ts buildModelChain().
+ *
+ * The `-latest` aliases always resolve to Google's current model of that
+ * family, so they survive per-project model retirements. 2.0 ids are DEAD
+ * (shut down June 1, 2026) and must not be re-added.
  */
 export const GEMINI_MODELS = [
-  'gemini-flash-latest', // always-current flash alias (default)
-  'gemini-2.5-flash', // current generation flash
-  'gemini-2.0-flash', // previous generation flash (GA)
-  'gemini-flash-lite-latest', // always-current cheap alias
-  'gemini-2.5-flash-lite', // cheap tier
-  'gemini-2.0-flash-lite', // cheapest legacy
-  'gemini-pro-latest', // always-current pro alias (reasoning-heavy)
-  'gemini-2.5-pro', // reasoning-heavy work
+  'gemini-flash-latest', // always-current flash alias (verified live 2026-08-28)
+  'gemini-3.5-flash', // current GA flash generation
+  'gemini-flash-lite-latest', // always-current cheap alias (separate capacity pool)
+  'gemini-2.5-flash', // legacy flash — shutdown Oct 16, 2026; 404s on newer keys
+  'gemini-2.5-flash-lite', // legacy cheap tier — same Oct 16, 2026 sunset
+  'gemini-pro-latest', // pro alias — PAID TIER ONLY since 2026-04-01
+  'gemini-2.5-pro', // legacy pro — paid tier only; shutdown ≥ Oct 16, 2026
 ] as const
 
 interface GeminiPart {
@@ -164,48 +181,18 @@ export class GeminiProvider implements AiProvider {
     return Boolean(process.env.GEMINI_API_KEY)
   }
 
+  /**
+   * ONE model call per invocation — no hidden candidate walk. Model-level
+   * fallback (404 → next id, 503 → next id) is the ROUTER's job so that
+   * every HTTP round trip is counted against the provider's bounded attempt
+   * budget and every log line names the model that was actually called.
+   */
   async generate(request: AiRequest): Promise<AiResponse> {
     const apiKey = this.getApiKey()
-    const requestedModel = request.options?.model || this.defaultModel
+    const model = request.options?.model || this.defaultModel
     const timeoutMs = request.options?.timeoutMs ?? 60_000
     const startedAt = Date.now()
-
-    // Candidate models: the requested/default model first, then the rest of
-    // the allowed chain. Only an explicit 404 MODEL_NOT_FOUND advances to the
-    // next candidate — every other error surfaces immediately.
-    const candidates = [requestedModel, ...GEMINI_MODELS.filter((m) => m !== requestedModel)]
-
-    let lastError: unknown
-    for (const model of candidates) {
-      try {
-        return await this.generateWithModel(request, model, apiKey, timeoutMs, startedAt)
-      } catch (err) {
-        lastError = err
-        const isModelMissing =
-          err instanceof AiBaseError &&
-          err.code === 'MODEL_NOT_FOUND'
-        if (isModelMissing) {
-          console.warn(
-            `[AI] GEMINI model not found: ${model} — trying next candidate (${candidates.filter((m) => m !== model).length} left)`
-          )
-          continue
-        }
-        throw normalizeAiError('GEMINI', err)
-      }
-    }
-    // Every candidate 404'd. That pattern almost always means an endpoint or
-    // project problem, NOT that every model was retired — surface the exact
-    // endpoint so the operator can fix GEMINI_BASE_URL / the API key fast.
-    const endpoint = `${this.getBaseUrl()}/models/…:generateContent`
-    const lastMessage = lastError instanceof Error ? lastError.message : String(lastError)
-    throw new AiBaseError(
-      `GEMINI: all ${candidates.length} candidate models returned 404 on ${endpoint}. ` +
-        `Check GEMINI_BASE_URL (must include /v1beta) and that the API key belongs to a project with the Generative Language API enabled. ` +
-        `Last error: ${lastMessage.slice(0, 200)}`,
-      'MODEL_NOT_FOUND',
-      'GEMINI',
-      false
-    )
+    return this.generateWithModel(request, model, apiKey, timeoutMs, startedAt)
   }
 
   private async generateWithModel(

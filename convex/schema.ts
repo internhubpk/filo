@@ -261,6 +261,12 @@ export default defineSchema({
     estimatedCost: v.optional(v.number()),
     actualCost: v.optional(v.number()),
     retryCount: v.number(),
+    // Automatic transient-outage retries performed by the worker (spec §5/
+    // §14/§23): when the PLANNING AI call fails because every provider was
+    // transiently unavailable (503/429/timeout), the worker re-queues the
+    // job with backoff instead of failing it. Bounded — see worker.ts.
+    // Distinct from retryCount, which counts USER-initiated retries.
+    autoRetries: v.optional(v.number()),
 
     // Blueprint (the plan) persisted so units can be generated/resumed
     // independently, and so a resumed job doesn't re-plan.

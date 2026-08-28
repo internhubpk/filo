@@ -182,12 +182,22 @@ export const processJob = internalAction({
       }
 
       const pending = units
-        .filter((u) => u.status === "pending" || (stale.includes(u)))
+        .filter((u) => u.status === "pending" || stale.includes(u))
         .sort((a, b) => a.sequence - b.sequence);
 
       if (pending.length > 0) {
-        await generateOneUnit(ctx, jobId, pending[0], units, args.aiKeys);
-        await scheduleNext(ctx, jobId, args.aiKeys);
+        const transientRequeue = await generateOneUnit(
+          ctx,
+          jobId,
+          pending[0],
+          units,
+          args.aiKeys
+        );
+        // A unit requeued after a TRANSIENT AI failure retries on a delay
+        // (45s) instead of instantly — 503 "high demand" spikes usually
+        // clear in minutes, and instant re-loops just burn the 3 unit
+        // attempts within seconds (spec §5/§23).
+        await scheduleNext(ctx, jobId, args.aiKeys, transientRequeue ? 45_000 : 0);
         return;
       }
 
@@ -244,6 +254,49 @@ export const processJob = internalAction({
         );
       }
       console.error(`[WORKER] job ${jobId} failed:`, msg);
+
+      // TRANSIENT-OUTAGE AUTO-RETRY (spec §5/§14/§23): Google's 503 "high
+      // demand" spikes are explicitly temporary. If the PLANNING call failed
+      // because every configured provider was transiently unavailable, roll
+      // the job back to "queued" and re-invoke the worker after a backoff
+      // instead of failing it outright. Guards:
+      //   • planning phase only (no blueprint yet — nothing to duplicate,
+      //     so paid documents can never be generated twice by this path);
+      //   • bounded to 2 automatic retries (60s, then 120s);
+      //   • only for retryable failure codes — auth/model/config failures
+      //     are deterministic and fail fast;
+      //   • terminal states stay sticky (bumpAutoRetry re-checks).
+      const transientCodes = [
+        "PROVIDER_UNAVAILABLE",
+        "RATE_LIMITED",
+        "TIMEOUT",
+        "NETWORK_ERROR",
+        "UNKNOWN",
+      ];
+      const transientOutage =
+        err instanceof AllProvidersFailedError &&
+        !job.blueprint &&
+        (job.autoRetries ?? 0) < 2 &&
+        err.attempts.some((a) => transientCodes.includes(a.code));
+      if (transientOutage) {
+        const attemptNo = (job.autoRetries ?? 0) + 1;
+        const delayMs = attemptNo === 1 ? 60_000 : 120_000;
+        const bumped = await ctx.runMutation(internal.generation.bumpAutoRetry, {
+          jobId,
+          currentStage: `AI providers busy — retrying automatically (${attemptNo}/2)`,
+        });
+        if (bumped) {
+          console.warn(
+            `[WORKER] job ${jobId} transient AI outage — auto-retry ${attemptNo}/2 scheduled in ${delayMs / 1000}s`
+          );
+          await ctx.scheduler.runAfter(delayMs, internal.worker.processJob, {
+            jobId,
+            aiKeys: args.aiKeys,
+          });
+          return;
+        }
+      }
+
       await ctx.runMutation(internal.generation.setJobStatus, {
         jobId,
         status: "failed",
@@ -282,22 +335,27 @@ export const renderRetry = internalAction({
 
 // ==================== HELPERS ====================
 
+/**
+ * Generate ONE section unit. Returns true when the unit was requeued due to
+ * a TRANSIENT AI failure (caller then schedules the next invocation on a
+ * delay instead of immediately).
+ */
 async function generateOneUnit(
   ctx: any,
   jobId: string,
   unit: Record<string, any>,
   allUnits: Array<Record<string, any>>,
   aiKeys?: AiKeys
-): Promise<void> {
+): Promise<boolean> {
   await ctx.runMutation(internal.generation.claimUnit, { unitId: unit._id });
 
   const job = await ctx.runQuery(internal.generation.internalGetJob, { jobId });
   if (!job?.blueprint) {
     await ctx.runMutation(internal.generation.requeueUnit, { unitId: unit._id });
-    return;
+    return false;
   }
   // Honor cancellation claimed between scheduling and running.
-  if (job.status === "cancelled") return;
+  if (job.status === "cancelled") return false;
 
   const blueprint = job.blueprint as {
     title?: string;
@@ -316,7 +374,7 @@ async function generateOneUnit(
       unitId: unit._id,
       error: "blueprint section missing",
     });
-    return;
+    return false;
   }
 
   // Bounded continuity: summaries of the previous two completed units.
@@ -374,6 +432,7 @@ async function generateOneUnit(
       inputTokens: response.usage?.promptTokens ?? 0,
       outputTokens: response.usage?.completionTokens ?? 0,
     });
+    return false;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     console.error(`[WORKER] unit ${unit._id} (${section.title}) failed:`, msg);
@@ -386,11 +445,15 @@ async function generateOneUnit(
         unitId: unit._id,
         error: userSafeAiMessage(err),
       });
+      return false;
     } else {
-      // Transient — put it back in the queue (claim already bumped attempts).
+      // Transient — put it back in the queue (claim already bumped
+      // attempts). The caller delays the next invocation so the spike can
+      // clear (spec §23).
       await ctx.runMutation(internal.generation.requeueUnit, {
         unitId: unit._id,
       });
+      return true;
     }
   }
 }
@@ -418,8 +481,13 @@ function safeParseComponents(raw: string): Array<{ type: string; content: unknow
   return normalized;
 }
 
-async function scheduleNext(ctx: any, jobId: string, aiKeys?: AiKeys) {
-  await ctx.scheduler.runAfter(0, internal.worker.processJob, {
+async function scheduleNext(
+  ctx: any,
+  jobId: string,
+  aiKeys?: AiKeys,
+  delayMs = 0
+) {
+  await ctx.scheduler.runAfter(delayMs, internal.worker.processJob, {
     jobId,
     aiKeys: aiKeys ?? undefined,
   });
