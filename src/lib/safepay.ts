@@ -68,8 +68,18 @@ import {
   isSubscriptionFlowConfigured as configIsSubscriptionFlow,
   allowUnsignedWebhooks,
   getPaymentModel,
+  getSafepayAuthDiagnostics,
   type SafepayMode,
 } from "@/lib/safepay/config";
+import {
+  SafepayApiError,
+  diagnoseSafepayFailure,
+  suspectedPublicKeyError,
+} from "@/lib/safepay/errors";
+
+export { SafepayApiError, diagnosisPayload, diagnoseSafepayFailure, suspectedPublicKeyError } from "@/lib/safepay/errors";
+export type { SafepayFailureDiagnosis, SafepayFailureKind } from "@/lib/safepay/errors";
+export { getSafepayAuthDiagnostics, type SafepayAuthDiagnostics } from "@/lib/safepay/config";
 
 export type { SafepayMode };
 
@@ -131,7 +141,21 @@ export interface CheckoutSession {
 export async function createCheckoutSession(input: CheckoutSessionInput): Promise<CheckoutSession> {
   const config = getSafepayConfig();
   if (!config.secretKey) {
-    throw new Error("SAFEPAY_SECRET_KEY is not configured — billing is disabled (fail-closed)");
+    throw new SafepayApiError({
+      kind: "auth_secret_missing",
+      status: 0,
+      endpoint: "pre-flight",
+      safepayErrors: [],
+      message:
+        "SAFEPAY_SECRET_KEY is not set on this deployment — checkout is fail-closed. " +
+        "Set it to the dashboard's Private API Secret Key (Developers → API, the SECOND item) on Vercel, then redeploy.",
+    });
+  }
+  // The Public API Key (sec_…) can NEVER authenticate as a merchant secret —
+  // per the current docs only the public key carries that prefix. Failing here
+  // gives the operator the exact fix instead of Safepay's generic 401.
+  if (config.secretKey.toLowerCase().startsWith("sec_")) {
+    throw suspectedPublicKeyError(config.mode);
   }
 
   if (getPaymentModel() === "one_time") {
@@ -164,7 +188,15 @@ async function createSubscriptionCheckout(
 
   if (!tokenRes.ok) {
     const text = await tokenRes.text().catch(() => "");
-    throw new Error(`Safepay passport token failed (${tokenRes.status}): ${text.slice(0, 300)}`);
+    throw new SafepayApiError(
+      diagnoseSafepayFailure({
+        status: tokenRes.status,
+        endpoint: "/client/passport/v1/token",
+        bodyText: text,
+        mode: config.mode,
+        apiBase: config.apiBase,
+      })
+    );
   }
 
   const tokenJson = (await tokenRes.json().catch(() => null)) as { data?: unknown } | null;
@@ -218,7 +250,15 @@ async function createOneTimeCheckout(
 
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(`Safepay order/v1/init failed (${res.status}): ${text.slice(0, 300)}`);
+    throw new SafepayApiError(
+      diagnoseSafepayFailure({
+        status: res.status,
+        endpoint: "/order/v1/init",
+        bodyText: text,
+        mode: config.mode,
+        apiBase: config.apiBase,
+      })
+    );
   }
 
   const json = (await res.json().catch(() => null)) as
@@ -348,11 +388,23 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
   ];
 
   const rejections: string[] = [];
+  let authDiagnosis: string | undefined;
   for (const [label, headers] of attempts) {
     try {
       const res = await fetch(url, { headers, cache: "no-store" });
       if (!res.ok) {
+        const text = await res.text().catch(() => "");
         rejections.push(`${label}: HTTP ${res.status}`);
+        if (label === "secret-key" && res.status === 401) {
+          // Turn Safepay's terse 401 into the operator fix (no secret values).
+          authDiagnosis = diagnoseSafepayFailure({
+            status: res.status,
+            endpoint: "/reporter/api/v1/payments/{tracker}",
+            bodyText: text,
+            mode: config.mode,
+            apiBase: config.apiBase,
+          }).message;
+        }
         continue;
       }
       const json = (await res.json().catch(() => null)) as
@@ -370,7 +422,9 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
   return {
     ok: false,
     outcome: { kind: "unknown" },
-    error: `Safepay tracker API rejected all auth variants — ${rejections.join(" · ").slice(0, 300)}`,
+    error: authDiagnosis
+      ? `Safepay tracker API rejected the configured Secret Key — ${authDiagnosis}`
+      : `Safepay tracker API rejected all auth variants — ${rejections.join(" · ").slice(0, 300)}`,
   };
 }
 

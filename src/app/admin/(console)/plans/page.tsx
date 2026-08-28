@@ -7,8 +7,8 @@
 // Every change is audited server-side.
 // =============================================================================
 
-import { useMemo, useState } from "react";
-import { Loader2, Plus, Pencil, Power, RefreshCw } from "lucide-react";
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { Loader2, Plus, Pencil, PlugZap, Power, RefreshCw } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
 import { useApi } from "@/hooks/use-api";
@@ -64,12 +64,66 @@ const EMPTY_FORM = {
   safepayPlanIdYearly: "",
 };
 
+interface SafepayStatus {
+  mode: string;
+  apiBase: string;
+  checkoutBase: string;
+  paymentModel: string;
+  secretKey: { envVar: string; label: string; configured: boolean; preview?: string; looksLikePublicKey: boolean; looksMalformed: boolean };
+  webhookSecret: { envVar: string; label: string; configured: boolean };
+  publicKey: { envVar: string; label: string; configured: boolean };
+  ignoredLegacyVarsDetected: string[];
+  warnings: string[];
+  probe: { ok: boolean; httpStatus: number | null; message: string; kind?: string } | null;
+}
+
 export default function AdminPlansPage() {
   const plans = useApi<PlanRow[]>(() => apiClient.adminPlans().then((r) => (r.success ? (r.data as unknown as PlanRow[]) : null)));
   const [editing, setEditing] = useState<typeof EMPTY_FORM | null>(null);
   const [saving, setSaving] = useState(false);
   const [syncing, setSyncing] = useState(false);
   const [toggleTarget, setToggleTarget] = useState<PlanRow | null>(null);
+  const [safepayStatus, setSafepayStatus] = useState<SafepayStatus | null>(null);
+  const [statusLoading, setStatusLoading] = useState(false);
+  const [probing, setProbing] = useState(false);
+
+  const refreshSafepayStatus = useCallback(async () => {
+    setStatusLoading(true);
+    try {
+      const res = await apiClient.adminSafepayStatus(false);
+      setSafepayStatus(res.success ? (res.data as unknown as SafepayStatus) : null);
+    } finally {
+      setStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSafepayStatus();
+  }, [refreshSafepayStatus]);
+
+  /** Live authentication probe against Safepay's passport endpoint. */
+  async function probeSafepay() {
+    setProbing(true);
+    try {
+      const res = await apiClient.adminSafepayStatus(true);
+      if (!res.success || !res.data) {
+        toast.error("Could not run the Safepay probe", { description: res.error });
+        return;
+      }
+      const status = res.data as unknown as SafepayStatus;
+      setSafepayStatus(status);
+      if (status.probe?.ok) {
+        toast.success("Safepay connection OK", { description: status.probe.message });
+      } else {
+        toast.error("Safepay rejected the probe", {
+          description: status.probe?.message ?? "Unknown failure",
+          duration: 15000,
+        });
+      }
+    } finally {
+      setProbing(false);
+    }
+  }
 
   const rows = useMemo(() => plans.data ?? [], [plans.data]);
 
@@ -183,6 +237,53 @@ export default function AdminPlansPage() {
           </>
         }
       />
+
+      {/* Safepay connection status — first stop whenever checkout or plan sync fails */}
+      <div className="rounded-lg border bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <PlugZap className="size-4 text-muted-foreground" />
+            <span className="text-sm font-medium">Safepay connection</span>
+            {safepayStatus && (
+              <Badge variant="outline" className="font-mono text-[11px]">
+                {safepayStatus.mode} · {safepayStatus.paymentModel}
+              </Badge>
+            )}
+            {statusLoading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+          </div>
+          <Button variant="outline" size="sm" onClick={() => void probeSafepay()} disabled={probing}>
+            {probing ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <PlugZap className="mr-1.5 size-4" />}
+            Test Safepay connection
+          </Button>
+        </div>
+        {safepayStatus && (
+          <div className="mt-3 space-y-2">
+            <div className="flex flex-wrap gap-x-6 gap-y-1 font-mono text-[11px] text-muted-foreground">
+              <span className={safepayStatus.secretKey.configured ? "" : "text-destructive"}>
+                SAFEPAY_SECRET_KEY: {safepayStatus.secretKey.configured ? safepayStatus.secretKey.preview : "NOT SET"}
+              </span>
+              <span className={safepayStatus.webhookSecret.configured ? "" : "text-amber-600 dark:text-amber-400"}>
+                SAFEPAY_WEBHOOK_SECRET: {safepayStatus.webhookSecret.configured ? "set" : "not set"}
+              </span>
+              <span>SAFEPAY_PUBLIC_KEY: {safepayStatus.publicKey.configured ? "set" : "not set"}</span>
+              <span>{safepayStatus.apiBase}</span>
+            </div>
+            {(safepayStatus.warnings.length > 0 || safepayStatus.ignoredLegacyVarsDetected.length > 0) && (
+              <ul className="list-disc space-y-0.5 pl-5 text-xs text-amber-600 dark:text-amber-400">
+                {safepayStatus.warnings.map((w, i) => (
+                  <li key={i}>{w}</li>
+                ))}
+              </ul>
+            )}
+            {safepayStatus.probe && (
+              <p className={`text-xs ${safepayStatus.probe.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
+                {safepayStatus.probe.ok ? "PASS" : "FAIL"}
+                {safepayStatus.probe.httpStatus != null ? ` (HTTP ${safepayStatus.probe.httpStatus})` : ""}: {safepayStatus.probe.message}
+              </p>
+            )}
+          </div>
+        )}
+      </div>
 
       <AdminTable
         columns={["Plan", "Monthly", "Yearly", "Generations/mo", "Storage", "Safepay plan IDs", "State", "Actions"]}

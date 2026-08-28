@@ -311,7 +311,12 @@ function BillingContent() {
     try {
       const res = await apiClient.startCheckout({ planId: plan._id, interval });
       if (!res.success || !res.data?.checkoutUrl) {
-        toast.error(res.error || "Could not start checkout");
+        // Safepay configuration failures carry a long operator-actionable
+        // diagnosis — render it as the description, not a wall-of-text title.
+        toast.error("Could not start checkout", {
+          description: res.error || "Please try again in a moment.",
+          duration: 15000,
+        });
         return;
       }
       // Surface any appUrl misconfiguration BEFORE the user pays — this is

@@ -21,7 +21,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, serverToken, convexQuery, convexMutation, jsonError, appUrl, appUrlDiagnostics } from "@/lib/billing-server";
-import { createCheckoutSession, isSafepayConfigured, isSubscriptionFlowConfigured, getPaymentModel } from "@/lib/safepay";
+import { createCheckoutSession, isSafepayConfigured, isSubscriptionFlowConfigured, getPaymentModel, getSafepayAuthDiagnostics, SafepayApiError, diagnosisPayload } from "@/lib/safepay";
 
 interface PlanRow {
   _id: string;
@@ -37,13 +37,30 @@ interface PlanRow {
 }
 
 export async function POST(request: NextRequest) {
+  // Set as soon as the pending subscription exists, so the catch block can
+  // retire it (pending → failed) instead of leaving a ghost "awaiting
+  // payment" row when Safepay refuses the session.
+  let pendingSubscriptionId: string | null = null;
+  let pendingUserId: string | null = null;
   try {
     const auth = await requireUser(request);
     if (!auth.ok) return auth.response;
     const { user } = auth.data;
 
     if (!isSafepayConfigured()) {
-      return jsonError(503, "Payments are not configured on this deployment", "BILLING_UNCONFIGURED");
+      const diag = getSafepayAuthDiagnostics();
+      console.error("[billing/checkout] Safepay not configured:", diag.warnings);
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            "SAFEPAY_SECRET_KEY is not set on this deployment — checkout is fail-closed. " +
+            "Set it to the dashboard's Private API Secret Key (Developers → API, the SECOND item) on Vercel, then redeploy.",
+          code: "SAFEPAY_UNCONFIGURED",
+          diagnosis: diag.warnings,
+        },
+        { status: 503 }
+      );
     }
 
     // Fail FAST with a precise diagnostic when the shared secret is missing:
@@ -118,6 +135,8 @@ export async function POST(request: NextRequest) {
       amount,
       currency: plan.currency || "PKR",
     });
+    pendingSubscriptionId = subscriptionId;
+    pendingUserId = user.id;
 
     // ---- Create the Safepay checkout session (secret stays server-side) ----
     const returnBase = appUrl();
@@ -179,6 +198,31 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
+    // Safepay rejected the request (or our pre-flight refused an invalid
+    // credential). This is an upstream/configuration failure, NOT a random
+    // 500: answer 502 with a structured, operator-actionable diagnosis and
+    // retire any pending rows this attempt created.
+    if (error instanceof SafepayApiError) {
+      const diag = getSafepayAuthDiagnostics();
+      console.error("[API /billing/checkout] Safepay failure:", error.diagnosis.safepayErrors);
+      if (pendingSubscriptionId && pendingUserId) {
+        await convexMutation("billing:failPendingCheckout", {
+          serverToken: serverToken(),
+          subscriptionId: pendingSubscriptionId,
+          userId: pendingUserId,
+          reason: error.diagnosis.message.slice(0, 300),
+        }).catch((e) => console.warn("[billing/checkout] failed to retire pending checkout:", e));
+      }
+      return NextResponse.json(
+        {
+          success: false,
+          error: error.diagnosis.message,
+          code: "SAFEPAY_ERROR",
+          diagnosis: diagnosisPayload(error.diagnosis, diag),
+        },
+        { status: error.diagnosis.status === 0 ? 503 : 502 }
+      );
+    }
     console.error("[API /billing/checkout] Error:", error);
     const message = error instanceof Error ? error.message : "Failed to start checkout";
     // Surface the real cause to the caller (Vercel logs carry the full stack).

@@ -25,7 +25,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireAdminAccess, serverToken, convexQuery, convexMutation } from "@/lib/billing-server";
-import { getSafepayConfig } from "@/lib/safepay";
+import { getSafepayConfig, getSafepayAuthDiagnostics, SafepayApiError, diagnoseSafepayFailure } from "@/lib/safepay";
 
 interface PlanRow {
   _id: string;
@@ -74,10 +74,22 @@ export async function POST(request: NextRequest) {
 
     const config = getSafepayConfig();
     if (!config.secretKey) {
+      const diag = getSafepayAuthDiagnostics();
       return NextResponse.json(
-        { success: false, error: "SAFEPAY_SECRET_KEY is not configured on this deployment", code: "SAFEPAY_UNCONFIGURED" },
+        {
+          success: false,
+          error: diag.warnings[0] ?? "SAFEPAY_SECRET_KEY is not configured on this deployment",
+          code: "SAFEPAY_UNCONFIGURED",
+        },
         { status: 503 }
       );
+    }
+    // The Public API Key can never authenticate — refuse with the fix instead
+    // of a per-plan 401 wall.
+    if (config.secretKey.toLowerCase().startsWith("sec_")) {
+      const { suspectedPublicKeyError } = await import("@/lib/safepay/errors");
+      const err = suspectedPublicKeyError(config.mode);
+      return NextResponse.json({ success: false, error: err.message, code: "SAFEPAY_SUSPECTED_PUBLIC_KEY" }, { status: 503 });
     }
 
     const plans = (await convexQuery<PlanRow[]>("plans:getAllPlans", {})) as PlanRow[];
@@ -132,6 +144,25 @@ export async function POST(request: NextRequest) {
 
           const text = await res.text().catch(() => "");
           if (!res.ok) {
+            // Safepay 401s are configuration problems — surface the operator
+            // diagnosis, not a raw HTTP line.
+            if (res.status === 401) {
+              results.push({
+                plan: plan.name,
+                interval,
+                status: "failed",
+                detail: new SafepayApiError(
+                  diagnoseSafepayFailure({
+                    status: res.status,
+                    endpoint: "/client/plans/v1/",
+                    bodyText: text,
+                    mode: config.mode,
+                    apiBase: config.apiBase,
+                  })
+                ).message,
+              });
+              continue;
+            }
             results.push({
               plan: plan.name,
               interval,

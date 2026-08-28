@@ -523,6 +523,30 @@ class ApiClient {
     })
   }
 
+  /**
+   * Safepay operator diagnostics (admin-only). GET (probe=false) returns the
+   * configuration state (masked previews, warnings, never secret values);
+   * POST (probe=true) additionally performs a LIVE authentication probe
+   * against Safepay's passport endpoint using the configured Secret Key.
+   */
+  async adminSafepayStatus(probe: boolean): Promise<ApiResponse<{
+    mode: string
+    apiBase: string
+    checkoutBase: string
+    paymentModel: string
+    secretKey: { envVar: string; label: string; configured: boolean; preview?: string; looksLikePublicKey: boolean; looksMalformed: boolean }
+    webhookSecret: { envVar: string; label: string; configured: boolean }
+    publicKey: { envVar: string; label: string; configured: boolean }
+    ignoredLegacyVarsDetected: string[]
+    warnings: string[]
+    probe: { ok: boolean; httpStatus: number | null; message: string; kind?: string; safepayErrors?: string[] } | null
+  }>> {
+    return this.request('/admin/billing/safepay-status', {
+      method: probe ? 'POST' : 'GET',
+      ...(probe ? { body: JSON.stringify({}) } : {}),
+    })
+  }
+
   async adminPayments(status?: string): Promise<ApiResponse<any[]>> {
     return this.request(`/admin/payments${status ? `?status=${status}` : ''}`)
   }

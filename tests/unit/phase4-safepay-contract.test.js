@@ -43,15 +43,41 @@ test('Safepay credentials use the current dashboard names', () => {
   assert.ok(config.includes('SAFEPAY_SANDBOX'), 'config must read SAFEPAY_SANDBOX (mode flag)')
 })
 
-test('legacy SAFEPAY_BEACON_SECRET / SAFEPAY_V1_SECRET exist only as deprecated aliases', () => {
-  // All reads must live in config.ts; the lib itself must not read them.
-  const libReadsLegacy = /process\.env\.(SAFEPAY_BEACON_SECRET|SAFEPAY_V1_SECRET)/.test(lib)
-  assert.equal(libReadsLegacy, false, 'safepay.ts must not read legacy secret names directly')
-  // V1 secret is gone entirely — no code path may require it.
-  assert.equal(config.includes('SAFEPAY_V1_SECRET'), false, 'SAFEPAY_V1_SECRET must be removed entirely')
-  // Beacon secret may exist ONLY as a deprecated alias inside config.ts.
-  const aliasOk = config.includes('SAFEPAY_BEACON_SECRET') && config.includes('DEPRECATED')
-  assert.ok(aliasOk, 'beacon secret may appear in config only as a documented deprecated alias')
+test('legacy SAFEPAY_BEACON_SECRET / SAFEPAY_V1_SECRET are fully removed — no aliases', () => {
+  // The old beacon alias SILENTLY sent an invalid value to Safepay and masked
+  // a misconfiguration (checkout 401 "could not fetch client"). It must never
+  // be read again: a missing Secret Key now fails closed with a 503 that
+  // names the variable.
+  const libReadsLegacy = /process\.env\.(SAFEPAY_BEACON_SECRET|SAFEPAY_V1_SECRET|SAFEPAY_MODE)/.test(lib)
+  assert.equal(libReadsLegacy, false, 'safepay.ts must not read legacy names directly')
+  assert.equal(config.includes('process.env.SAFEPAY_V1_SECRET'), false, 'SAFEPAY_V1_SECRET must not be read')
+  assert.equal(config.includes('process.env.SAFEPAY_BEACON_SECRET'), false, 'SAFEPAY_BEACON_SECRET must not be read — strict SAFEPAY_SECRET_KEY only')
+  assert.equal(config.includes('process.env.SAFEPAY_MODE'), false, 'SAFEPAY_MODE must not be read — strict SAFEPAY_SANDBOX only')
+  // The legacy names may still APPEAR in config.ts — but only as ignored/documented legacy references.
+  assert.ok(config.includes('IGNORED_LEGACY_VARS'), 'config must document the ignored legacy vars for operator cleanup')
+})
+
+test('auth failures produce operator-actionable diagnoses (never opaque 500s)', () => {
+  const errorsModule = readFileSync(resolve(REPO_ROOT, 'src', 'lib', 'safepay', 'errors.ts'), 'utf8')
+  // The exact live-verified rejection body Safepay returns for an unknown
+  // merchant secret (probed against sandbox.api.getsafepay.com):
+  assert.ok(errorsModule.includes('could not fetch client'), 'must detect the "unknown secret" rejection')
+  assert.ok(errorsModule.includes('auth_secret_rejected'), 'must classify it as a config problem')
+  assert.ok(errorsModule.includes('Private API Secret Key'), 'diagnosis must name the right dashboard credential')
+  assert.ok(errorsModule.includes('SafepayApiError'), 'failures must throw SafepayApiError (structured)')
+  // The checkout route must map SafepayApiError to 502 + diagnosis, not 500.
+  assert.ok(checkoutRoute.includes('SafepayApiError'), 'checkout route must special-case Safepay failures')
+  assert.ok(checkoutRoute.includes('billing:failPendingCheckout'), 'failed sessions must retire their pending rows')
+})
+
+test('the Public API Key (sec_…) is detected before it is ever sent as a secret', () => {
+  // Per current docs only the PUBLIC API Key starts with "sec_" — if that
+  // value lands in SAFEPAY_SECRET_KEY we refuse pre-flight instead of
+  // producing Safepay's cryptic 401.
+  assert.ok(config.includes('looksLikePublicKey'), 'config diagnostics must flag a sec_ value in the secret slot')
+  const errorsModule = readFileSync(resolve(REPO_ROOT, 'src', 'lib', 'safepay', 'errors.ts'), 'utf8')
+  assert.ok(errorsModule.includes('suspectedPublicKeyError'), 'pre-flight guard must exist')
+  assert.ok(lib.includes('startsWith("sec_")'), 'checkout must refuse sec_ values before calling Safepay')
 })
 
 test('no file outside safepay/config.ts reads process.env.SAFEPAY_*', () => {
@@ -206,4 +232,12 @@ test('.env.example documents the current credential set', () => {
   assert.equal(envExample.includes('SAFEPAY_BEACON_SECRET='), false, 'no legacy beacon var in the example')
   assert.equal(envExample.includes('SAFEPAY_V1_SECRET='), false, 'no legacy v1 var in the example')
   assert.equal(envExample.includes('SAFEPAY_MODE='), false, 'no legacy mode var in the example')
+  // The sec_ prefix belongs to the PUBLIC key per current docs — the example
+  // must not suggest pasting a sec_ value into the secret slot (this exact
+  // mistake produced the checkout 401). The secret placeholder must NOT start
+  // with sec_.
+  const secretLine = envExample.split('\n').find((l) => l.startsWith('SAFEPAY_SECRET_KEY='))
+  assert.ok(secretLine, 'secret key line must exist')
+  assert.equal(secretLine.includes('sec_'), false, 'SAFEPAY_SECRET_KEY placeholder must not suggest a sec_ value')
+  assert.ok(envExample.includes('SECOND item'), 'example must point operators at the right dashboard item')
 })

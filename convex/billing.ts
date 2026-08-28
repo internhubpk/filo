@@ -562,6 +562,59 @@ export const recordCheckoutStarted = mutation({
   },
 });
 
+/**
+ * Fail a checkout that never reached Safepay (or was rejected before a
+ * session existed — e.g. an invalid SAFEPAY_SECRET_KEY). Pending-only and
+ * idempotent: active/ended/failed rows are never touched. Keeps the billing
+ * page and payment history honest — a customer whose checkout 500'd must not
+ * see an endless "waiting for payment confirmation" banner.
+ */
+export const failPendingCheckout = mutation({
+  args: {
+    serverToken: v.string(),
+    subscriptionId: v.id("subscriptions"),
+    userId: v.id("users"),
+    reason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    const now = Date.now();
+    const sub = await ctx.db.get(args.subscriptionId);
+    if (!sub || sub.userId !== args.userId) throw new Error("Subscription not found");
+    if (sub.status !== "pending") return { applied: false };
+
+    await ctx.db.patch(args.subscriptionId, {
+      status: "failed",
+      endedAt: now,
+      updatedAt: now,
+    });
+
+    const pendingPayments = await ctx.db
+      .query("payments")
+      .withIndex("by_subscriptionId", (q: any) => q.eq("subscriptionId", args.subscriptionId))
+      .filter((q: any) => q.eq(q.field("status"), "pending"))
+      .collect();
+    for (const p of pendingPayments as any[]) {
+      await ctx.db.patch(p._id, {
+        status: "failed",
+        failureReason: args.reason.slice(0, 300),
+        updatedAt: now,
+      });
+    }
+
+    await ctx.db.insert("auditLogs", {
+      actorId: args.userId,
+      actorType: "system",
+      action: "billing.checkout_failed",
+      targetType: "subscription",
+      targetId: args.subscriptionId,
+      metadata: { reason: args.reason.slice(0, 300) },
+      createdAt: now,
+    });
+    return { applied: true };
+  },
+});
+
 /** User-initiated cancel at period end (entitlement preserved until period end). */
 export const setSubscriptionCancelAtPeriodEnd = mutation({
   args: {
