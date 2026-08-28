@@ -374,3 +374,42 @@ test('§11 client warns at boot when R2_ACCESS_KEY_ID length is not 32', () => {
   assert.match(client, /ACCESS_KEY_ID\.length !== 32/, 'length check must exist')
   assert.match(client, /Access Key IDs are exactly 32 characters/, 'warning must explain the rule')
 })
+
+// ---------------------------------------------------------------------------
+// §12 — admin probe hardening (the verifier must itself be R2-correct)
+//       The user's first stop after fixing credentials is POST
+//       /api/admin/r2/status — if that probe's own S3Client lacks the R2
+//       pins it reports false failures and sends the user chasing ghosts.
+// ---------------------------------------------------------------------------
+
+test('§12 admin probe client carries the same R2 compatibility pins as the main client', () => {
+  const probe = adminR2Route.match(/new S3Client\(\{[\s\S]*?\}\);/)?.[0] || ''
+  assert.ok(probe, 'probe must construct an S3Client')
+  assert.match(
+    probe,
+    /forcePathStyle:\s*true/,
+    'without path-style the probe resolves <bucket>.<account>.r2.cloudflarestorage.com — DNS failure masquerading as a network outage'
+  )
+  assert.match(probe, /requestChecksumCalculation:\s*"WHEN_REQUIRED"/)
+  assert.match(probe, /responseChecksumValidation:\s*"WHEN_REQUIRED"/)
+})
+
+test('§12 snapshot reports the Access Key ID LENGTH only — never its value', () => {
+  assert.match(adminR2Route, /keyId\.length === 32/)
+  assert.match(
+    adminR2Route,
+    /R2 requires exactly 32/,
+    'a wrong-length key must be called out directly in the snapshot'
+  )
+  assert.match(adminR2Route, /R2_ACCESS_KEY_ID: keyIdReport/)
+  assert.doesNotMatch(
+    adminR2Route,
+    /R2_ACCESS_KEY_ID: keyId[,}]/,
+    'the raw key value must never be echoed into the config snapshot'
+  )
+})
+
+test('§12 probe hint names the JWT / 32-char Access Key trap for InvalidArgument', () => {
+  assert.match(adminR2Route, /s3ErrorName === "InvalidArgument"/, 'hintFor must special-case InvalidArgument')
+  assert.match(adminR2Route, /exactly 32 characters/)
+})

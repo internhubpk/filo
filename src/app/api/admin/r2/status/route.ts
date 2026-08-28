@@ -33,11 +33,22 @@ function configSnapshot() {
   const accountId = process.env.R2_ACCOUNT_ID || "";
   const bucket = process.env.R2_BUCKET_NAME || "filo-uploads";
   const endpoint = process.env.R2_ENDPOINT || `https://${accountId}.r2.cloudflarestorage.com`;
+  // Report the LENGTH of the Access Key ID — never its value. R2 Access Key
+  // IDs are exactly 32 characters, so a credential from the wrong source
+  // (the R2 token JWT, a Cloudflare account API token, an AWS IAM key, or a
+  // truncated/quoted paste) is visible here as a wrong length with ZERO
+  // secret exposure.
+  const keyId = process.env.R2_ACCESS_KEY_ID || "";
+  const keyIdReport = keyId
+    ? keyId.length === 32
+      ? "set (length 32 — correct R2 format)"
+      : `set (length ${keyId.length} — R2 requires exactly 32; this value is NOT a valid R2 Access Key ID)`
+    : "MISSING";
   return {
     configured: isR2Configured(),
     variables: {
       R2_ACCOUNT_ID: accountId ? "set" : "MISSING",
-      R2_ACCESS_KEY_ID: process.env.R2_ACCESS_KEY_ID ? "set" : "MISSING",
+      R2_ACCESS_KEY_ID: keyIdReport,
       R2_SECRET_ACCESS_KEY: process.env.R2_SECRET_ACCESS_KEY ? "set" : "MISSING",
       R2_BUCKET_NAME: bucket ? bucket : "MISSING (defaults to filo-uploads)",
       R2_ENDPOINT: process.env.R2_ENDPOINT ? "set (override)" : "derived from account id",
@@ -83,9 +94,18 @@ export async function POST(request: NextRequest) {
     // ---- LIVE probe: list 1 key (cheapest authenticated call) --------------
     const { S3Client, ListObjectsV2Command } = await import("@aws-sdk/client-s3");
     const accountId = process.env.R2_ACCOUNT_ID || "";
+    // Same R2 compatibility pins as src/lib/r2/client.ts — the probe must
+    // obey the same rules as the client it is diagnosing, otherwise it can
+    // report its OWN false failures: without forcePathStyle the SDK resolves
+    // <bucket>.<account>.r2.cloudflarestorage.com (virtual-host style), which
+    // does not exist on R2 → ENOTFOUND looks like a network outage; and SDK
+    // v3.729+ checksum defaults can trigger request rejections.
     const client = new S3Client({
       region: "auto",
       endpoint: process.env.R2_ENDPOINT || `https://${accountId}.r2.cloudflarestorage.com`,
+      forcePathStyle: true,
+      requestChecksumCalculation: "WHEN_REQUIRED",
+      responseChecksumValidation: "WHEN_REQUIRED",
       credentials: {
         accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
         secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
@@ -139,6 +159,8 @@ function hintFor(kind: string, s3ErrorName: string): string {
     case "AUTH":
       if (s3ErrorName === "InvalidAccessKeyId")
         return "The Access Key ID is wrong or the API token was deleted. Create a new R2 API token (Object Read & Write, scoped to this bucket).";
+      if (s3ErrorName === "InvalidArgument")
+        return "The Access Key ID format is invalid (R2 Access Key IDs are exactly 32 characters). This is the token JWT or another non-R2 key — copy the 32-character \"Access Key ID\" from R2 → Manage API Tokens into R2_ACCESS_KEY_ID, with no quotes or spaces.";
       if (s3ErrorName === "SignatureDoesNotMatch")
         return "The Secret Access Key is wrong for this Access Key. Re-copy it from the R2 API token page.";
       if (s3ErrorName === "AccessDenied")
