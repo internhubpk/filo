@@ -159,10 +159,14 @@ test('§6 Gemini registry is direct-Google and cost-ordered', () => {
   assert.ok(registry.length > 0, 'GEMINI_MODELS registry found')
   const ids = [...registry.matchAll(/'([a-z0-9.-]+)'/g)].map((m) => m[1])
   assert.deepEqual(ids, [
-    'gemini-2.5-flash-lite',
-    'gemini-2.5-flash',
-    'gemini-2.5-pro',
+    'gemini-3.5-flash-lite',
+    'gemini-3.6-flash',
+    'gemini-3.1-pro-preview',
   ], 'registry must be exactly the 3 Gemini ids in cost order')
+  // VERIFIED 2026-08-29: Google retired the gemini-2.5 family for new
+  // deployments (404 "no longer available to new users"); its error message
+  // names the 3.x replacement ids asserted above. The 2.5 ids must not return.
+  assert.doesNotMatch(gemini, /gemini-2\.5/, 'retired gemini-2.5 ids are gone')
 })
 
 test('§6 task matrices lead with cheap models (operator budget optimization)', () => {
@@ -182,7 +186,7 @@ test('§6 task matrices lead with cheap models (operator budget optimization)', 
   for (const row of geminiRows) {
     const first = row.match(/\['([a-z0-9.-]+)'/)?.[1]
     assert.ok(
-      first === 'gemini-2.5-flash-lite' || first === 'gemini-2.5-flash',
+      first === 'gemini-3.5-flash-lite' || first === 'gemini-3.6-flash',
       `gemini chains must lead with a cheap-tier model (got ${first})`
     )
   }

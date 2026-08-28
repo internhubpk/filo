@@ -60,6 +60,9 @@ export type AiTask =
  * deepseek-v4-flash, glm-5.3, gpt-5.6-sol, claude-opus-4-8, claude-opus-5.
  * GEMINI ids are Google's Generative Language API models (DIRECT — not
  * reachable through any gateway), cost-ordered flash-lite → flash → pro.
+ * Gemini family is the 3.x line (gemini-3.5-flash-lite, gemini-3.6-flash,
+ * gemini-3.1-pro-preview) — Google retired the 2.5 family for new
+ * deployments on 2026-08-29 (404 MODEL_NOT_FOUND with replacement ids).
  *
  * Selection is COST-OPTIMIZED FOR THE OPERATOR ("budget to me, not the
  * users"): the cheapest capable model leads every task; premium models are
@@ -68,29 +71,29 @@ export type AiTask =
 export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly string[]>>> = {
   fast: {
     AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3'],
-    GEMINI: ['gemini-2.5-flash-lite', 'gemini-2.5-flash'],
+    GEMINI: ['gemini-3.5-flash-lite', 'gemini-3.6-flash'],
     OPENAI: ['gpt-4o-mini'],
   },
   generation: {
     AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3', 'gpt-5.6-sol'],
-    GEMINI: ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro'],
+    GEMINI: ['gemini-3.5-flash-lite', 'gemini-3.6-flash', 'gemini-3.1-pro-preview'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   reasoning: {
     // Planning wants structure quality; the mid-tier model leads, premium
     // models escalate only after bounded failures.
     AGENT_ROUTER: ['glm-5.3', 'gpt-5.6-sol', 'claude-opus-4-8'],
-    GEMINI: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+    GEMINI: ['gemini-3.6-flash', 'gemini-3.1-pro-preview'],
     OPENAI: ['gpt-4o', 'gpt-4.1'],
   },
   json: {
     AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3'],
-    GEMINI: ['gemini-2.5-flash-lite', 'gemini-2.5-flash'],
+    GEMINI: ['gemini-3.5-flash-lite', 'gemini-3.6-flash'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   longform: {
     AGENT_ROUTER: ['glm-5.3', 'deepseek-v4-flash', 'gpt-5.6-sol'],
-    GEMINI: ['gemini-2.5-flash', 'gemini-2.5-pro'],
+    GEMINI: ['gemini-3.6-flash', 'gemini-3.1-pro-preview'],
     OPENAI: ['gpt-4o'],
   },
 }

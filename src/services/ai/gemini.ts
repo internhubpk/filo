@@ -55,16 +55,19 @@ const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
 /**
  * Gemini models, cheapest-first (operator budget optimization):
- *   gemini-2.5-flash-lite — cheapest, fast: mechanical volume
- *   gemini-2.5-flash      — mid: generation/longform workhorse
- *   gemini-2.5-pro        — most capable / most expensive: quality escalation
- * MODEL_NOT_FOUND (404) advances the chain, so a retired id degrades
- * gracefully instead of failing the provider.
+ *   gemini-3.5-flash-lite  — cheapest, fast: mechanical volume
+ *   gemini-3.6-flash       — mid: generation/longform workhorse
+ *   gemini-3.1-pro-preview — most capable / most expensive: quality escalation
+ * Migrated from Google's retired 2.5 family on 2026-08-29: those ids stopped
+ * being served to new deployments (404 "no longer available to new users")
+ * and the deprecation error message names these exact replacements.
+ * MODEL_NOT_FOUND (404) advances the chain, so a retired id (e.g. the
+ * -preview suffix) degrades gracefully instead of failing the provider.
  */
 export const GEMINI_MODELS = [
-  'gemini-2.5-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-pro',
+  'gemini-3.5-flash-lite',
+  'gemini-3.6-flash',
+  'gemini-3.1-pro-preview',
 ] as const
 
 interface GeminiGenerateContentResponse {
@@ -83,7 +86,7 @@ interface GeminiGenerateContentResponse {
 export class GeminiProvider implements AiProvider {
   readonly id = 'GEMINI' as const
   readonly displayName = 'Google Gemini'
-  readonly defaultModel = 'gemini-2.5-flash'
+  readonly defaultModel = 'gemini-3.6-flash'
   readonly availableModels: readonly string[] = GEMINI_MODELS
 
   private getApiKey(): string {
@@ -123,7 +126,7 @@ export class GeminiProvider implements AiProvider {
         parts: [{ text: m.content }],
       }))
 
-    // gemini-2.5 flash models think by default; thinking burns output budget
+    // Gemini flash-tier models think by default; thinking burns output budget
     // and routinely returns empty text at low maxOutputTokens. Disable it for
     // flash-tier models (pro requires a thinking budget — leave it dynamic).
     const thinkingConfig = /flash/i.test(model)
