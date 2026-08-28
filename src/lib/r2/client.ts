@@ -18,6 +18,21 @@ import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 //    HTTP 400 NotImplemented ("a header you provided implies functionality
 //    that is not implemented") — which previously surfaced as an unclassified
 //    503 UNKNOWN. WHEN_REQUIRED is also valid against AWS S3.
+const ACCESS_KEY_ID = process.env.R2_ACCESS_KEY_ID || "";
+
+// Boot-time credential sanity check. R2 Access Key IDs are EXACTLY 32
+// characters and R2 validates the format BEFORE signature verification —
+// a key from any other source (AWS IAM = 20 chars, the R2 token JWT, a
+// Cloudflare API token, or a truncated/quoted paste) fails with HTTP 400
+// InvalidArgument "Credential access key has length N, should be 32".
+// Warn once at client construction so the cause is visible without a 503.
+if (ACCESS_KEY_ID && ACCESS_KEY_ID.length !== 32) {
+  console.warn(
+    `[R2] R2_ACCESS_KEY_ID has length ${ACCESS_KEY_ID.length}, but R2 Access Key IDs are exactly 32 characters — ` +
+      'verify you copied the "Access Key ID" (not the token JWT) from the R2 API token page, with no quotes/trailing spaces.'
+  )
+}
+
 const r2Client = new S3Client({
   region: "auto",
   endpoint: process.env.R2_ENDPOINT || `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
@@ -25,7 +40,7 @@ const r2Client = new S3Client({
   requestChecksumCalculation: "WHEN_REQUIRED",
   responseChecksumValidation: "WHEN_REQUIRED",
   credentials: {
-    accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
+    accessKeyId: ACCESS_KEY_ID,
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",
   },
 });

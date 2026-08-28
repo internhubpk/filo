@@ -76,6 +76,20 @@ function errText(error: unknown): { name: string; code: string; message: string;
 }
 
 /**
+ * Remove any accidental echo of the configured credentials from a message
+ * before it is embedded in a response body (defense in depth — S3/R2 error
+ * messages do not echo secrets, but this keeps the guarantee unconditional).
+ */
+function scrubbedMessage(message: string): string {
+  const key = process.env.R2_ACCESS_KEY_ID
+  const secret = process.env.R2_SECRET_ACCESS_KEY
+  let out = message
+  if (key && key.length > 8) out = out.split(key).join('<redacted>')
+  if (secret && secret.length > 8) out = out.split(secret).join('<redacted>')
+  return out
+}
+
+/**
  * Map any thrown value from an S3/R2 SDK call into a stable R2ErrorInfo.
  * Never throws. Never includes credential values in the detail string.
  */
@@ -110,6 +124,22 @@ export function classifyR2Error(error: unknown): R2ErrorInfo {
       kind: 'AUTH',
       retryable: false,
       detail: `R2 rejected the credentials (${name || code || `HTTP ${status ?? '?'}`}) — check the API token's Access Key, Secret, and "Object Read & Write" scope`,
+    }
+  }
+
+  // ---- 2b. Malformed credential FORMAT (R2 validates the key ID first) ----
+  // R2 Access Key IDs are exactly 32 characters. A key from any other source
+  // (an AWS IAM key = 20 chars, a Cloudflare account API token, the R2 token
+  // JWT, or a truncated/quoted value) is answered with HTTP 400
+  // InvalidArgument "Invalid Argument: Credential access key has length N,
+  // should be 32" BEFORE signature verification — i.e. a credentials problem
+  // even though the status is 400.
+  if (/access key has length|should be 32|credential.*access key/.test(haystack)) {
+    return {
+      kind: 'AUTH',
+      retryable: false,
+      detail:
+        'R2 rejected the credential format — R2_ACCESS_KEY_ID must be the 32-character Access Key ID from an R2 API token (a JWT, a Cloudflare API token, an AWS key, or a truncated/quoted value will not work)',
     }
   }
 
@@ -169,7 +199,7 @@ export function classifyR2Error(error: unknown): R2ErrorInfo {
     return {
       kind: 'SERVICE',
       retryable: false,
-      detail: `R2 rejected the request (${name || code || `HTTP ${status ?? '?'}`})${hint}`,
+      detail: `R2 rejected the request (${name || code || `HTTP ${status ?? '?'}`}): ${scrubbedMessage(message).slice(0, 140)}${hint}`,
     }
   }
 

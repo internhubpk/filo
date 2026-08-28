@@ -37,6 +37,10 @@
 //       (WHEN_REQUIRED checksums + path-style), and the render 503 body
 //       carries s3ErrorName + detail so failures self-diagnose from the
 //       browser Network tab alone.
+//   §11 Malformed credential FORMAT (R2 "Credential access key has length N,
+//       should be 32") → non-retryable AUTH with the 32-char hint; generic
+//       4xx details quote R2's message scrubbed of credentials; the client
+//       warns at boot when R2_ACCESS_KEY_ID length ≠ 32.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -334,4 +338,39 @@ test('§10 render route 503 body exposes s3ErrorName + detail (self-diagnosing)'
   assert.match(renderRoute, /s3ErrorName:\s*r2S3ErrorName\(r2Error\)/)
   assert.match(renderRoute, /detail:\s*info\.detail/)
   assert.match(errors, /export function r2S3ErrorName/, 'helper must be exported')
+})
+
+// ---------------------------------------------------------------------------
+// §11 — malformed credential FORMAT (the "InvalidArgument" trap)
+//       R2 answers HTTP 400 InvalidArgument "Credential access key has
+//       length N, should be 32" BEFORE signature verification when the
+//       Access Key ID is not a genuine 32-char R2 key (AWS key = 20 chars,
+//       token JWT, Cloudflare API token, truncated/quoted paste).
+// ---------------------------------------------------------------------------
+
+test('§11 credential-format rejection classifies as AUTH with the 32-char hint', () => {
+  assert.match(errors, /access key has length/, 'classifier must recognize the R2 credential-length message')
+  assert.match(errors, /should be 32/)
+  assert.match(
+    errors,
+    /kind: 'AUTH',\s*\n\s*retryable: false,\s*\n\s*detail:\s*\n?\s*'R2 rejected the credential format/,
+    'must map to non-retryable AUTH with the precise fix'
+  )
+  assert.match(errors, /32-character Access Key ID/, 'hint must say what a valid key is')
+})
+
+test('§11 generic 4xx detail quotes the R2 message, scrubbed of secrets', () => {
+  assert.match(errors, /scrubbedMessage/, 'message scrubber must exist')
+  assert.match(
+    errors,
+    /scrubbedMessage\(message\)\.slice\(0, 140\)/,
+    '4xx detail must embed the bounded R2 message'
+  )
+  assert.match(errors, /out\.split\(key\)\.join\('<redacted>'\)/, 'access key must be scrubbed')
+  assert.match(errors, /out\.split\(secret\)\.join\('<redacted>'\)/, 'secret must be scrubbed')
+})
+
+test('§11 client warns at boot when R2_ACCESS_KEY_ID length is not 32', () => {
+  assert.match(client, /ACCESS_KEY_ID\.length !== 32/, 'length check must exist')
+  assert.match(client, /Access Key IDs are exactly 32 characters/, 'warning must explain the rule')
 })
