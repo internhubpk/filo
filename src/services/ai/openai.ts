@@ -16,6 +16,7 @@ import type {
   ProviderHealth,
 } from './types'
 import type { AiProvider } from './provider'
+import { normalizeOpenAiCompatibleBaseUrl } from './provider'
 import {
   ApiKeyMissingError,
   errorFromHttpStatus,
@@ -59,8 +60,13 @@ export class OpenAiProvider implements AiProvider {
     return key
   }
 
+  /** Base URL, normalized (no trailing slash, exactly one /v1). */
+  get baseUrl(): string {
+    return normalizeOpenAiCompatibleBaseUrl(process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL)
+  }
+
   private getBaseUrl(): string {
-    return process.env.OPENAI_BASE_URL || DEFAULT_BASE_URL
+    return this.baseUrl
   }
 
   isConfigured(): boolean {

@@ -36,12 +36,13 @@
 // SECRETS:
 //   • FILO_SERVER_SECRET is read from the Convex environment (already
 //     required by billing).
-//   • AI keys are read from the Convex environment when set
-//     (`npx convex env set AGENT_ROUTER_API_KEY ...` — recommended). As a
-//     fallback the Next.js enqueue route passes the server's own keys as
-//     scheduler args (aiKeys); they are applied to process.env for this
-//     invocation only and never written to the database.
-// =============================================================================
+//   • AI keys are read from the Convex environment when set (`npx convex
+//     env set AGENT_ROUTER_API_KEY …`, GEMINI_API_KEY, OPENAI_API_KEY —
+//     recommended). As a fallback the Next.js enqueue route passes the
+//     server's own keys as scheduler args (aiKeys); they are applied to
+//     process.env for this invocation only and never written to the
+//     database.
+// ===============================================================================
 
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
@@ -63,6 +64,7 @@ import {
 
 interface AiKeys {
   agentRouter?: string;
+  gemini?: string;
   openai?: string;
 }
 
@@ -78,6 +80,7 @@ export const processJob = internalAction({
     aiKeys: v.optional(
       v.object({
         agentRouter: v.optional(v.string()),
+        gemini: v.optional(v.string()),
         openai: v.optional(v.string()),
       })
     ),
@@ -567,6 +570,9 @@ function applyAiKeys(keys?: AiKeys) {
   if (!keys) return;
   if (keys.agentRouter && !process.env.AGENT_ROUTER_API_KEY) {
     process.env.AGENT_ROUTER_API_KEY = keys.agentRouter;
+  }
+  if (keys.gemini && !process.env.GEMINI_API_KEY) {
+    process.env.GEMINI_API_KEY = keys.gemini;
   }
   if (keys.openai && !process.env.OPENAI_API_KEY) process.env.OPENAI_API_KEY = keys.openai;
 }

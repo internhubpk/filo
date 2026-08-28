@@ -15,6 +15,8 @@ export {
   PROVIDER_FALLBACK_ORDER,
   DEFAULT_RETRY_POLICY,
   MAX_ATTEMPTS_PER_PROVIDER,
+  PROVIDER_FATAL_CODES,
+  MAX_CONSECUTIVE_NETWORK_FAILURES,
   providerHealthSnapshot,
 } from './router'
 export type { GenerateOptions, AiTask } from './router'
@@ -25,10 +27,12 @@ export {
   listProviders,
   requireProvider,
   registerDefaultProviders,
+  normalizeOpenAiCompatibleBaseUrl,
 } from './provider'
 export type { AiProvider } from './provider'
 
 export { AgentRouterModule, AGENT_ROUTER_MODELS } from './agentrouter'
+export { GeminiProvider, GEMINI_MODELS } from './gemini'
 export { OpenAiProvider, OPENAI_MODELS } from './openai'
 
 export * from './errors'

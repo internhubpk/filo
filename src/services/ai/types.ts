@@ -7,8 +7,10 @@
 // provider-specific payloads.
 // =============================================================================
 
-/** Identifiers for every provider Filo can route to. */
-export type ProviderId = 'AGENT_ROUTER' | 'OPENAI'
+/** Identifiers for every provider Filo can route to. Each id is a genuinely
+ *  INDEPENDENT provider (separate company, endpoint, and credentials) — the
+ *  router falls back across these, never across models of one gateway. */
+export type ProviderId = 'AGENT_ROUTER' | 'GEMINI' | 'OPENAI'
 
 /** Chat role (OpenAI-style; providers translate internally). */
 export type AiRole = 'system' | 'user' | 'assistant'

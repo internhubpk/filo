@@ -13,9 +13,10 @@
 //     (booleans only — the key VALUES never leave the server)
 //   - in-isolate router health (quota cooldown / degraded state)
 //   - LIVE probes (opt-in): one minimal Agent Router chat call per
-//     configured model (verifies every model id against the real key) +
-//     OpenAI ping when configured; OpenAI reported as disabled when
-//     unconfigured
+//     configured model (verifies every model id against the real key),
+//     one minimal Gemini generateContent call per configured model, and
+//     an OpenAI ping when configured; unconfigured providers are reported
+//     as disabled, never attempted-and-failed
 //
 // Recorded per probe: HTTP status, latency, model, provider error code.
 // NEVER recorded/returned: API keys, secrets, authorization headers.
@@ -25,6 +26,7 @@ import { v } from "convex/values";
 import { action } from "./_generated/server";
 import { aiRouter, providerHealthSnapshot } from "../src/services/ai";
 import { AgentRouterModule } from "../src/services/ai/agentrouter";
+import { GeminiProvider } from "../src/services/ai/gemini";
 import { OpenAiProvider } from "../src/services/ai/openai";
 
 // -----------------------------------------------------------------------------
@@ -64,6 +66,7 @@ export const probeAiProviders = action({
     const doProbe = args.probe === true;
 
     const agentRouter = new AgentRouterModule();
+    const gemini = new GeminiProvider();
     const openai = new OpenAiProvider();
 
     const result: Record<string, unknown> = {
@@ -71,16 +74,19 @@ export const probeAiProviders = action({
       generatedAt: Date.now(),
       // In-isolate router health (quota cooldown / degraded) — no secrets.
       routerHealth: providerHealthSnapshot(),
+      fallbackOrder: ["AGENT_ROUTER", "GEMINI", "OPENAI"],
       providers: [] as unknown[],
     };
 
     const providers: Array<Record<string, unknown>> = [];
 
-    // ---------- AGENT ROUTER (primary) ----------
+    // ---------- AGENT ROUTER (primary gateway) ----------
     const agentEntry: Record<string, unknown> = {
       id: "AGENT_ROUTER",
       displayName: "Agent Router",
       configured: agentRouter.isConfigured(),
+      // The resolved OpenAI-compatible base URL (contains no secret).
+      baseUrl: agentRouter.baseUrl,
       defaultModel: agentRouter.defaultModel,
       models: agentRouter.availableModels,
     };
@@ -114,7 +120,46 @@ export const probeAiProviders = action({
     }
     providers.push(agentEntry);
 
-    // ---------- OPENAI (optional) ----------
+    // ---------- GEMINI (independent direct fallback #1) ----------
+    const geminiEntry: Record<string, unknown> = {
+      id: "GEMINI",
+      displayName: "Google Gemini",
+      configured: gemini.isConfigured(),
+      enabled: gemini.isConfigured(),
+      baseUrl: gemini.baseUrl,
+      status: gemini.isConfigured()
+        ? "configured"
+        : "disabled: missing GEMINI_API_KEY",
+      defaultModel: gemini.defaultModel,
+      models: gemini.availableModels,
+    };
+    if (gemini.isConfigured() && doProbe) {
+      const perModel: unknown[] = [];
+      for (const model of gemini.availableModels) {
+        const m = await gemini.ping(model);
+        perModel.push({
+          model,
+          ok: m.ok,
+          httpStatus: m.httpStatus,
+          latencyMs: m.latencyMs,
+          errorCode: m.errorCode,
+          error: m.error,
+        });
+      }
+      const ping = await gemini.ping();
+      geminiEntry.ping = {
+        ok: ping.ok,
+        httpStatus: ping.httpStatus,
+        latencyMs: ping.latencyMs,
+        model: ping.model,
+        errorCode: ping.errorCode,
+        error: ping.error,
+      };
+      geminiEntry.modelProbes = perModel;
+    }
+    providers.push(geminiEntry);
+
+    // ---------- OPENAI (independent direct fallback #2) ----------
     const oaiEntry: Record<string, unknown> = {
       id: "OPENAI",
       displayName: "OpenAI",

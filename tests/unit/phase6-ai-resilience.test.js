@@ -4,17 +4,23 @@
 //   §4  Error classification — 401/403→AUTH, 402→QUOTA, 404→MODEL_NOT_FOUND,
 //       429→RATE_LIMITED, 5xx→PROVIDER_UNAVAILABLE, Google's 400
 //       "API key not valid" → AUTH (never UNAVAILABLE for all of these).
-//   §5  Bounded retry: 2 attempts per model, hard cap of 4 per provider.
+//   §5  Bounded retry: 2 attempts per model, hard cap of 6 per provider,
+//       provider-fatal errors abandon the provider IMMEDIATELY, and 2
+//       consecutive network failures skip a dead gateway's remaining models.
 //   §6  Agent Router model registry lives in ONE place, LIVE-verified, and
-//       is cost-ordered (operator budget optimization).
-//   §7  Retired provider adapters (gemini.ts, openrouter.ts) are DELETED.
+//       is cost-ordered (operator budget optimization); Gemini rows too.
+//   §7  OpenRouter adapter stays DELETED; Gemini is a DIRECT Google provider
+//       (independent of the AgentRouter gateway).
 //   §8  Quota exhaustion stops the provider for the request + cooldown.
-//   §10 OpenAI optional: unconfigured = skipped, not attempted.
+//   §10 Optional providers: unconfigured = skipped, not attempted.
+//   §12 Fallback order is across INDEPENDENT providers:
+//       AGENT_ROUTER → GEMINI → OPENAI (never model-hops on one gateway).
 //   §13 Request validation happens BEFORE any provider call.
 //   §14 Short-lived provider health (degraded / quota_exhausted) exists.
 //   §16 User-safe messages: no provider codes in user-facing surfaces;
 //       developer diagnostics retain the full failure chain.
-//   §17 Admin diagnostics surface exists (Convex-runtime probes, no secrets).
+//   §17 Admin diagnostics surface exists (Convex-runtime probes, no secrets)
+//       and covers all three providers.
 //   §18 Generation runs in Convex; probes run in the same runtime.
 //   §21 requestId propagates into AI logs.
 //   §22 Every provider call is timeout-bounded (AbortController).
@@ -35,7 +41,9 @@ const read = (...p) => readFileSync(resolve(REPO_ROOT, ...p), 'utf8')
 const errors = read('src', 'services', 'ai', 'errors.ts')
 const router = read('src', 'services', 'ai', 'router.ts')
 const agentrouter = read('src', 'services', 'ai', 'agentrouter.ts')
+const gemini = read('src', 'services', 'ai', 'gemini.ts')
 const openai = read('src', 'services', 'ai', 'openai.ts')
+const providerRegistry = read('src', 'services', 'ai', 'provider.ts')
 const worker = read('convex', 'worker.ts')
 const aiDiagnostics = read('convex', 'aiDiagnostics.ts')
 const aiStatusRoute = read('src', 'app', 'api', 'admin', 'ai', 'status', 'route.ts')
@@ -101,6 +109,34 @@ test('§5 backoff uses exponential delay with jitter', () => {
   assert.match(router, /0\.75 \+ Math\.random\(\) \* 0\.5/, '±25% jitter')
 })
 
+test('§5 provider-fatal errors abandon the provider on the FIRST failure', () => {
+  assert.match(
+    router,
+    /PROVIDER_FATAL_CODES: ReadonlySet<string> = new Set\(\[[\s\S]*?'AUTH_FAILED',[\s\S]*?'API_KEY_MISSING',[\s\S]*?'CONFIGURATION_ERROR',[\s\S]*?'QUOTA_EXCEEDED',/,
+    'the fatal set covers auth, missing key, configuration, quota'
+  )
+  assert.match(
+    router,
+    /PROVIDER_FATAL_CODES\.has\(aiErr\.code\)\)[\s\S]{0,500}?break/,
+    'a fatal error breaks out of the model loop of that provider'
+  )
+  // and the fatal error also ends the provider's MODEL chain (outer break)
+  assert.match(
+    router,
+    /PROVIDER_FATAL_CODES\.has\(last\.code\)/,
+    'the outer model chain stops after a fatal error'
+  )
+})
+
+test('§5 dead network paths are capped: no retry storm against an unreachable gateway', () => {
+  assert.match(router, /MAX_CONSECUTIVE_NETWORK_FAILURES = 2/)
+  assert.match(
+    router,
+    /consecutiveNetworkFailures >= MAX_CONSECUTIVE_NETWORK_FAILURES/,
+    'two consecutive NETWORK_ERROR/TIMEOUT failures skip the provider\'s remaining models'
+  )
+})
+
 // ---------------------------------------------------------------------------
 // §6 — Agent Router model registry (LIVE-verified 2026-08-28)
 // ---------------------------------------------------------------------------
@@ -118,6 +154,17 @@ test('§6 Agent Router registry is the live-verified, cost-ordered set', () => {
   ], 'registry must be exactly the 5 verified ids in cost order')
 })
 
+test('§6 Gemini registry is direct-Google and cost-ordered', () => {
+  const registry = gemini.match(/export const GEMINI_MODELS = \[[\s\S]*?\] as const/)?.[0] ?? ''
+  assert.ok(registry.length > 0, 'GEMINI_MODELS registry found')
+  const ids = [...registry.matchAll(/'([a-z0-9.-]+)'/g)].map((m) => m[1])
+  assert.deepEqual(ids, [
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-flash',
+    'gemini-2.5-pro',
+  ], 'registry must be exactly the 3 Gemini ids in cost order')
+})
+
 test('§6 task matrices lead with cheap models (operator budget optimization)', () => {
   const matrix = router.match(/export const MODEL_MATRIX[\s\S]*?\n\}/)?.[0] ?? ''
   assert.ok(matrix.length > 0, 'MODEL_MATRIX found')
@@ -130,22 +177,57 @@ test('§6 task matrices lead with cheap models (operator budget optimization)', 
       `task chains must lead with a cheap-tier model (got ${first})`
     )
   }
+  const geminiRows = matrix.match(/GEMINI: \[[^\]]*\]/g) ?? []
+  assert.ok(geminiRows.length >= 5, 'all five task rows have GEMINI chains')
+  for (const row of geminiRows) {
+    const first = row.match(/\['([a-z0-9.-]+)'/)?.[1]
+    assert.ok(
+      first === 'gemini-2.5-flash-lite' || first === 'gemini-2.5-flash',
+      `gemini chains must lead with a cheap-tier model (got ${first})`
+    )
+  }
 })
 
-test('§7 retired provider adapters are deleted from the codebase', () => {
-  assert.equal(existsSync(resolve(REPO_ROOT, 'src', 'services', 'ai', 'gemini.ts')), false, 'gemini.ts removed')
+test('§7 the OpenRouter-era adapter stays deleted; Gemini is a DIRECT provider', () => {
   assert.equal(existsSync(resolve(REPO_ROOT, 'src', 'services', 'ai', 'openrouter.ts')), false, 'openrouter.ts removed')
+  assert.equal(existsSync(resolve(REPO_ROOT, 'src', 'services', 'ai', 'gemini.ts')), true, 'gemini.ts exists as the direct Google provider')
+})
+
+test('§7 Gemini talks to Google directly — independent of any gateway', () => {
+  assert.match(gemini, /generativelanguage\.googleapis\.com\/v1beta/, 'default base is Google\'s public API')
+  assert.match(gemini, /generateContent/, 'Google generateContent wire format')
+  assert.match(gemini, /'x-goog-api-key': apiKey/, 'API key travels in the header')
+  assert.doesNotMatch(gemini, /key=/, 'the key must NEVER appear in a URL (log leakage)')
+  assert.match(gemini, /GEMINI_API_KEY/, 'reads GEMINI_API_KEY')
+  assert.match(gemini, /GEMINI_BASE_URL/, 'base URL stays configurable')
+  assert.match(gemini, /responseMimeType/, 'JSON response format is wired through')
+  assert.match(gemini, /ContentFilteredError/, 'promptFeedback blocks are classified as content-filtered')
 })
 
 test('§1 generateContent-era adapters are gone; the gateway is OpenAI-style chat', () => {
   assert.match(agentrouter, /chat\/completions/)
-  // Official AgentRouter.org gateway (the old internal-api.z.ai default never
-  // resolved publicly and failed every call with "fetch failed").
-  assert.match(agentrouter, /agentrouter\.org\/v1/)
+  // VERIFIED LIVE (2026-08-29): co.agentrouter.org/v1 answers with API JSON
+  // (401 "Missing API Key") while the bare www host serves Aliyun-WAF HTML.
+  assert.match(agentrouter, /co\.agentrouter\.org\/v1/, 'defaults to the verified co. API host')
+  assert.doesNotMatch(agentrouter, /DEFAULT_BASE_URL = 'https:\/\/agentrouter\.org/, 'the WAF-fronted www host must never be the default again')
   assert.doesNotMatch(agentrouter, /internal-api\.z\.ai/, 'dead z.ai host must not come back')
   assert.doesNotMatch(agentrouter, /X-Z-AI-From/, 'z.ai SDK headers must not leak to AgentRouter')
   assert.doesNotMatch(agentrouter, /thinking:/, 'z.ai-only body extensions must not be sent')
   assert.match(agentrouter, /looksLikeWafChallenge/, 'WAF interstitials must be detected, not retried')
+})
+
+test('§1 OpenAI-compatible base URLs cannot drift (/v1 added once, never doubled)', () => {
+  assert.match(providerRegistry, /normalizeOpenAiCompatibleBaseUrl/, 'shared normalizer exists')
+  assert.ok(
+    providerRegistry.includes("url.replace(/(\\/v\\d+)\\/v\\d+$/, '$1')"),
+    'collapses /v1/v1 double prefixes'
+  )
+  assert.ok(
+    providerRegistry.includes('/\\/v\\d+$/.test(url)'),
+    'appends /v1 when missing'
+  )
+  assert.match(agentrouter, /normalizeOpenAiCompatibleBaseUrl/, 'AgentRouter uses it')
+  assert.match(openai, /normalizeOpenAiCompatibleBaseUrl/, 'OpenAI uses it')
 })
 
 // ---------------------------------------------------------------------------
@@ -153,7 +235,11 @@ test('§1 generateContent-era adapters are gone; the gateway is OpenAI-style cha
 // ---------------------------------------------------------------------------
 
 test('§8 QUOTA_EXCEEDED stops walking the exhausted provider and starts a cooldown', () => {
-  assert.match(router, /aiErr\.code === 'QUOTA_EXCEEDED'\) \{\s*break/, 'breaks out of the model loop')
+  assert.match(
+    router,
+    /'QUOTA_EXCEEDED',\n\]\)/,
+    'quota is a provider-FATAL code — no model walking on an exhausted account'
+  )
   assert.match(router, /entry\.state = 'quota_exhausted'/)
   assert.match(router, /QUOTA_COOLDOWN_MS/, 'cooldown exists')
 })
@@ -185,11 +271,24 @@ test('§10 unconfigured providers are skipped with a diagnostic line, not attemp
   assert.match(worker, /userSafeAiMessage/)
 })
 
-test('§12 fallback order is deterministic: AGENT_ROUTER → OPENAI', () => {
+test('§12 fallback order is deterministic across INDEPENDENT providers: AGENT_ROUTER → GEMINI → OPENAI', () => {
   const order = router.match(/PROVIDER_FALLBACK_ORDER: ProviderId\[\] = \[[\s\S]*?\]/)
   assert.ok(order, 'fallback order is an explicit constant')
-  const ids = order[0].match(/'(AGENT_ROUTER|OPENAI)'/g)
-  assert.deepEqual(ids, ["'AGENT_ROUTER'", "'OPENAI'"])
+  const ids = order[0].match(/'(AGENT_ROUTER|GEMINI|OPENAI)'/g)
+  assert.deepEqual(ids, ["'AGENT_ROUTER'", "'GEMINI'", "'OPENAI'"])
+})
+
+test('§12 the registry registers all three independent backends', () => {
+  assert.match(providerRegistry, /registerProvider\(new AgentRouterModule\(\)\)/)
+  assert.match(providerRegistry, /registerProvider\(new GeminiProvider\(\)\)/)
+  assert.match(providerRegistry, /registerProvider\(new OpenAiProvider\(\)\)/)
+  assert.match(aiIndex, /GEMINI_MODELS/, 'Gemini travels with the barrel')
+})
+
+test('§12 the worker forwards and applies the Gemini key like the others', () => {
+  assert.match(worker, /gemini: v\.optional\(v\.string\(\)\)/, 'scheduler args include gemini')
+  assert.match(worker, /process\.env\.GEMINI_API_KEY = keys\.gemini/, 'applied to the invocation env')
+  assert.match(worker, /GEMINI_API_KEY/g, 'no stray Gemini key handling')
 })
 
 // ---------------------------------------------------------------------------
@@ -252,6 +351,16 @@ test('§17 diagnostics never expose key material', () => {
     assert.doesNotMatch(file, /(GEMINI|AGENT_ROUTER)_API_KEY.*\$\{.*key/, 'no interpolated key output')
   }
   assert.match(aiDiagnostics, /environment: "Convex"/, 'reports the runtime, per spec §2')
+  // Base URLs are safe (no credentials); key VALUES must never be echoed.
+  assert.match(aiDiagnostics, /baseUrl: agentRouter\.baseUrl/)
+  assert.doesNotMatch(aiDiagnostics, /apiKey|api_key/, 'no key variable is ever returned')
+})
+
+test('§17 diagnostics cover all three providers (incl. live Gemini probes)', () => {
+  assert.match(aiDiagnostics, /GEMINI/, 'Gemini section exists')
+  assert.match(aiDiagnostics, /new GeminiProvider\(\)/)
+  assert.match(aiDiagnostics, /disabled: missing GEMINI_API_KEY/, 'unconfigured Gemini is DISABLED, not failed')
+  assert.match(aiDiagnostics, /fallbackOrder/, 'the reported order matches the router')
 })
 
 test('§17 Agent Router probe verifies every configured model id', () => {
@@ -300,10 +409,23 @@ test('§23 autoRetries is a distinct, optional job field (not user retryCount)',
 })
 
 test('§22 every provider request is timeout-bounded via AbortController', () => {
-  for (const [name, file] of [['agentrouter', agentrouter], ['openai', openai]]) {
+  for (const [name, file] of [['agentrouter', agentrouter], ['gemini', gemini], ['openai', openai]]) {
     assert.match(file, /AbortController/, `${name} uses AbortController`)
     assert.match(file, /controller\.abort\(\)/, `${name} aborts on timeout`)
   }
+})
+
+// ---------------------------------------------------------------------------
+// §10 — one-time, per-isolate config diagnostics (no secrets)
+// ---------------------------------------------------------------------------
+
+test('§10 the router logs a startup config diagnostics line per provider', () => {
+  const boot = router.match(/private ensureProviders\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? ''
+  assert.ok(boot.length > 0, 'ensureProviders found')
+  assert.match(boot, /provider diagnostics/, 'logs the diagnostics banner')
+  assert.match(boot, /fallback order/, 'logs the fallback order')
+  assert.match(boot, /NOT configured/, 'unconfigured providers are visible at a glance')
+  assert.doesNotMatch(boot, /API_KEY|apiKey|Bearer/, 'never logs key material')
 })
 
 // ---------------------------------------------------------------------------
@@ -311,12 +433,23 @@ test('§22 every provider request is timeout-bounded via AbortController', () =>
 // ---------------------------------------------------------------------------
 
 test('§24 no NEXT_PUBLIC_* AI key variables anywhere', () => {
-  assert.doesNotMatch(envExample, /NEXT_PUBLIC_(AGENT_ROUTER|OPENAI)_API_KEY/)
+  assert.doesNotMatch(envExample, /NEXT_PUBLIC_(AGENT_ROUTER|GEMINI|OPENAI)_API_KEY/)
   assert.match(envExample, /npx convex env set AGENT_ROUTER_API_KEY/, 'Convex ownership documented')
+  assert.match(envExample, /npx convex env set GEMINI_API_KEY/, 'Gemini Convex ownership documented')
 })
 
 test('§24 .env.example documents that generation runs in Convex', () => {
   assert.match(envExample, /GENERATION RUNS IN CONVEX ACTIONS/)
+})
+
+test('§24 .env.example pins the verified co.agentrouter.org/v1 API base', () => {
+  assert.match(envExample, /co\.agentrouter\.org\/v1/, 'the verified API host is documented')
+  assert.match(envExample, /GEMINI_API_KEY=/, 'Gemini fallback #1 documented')
+  assert.match(envExample, /generativelanguage\.googleapis\.com/, 'Gemini base URL documented')
+  assert.match(envExample, /INDEPENDENT PROVIDERS/, 'fallback-across-providers contract documented')
+  // exactly ONE OpenAI_API_KEY assignment (no duplicated lines)
+  const dupes = envExample.match(/^OPENAI_API_KEY=.*$/gm) ?? []
+  assert.equal(dupes.length, 1, `OPENAI_API_KEY appears exactly once (found ${dupes.length})`)
 })
 
 // ---------------------------------------------------------------------------
@@ -325,6 +458,8 @@ test('§24 .env.example documents that generation runs in Convex', () => {
 
 test('index.ts re-exports the new resilience surface', () => {
   assert.match(aiIndex, /MAX_ATTEMPTS_PER_PROVIDER/)
+  assert.match(aiIndex, /PROVIDER_FATAL_CODES/)
+  assert.match(aiIndex, /MAX_CONSECUTIVE_NETWORK_FAILURES/)
   assert.match(aiIndex, /providerHealthSnapshot/)
   assert.match(aiIndex, /export \* from '\.\/errors'/, 'userSafeAiMessage travels with the barrel')
 })

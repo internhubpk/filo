@@ -18,6 +18,7 @@ import type {
 } from './types'
 import { ApiKeyMissingError } from './errors'
 import { AgentRouterModule } from './agentrouter'
+import { GeminiProvider } from './gemini'
 import { OpenAiProvider } from './openai'
 
 /**
@@ -51,6 +52,22 @@ export interface AiProvider {
 }
 
 // ==================== REGISTRY ====================
+
+/**
+ * Normalizes an OpenAI-compatible base URL (shared by every OpenAI-format
+ * adapter): strips trailing slashes, appends exactly one `/v1` when missing,
+ * and collapses accidental `/v1/v1` double prefixes. Keeps request
+ * construction honest — `${base}/chat/completions` is always the right URL.
+ */
+export function normalizeOpenAiCompatibleBaseUrl(raw: string): string {
+  let url = raw.trim().replace(/\/+$/, '')
+  if (!url) return url
+  // Collapse a double /v1/vN prefix first (e.g. user pasted …/v1 + code adds /v1).
+  url = url.replace(/(\/v\d+)\/v\d+$/, '$1')
+  // If someone configured the bare host (or a proxy root), add /v1 once.
+  if (!/\/v\d+$/.test(url)) url = `${url}/v1`
+  return url
+}
 
 const registry = new Map<ProviderId, AiProvider>()
 
@@ -86,22 +103,27 @@ let defaultsRegistered = false
  * Register the built-in providers. Called lazily by the router so that
  * importing this module stays side-effect-free (important for tests).
  *
- * All three providers use static imports (required for Convex's ESM
- * bundler). A provider whose API key is absent still registers — it just
- * reports isConfigured() === false and the router skips it in the fallback
- * chain. That's what makes the OpenAI fallback a soft dependency rather than
- * hard ones.
+ * All providers use static imports (required for Convex's ESM bundler).
+ * A provider whose API key is absent still registers — it just reports
+ * isConfigured() === false and the router skips it in the fallback chain.
+ * That's what keeps Gemini/OpenAI soft dependencies rather than hard ones.
+ *
+ * The three ids are genuinely INDEPENDENT backends (different companies,
+ * hosts, and credentials). The router's fallback walks THIS list, so an
+ * AgentRouter gateway outage can never take Gemini/OpenAI down with it.
  */
 export function registerDefaultProviders(): void {
   if (defaultsRegistered) return
   defaultsRegistered = true
 
-  // Canonical primary provider: the Agent Router (cost-optimized multi-model
-  // gateway — deepseek-v4-flash / glm-5.3 / gpt-5.6-sol / claude-opus-4-8 /
-  // claude-opus-5). See agentrouter.ts for the verified model registry.
+  // Canonical primary: the AgentRouter gateway (cost-optimized multi-model
+  // pool — deepseek-v4-flash / glm-5.3 / gpt-5.6-sol / claude-opus-4-8 /
+  // claude-opus-5). See agentrouter.ts for the live-verified contract.
   registerProvider(new AgentRouterModule())
 
-  // Optional fallback (skipped at runtime when unconfigured). Intended as the
-  // production workhorse once OPENAI_API_KEY is set.
+  // Independent direct fallback #1: Google's Generative Language API.
+  registerProvider(new GeminiProvider())
+
+  // Independent direct fallback #2 (skipped at runtime when unconfigured).
   registerProvider(new OpenAiProvider())
 }

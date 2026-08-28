@@ -481,6 +481,7 @@ export const enqueueJob = mutation({
     aiKeys: v.optional(
       v.object({
         agentRouter: v.optional(v.string()),
+        gemini: v.optional(v.string()),
         openai: v.optional(v.string()),
       })
     ),
@@ -587,6 +588,7 @@ export const resumeUserJob = mutation({
     aiKeys: v.optional(
       v.object({
         agentRouter: v.optional(v.string()),
+        gemini: v.optional(v.string()),
         openai: v.optional(v.string()),
       })
     ),

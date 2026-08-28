@@ -8,12 +8,16 @@
 //
 // Responsibilities:
 //   1. Pick a task-appropriate model (model selection table below).
-//   2. Try the primary provider (Agent Router). On retryable failure, retry with
-//      exponential backoff + jitter.
-//   3. After retries exhaust, fall through to the next configured provider.
-//   4. Aggregate failures into AllProvidersFailedError with every attempt.
+//   2. Try the primary provider (Agent Router gateway). On retryable failure,
+//      retry with exponential backoff + jitter.
+//   3. On provider-fatal failure (auth / config / quota) or a dead gateway
+//      (repeat network errors), abandon the provider immediately.
+//   4. Fall through to the next INDEPENDENT provider in the chain.
+//   5. Aggregate failures into AllProvidersFailedError with every attempt.
 //
-// Fallback order: AGENT_ROUTER → OPENAI (skipping unconfigured ones).
+// Fallback order: AGENT_ROUTER → GEMINI → OPENAI (skipping unconfigured).
+// Each id is a different company + endpoint + credential: AgentRouter being
+// unreachable can never take Gemini or OpenAI down with it.
 // =============================================================================
 
 import type {
@@ -52,8 +56,10 @@ export type AiTask =
  * through to the remaining provider registry entries.
  *
  * AGENT_ROUTER ids are the operator-designated pool served by the
- * AgentRouter.org gateway (OpenAI-compatible, https://agentrouter.org/v1):
+ * AgentRouter gateway (OpenAI-compatible, https://co.agentrouter.org/v1):
  * deepseek-v4-flash, glm-5.3, gpt-5.6-sol, claude-opus-4-8, claude-opus-5.
+ * GEMINI ids are Google's Generative Language API models (DIRECT — not
+ * reachable through any gateway), cost-ordered flash-lite → flash → pro.
  *
  * Selection is COST-OPTIMIZED FOR THE OPERATOR ("budget to me, not the
  * users"): the cheapest capable model leads every task; premium models are
@@ -62,24 +68,29 @@ export type AiTask =
 export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly string[]>>> = {
   fast: {
     AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3'],
+    GEMINI: ['gemini-2.5-flash-lite', 'gemini-2.5-flash'],
     OPENAI: ['gpt-4o-mini'],
   },
   generation: {
     AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3', 'gpt-5.6-sol'],
+    GEMINI: ['gemini-2.5-flash-lite', 'gemini-2.5-flash', 'gemini-2.5-pro'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   reasoning: {
     // Planning wants structure quality; the mid-tier model leads, premium
     // models escalate only after bounded failures.
     AGENT_ROUTER: ['glm-5.3', 'gpt-5.6-sol', 'claude-opus-4-8'],
+    GEMINI: ['gemini-2.5-flash', 'gemini-2.5-pro'],
     OPENAI: ['gpt-4o', 'gpt-4.1'],
   },
   json: {
     AGENT_ROUTER: ['deepseek-v4-flash', 'glm-5.3'],
+    GEMINI: ['gemini-2.5-flash-lite', 'gemini-2.5-flash'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   longform: {
     AGENT_ROUTER: ['glm-5.3', 'deepseek-v4-flash', 'gpt-5.6-sol'],
+    GEMINI: ['gemini-2.5-flash', 'gemini-2.5-pro'],
     OPENAI: ['gpt-4o'],
   },
 }
@@ -99,8 +110,32 @@ export const DEFAULT_RETRY_POLICY: RetryPolicy = {
  *  combined) — no provider ever eats more than 6 round trips of one user
  *  request. With 2 attempts per model that is ≥3 DISTINCT models per
  *  provider; cheap non-retryable 404 advances leave more budget for live
- *  candidates. */
+ *  candidates. Provider-fatal errors (see PROVIDER_FATAL_CODES) and the
+ *  network-failure cap below usually end a provider far earlier. */
 export const MAX_ATTEMPTS_PER_PROVIDER = 6
+
+/**
+ * Errors that are FATAL FOR THE WHOLE PROVIDER (not just the current model):
+ * retrying another model on the same provider provably cannot succeed.
+ *   AUTH_FAILED / API_KEY_MISSING → the credential is broken account-wide
+ *   CONFIGURATION_ERROR           → wrong base URL / WAF-blocked host
+ *   QUOTA_EXCEEDED                → account-level billing exhaustion
+ * The router abandons the provider on the FIRST such error and moves on.
+ */
+export const PROVIDER_FATAL_CODES: ReadonlySet<string> = new Set([
+  'AUTH_FAILED',
+  'API_KEY_MISSING',
+  'CONFIGURATION_ERROR',
+  'QUOTA_EXCEEDED',
+])
+
+/** Consecutive NETWORK_ERROR/TIMEOUT failures allowed per provider per
+ *  generate() call. Two failed round trips against the same host mean the
+ *  network path itself is down — walking the remaining models of the SAME
+ *  unreachable gateway is a retry storm, so the router skips straight to the
+ *  next independent provider. A single transient blip still recovers via the
+ *  normal same-model retry. */
+export const MAX_CONSECUTIVE_NETWORK_FAILURES = 2
 
 // ==================== PROVIDER HEALTH (short-lived, in-isolate) ====================
 // Spec §14: quota exhaustion and repeated 5xx temporarily demote a provider
@@ -173,7 +208,7 @@ export function providerHealthSnapshot(): Array<{
   state: ProviderHealthState
   cooldownRemainingMs: number
 }> {
-  return (['AGENT_ROUTER', 'OPENAI'] as ProviderId[]).map((id) => {
+  return (['AGENT_ROUTER', 'GEMINI', 'OPENAI'] as ProviderId[]).map((id) => {
     const entry = currentHealth(id)
     return {
       provider: id,
@@ -183,9 +218,12 @@ export function providerHealthSnapshot(): Array<{
   })
 }
 
-/** Provider fallback order. Unconfigured providers are skipped at runtime. */
+/** Provider fallback order. Genuinely independent backends; unconfigured
+ *  providers are skipped at runtime. A failure of one can never imply a
+ *  failure of another. */
 export const PROVIDER_FALLBACK_ORDER: ProviderId[] = [
   'AGENT_ROUTER',
+  'GEMINI',
   'OPENAI',
 ]
 
@@ -205,6 +243,24 @@ class AiRouter {
     if (!this.booted) {
       registerDefaultProviders()
       this.booted = true
+      // One-time, per-isolate config diagnostics (AI-repair spec §10).
+      // NEVER logs key values or Authorization material — configuration
+      // booleans and base URLs only. A base URL contains no secret.
+      const lines = PROVIDER_FALLBACK_ORDER.map((id) => {
+        const p = getProvider(id)
+        if (!p) return `${id}: not registered`
+        const configured = p.isConfigured()
+        const base =
+          typeof (p as { baseUrl?: string }).baseUrl === 'string'
+            ? ` (base: ${(p as { baseUrl?: string }).baseUrl})`
+            : ''
+        return configured
+          ? `${id}: configured${base} [${p.availableModels.length} models]`
+          : `${id}: NOT configured — set its API key to enable`
+      })
+      console.info(
+        `[AI] provider diagnostics\n[AI]   ${lines.join('\n[AI]   ')}\n[AI]   fallback order: ${PROVIDER_FALLBACK_ORDER.join(' → ')}`
+      )
     }
   }
 
@@ -308,6 +364,7 @@ class AiRouter {
       // budget — enough to recover, never enough for a storm.
       const providerMaxAttempts = health.state === 'degraded' ? 1 : policy.maxAttempts
       let providerAttemptsUsed = 0
+      let consecutiveNetworkFailures = 0
 
       for (const model of models) {
         if (providerAttemptsUsed >= MAX_ATTEMPTS_PER_PROVIDER) {
@@ -349,11 +406,30 @@ class AiRouter {
               `[AI]${traceTag} attempt failed provider=${providerId} model=${model} attempt=${attempt}/${providerMaxAttempts} code=${aiErr.code}: ${aiErr.message}`
             )
 
-            // Spec §8/§23: quota/billing exhaustion is ACCOUNT-level. Stop
-            // using this provider for the rest of THIS request and put it
-            // on cooldown — do not walk its remaining models.
-            if (aiErr.code === 'QUOTA_EXCEEDED') {
+            // ---------- STORM GUARD 1: provider-fatal errors ----------
+            // A broken credential, a misconfigured/WAF-blocked base URL, or
+            // account-level billing exhaustion applies to EVERY model on
+            // this provider. Advancing to the next model of the SAME
+            // provider is a guaranteed waste of requests — switch to the
+            // next INDEPENDENT provider now.
+            if (PROVIDER_FATAL_CODES.has(aiErr.code)) {
+              console.warn(
+                `[AI]${traceTag} provider=${providerId} is fatally unavailable (${aiErr.code}) — skipping remaining ${providerId} models, next provider`
+              )
               break
+            }
+
+            // ---------- STORM GUARD 2: dead network path ----------
+            if (aiErr.code === 'NETWORK_ERROR' || aiErr.code === 'TIMEOUT') {
+              consecutiveNetworkFailures += 1
+              if (consecutiveNetworkFailures >= MAX_CONSECUTIVE_NETWORK_FAILURES) {
+                console.warn(
+                  `[AI]${traceTag} provider=${providerId} network path down after ${consecutiveNetworkFailures} consecutive network failures — skipping remaining ${providerId} models, next provider`
+                )
+                break
+              }
+            } else {
+              consecutiveNetworkFailures = 0
             }
 
             // Model-not-found → the NEXT MODEL is a genuinely different
@@ -373,6 +449,20 @@ class AiRouter {
             const jitter = backoff * (0.75 + Math.random() * 0.5)
             await this.sleep(jitter)
           }
+        }
+
+        // Fatal error / dead network path → leave the model loop entirely.
+        const last = attemptLog[attemptLog.length - 1]
+        if (
+          last &&
+          last.provider === providerId &&
+          (PROVIDER_FATAL_CODES.has(last.code) ||
+            (last.code === 'NETWORK_ERROR' &&
+              consecutiveNetworkFailures >= MAX_CONSECUTIVE_NETWORK_FAILURES) ||
+            (last.code === 'TIMEOUT' &&
+              consecutiveNetworkFailures >= MAX_CONSECUTIVE_NETWORK_FAILURES))
+        ) {
+          break
         }
 
         if (attemptLog.some((a) => a.provider === providerId && a.code === 'QUOTA_EXCEEDED')) {
@@ -468,10 +558,16 @@ class AiRouter {
     const provider = getProvider(providerId)
     if (!provider) return []
 
-    // 1. Explicit model pin wins (a pinned model is a deliberate choice —
-    //    we do NOT silently substitute it).
+    // 1. Explicit model pin wins — it is a deliberate choice, so it is
+    //    attempted first. If the provider doesn't recognize the pinned id,
+    //    its own defaults follow as a tail safety net: a stale pin then
+    //    degrades to the provider's best known model instead of stranding
+    //    the provider on a guaranteed MODEL_NOT_FOUND.
     const pinned = opts.model || request.options?.model
-    if (pinned) return [pinned]
+    if (pinned) {
+      const rest = provider.availableModels.filter((m) => m !== pinned)
+      return rest.length > 0 ? [pinned, ...rest] : [pinned]
+    }
 
     // 2. Task-based matrix first…
     const task = opts.task || 'generation'

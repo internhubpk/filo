@@ -6,13 +6,12 @@
 // GET  → configuration snapshot from the CONVEX runtime (where generation
 //        actually runs): which providers have keys, router health state.
 // POST → runs LIVE probes from the Convex runtime:
-//          - Gemini ListModels (validates every configured model id)
-//          - Gemini one 1-token generateContent call (auth/model/format)
-//          - OpenRouter GET /key (validity + credits, zero token spend)
-//          - OpenAI reported as disabled when unconfigured (§10)
+//          - AgentRouter: one chat call per configured model id (auth/model)
+//          - Gemini: one 1-token generateContent call per configured model
+//          - OpenAI: reported as disabled when unconfigured (§10)
 //
 // Never returns API keys, secrets, tokens, or authorization headers.
-// =============================================================================
+// ===============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
 import {

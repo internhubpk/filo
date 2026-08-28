@@ -49,6 +49,7 @@ export async function POST(request: NextRequest) {
       // keys (same fallback policy as enqueue).
       aiKeys: {
         agentRouter: process.env.AGENT_ROUTER_API_KEY || undefined,
+        gemini: process.env.GEMINI_API_KEY || undefined,
         openai: process.env.OPENAI_API_KEY || undefined,
       },
     })) as { success: boolean; jobId?: string; error?: string; code?: string }

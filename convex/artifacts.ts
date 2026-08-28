@@ -5,17 +5,20 @@
 // abstraction in src/services/ai/ (imported here via a relative path — Convex's
 // esbuild bundler handles it, and the module is isomorphic: fetch + env only).
 //
-//   Primary provider:  Google Gemini      (GEMINI_API_KEY)
-//   Fallback chain:    Gemini → OpenRouter → OpenAI (skips unconfigured ones)
+//   Primary provider:   Agent Router gateway (AGENT_ROUTER_API_KEY)
+//   Fallback chain:     AgentRouter → Gemini (direct) → OpenAI (direct)
+//                       — genuinely independent backends; unconfigured ones
+//                       are skipped, never attempted-and-failed
 //
-// - Actions can access process.env secrets (GEMINI_API_KEY, etc.)
+// - Actions can access process.env secrets (AGENT_ROUTER_API_KEY,
+//   GEMINI_API_KEY, OPENAI_API_KEY)
 // - Frontend calls this action via useMutation / /api/artifacts/generate
 // - NEVER call AI providers directly from Next.js or the browser
 //
 // NOTE: This file previously made raw fetch() calls to OpenRouter with the
 // API key managed here. It now delegates to the shared aiRouter which owns
 // retry, fallback, timeouts, and the typed error hierarchy.
-// =============================================================================
+// ===============================================================================
 
 import { v } from "convex/values";
 import { action, mutation, query } from "./_generated/server";
@@ -64,7 +67,8 @@ export const listUserArtifacts = query({
  *   2. Generate: write each section with section-level prompts + global context.
  *   3. Assemble: concatenate section content into the final document text.
  *
- * All AI calls go through aiRouter (Gemini primary, provider fallback).
+ * All AI calls go through aiRouter (AgentRouter primary, independent
+ * provider fallback across Gemini/OpenAI).
  */
 export const generateArtifact = action({
   args: {

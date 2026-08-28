@@ -6,13 +6,18 @@
 //
 //   deepseek-v4-flash · glm-5.3 · gpt-5.6-sol · claude-opus-4-8 · claude-opus-5
 //
-// Wire protocol (STANDARD OpenAI Chat Completions — see
-// https://agentrouter.org/docs — the gateway is drop-in OpenAI-compatible):
+// Wire protocol (STANDARD OpenAI Chat Completions — verified live against
+// the gateway): the OpenAI-compatible base URL is https://co.agentrouter.org/v1
 //
-//   POST https://agentrouter.org/v1/chat/completions
+//   POST https://co.agentrouter.org/v1/chat/completions
 //   Authorization: Bearer <key>
 //   Content-Type: application/json
 //   { model, messages, stream: false, temperature, max_tokens, ... }
+//
+//   ⚠ The bare `agentrouter.org` www/docs host serves the marketing site
+//   behind an Aliyun-WAF anti-bot page (HTTP 200 HTML). Only the `co.`
+//   API host speaks REST — pointing this adapter anywhere else produces
+//   WAF interstitials that look like success but are garbage to JSON parse.
 //
 //   ⚠ Historically this adapter pointed at a z.ai-internal gateway host
 //   (plus a custom Z-identity header and a `thinking` body param) that never
@@ -22,8 +27,8 @@
 //   official gateway only.
 //
 // Env vars (read at call time, Convex-runtime owned — never NEXT_PUBLIC_*):
-//   AGENT_ROUTER_API_KEY    (required — sk-… key from agentrouter.org/console/token)
-//   AGENT_ROUTER_BASE_URL   (optional — default https://agentrouter.org/v1)
+//   AGENT_ROUTER_API_KEY    (required — sk-… key from agentrouter.org console)
+//   AGENT_ROUTER_BASE_URL   (optional — default https://co.agentrouter.org/v1)
 //
 // Model selection is COST-OPTIMIZED FOR THE OPERATOR (spec: "select for
 // budget to me, not the users"): cheap flash-tier models carry mechanical
@@ -36,6 +41,7 @@ import type {
   ProviderHealth,
 } from './types'
 import type { AiProvider } from './provider'
+import { normalizeOpenAiCompatibleBaseUrl } from './provider'
 import {
   AiBaseError,
   ApiKeyMissingError,
@@ -45,11 +51,18 @@ import {
 } from './errors'
 
 /**
- * Official AgentRouter.org API base (OpenAI-compatible).
- * Docs: https://agentrouter.org/docs · Console: https://agentrouter.org/console/token
- * Override with AGENT_ROUTER_BASE_URL only when routing through a proxy.
+ * Official AgentRouter OpenAI-compatible API base — the `co.` host.
+ *
+ * VERIFIED LIVE (2026-08-29):
+ *   GET  https://co.agentrouter.org/v1/models   → 401 JSON (real API)
+ *   POST https://co.agentrouter.org/v1/chat/completions → 401 JSON on bad key
+ *   GET  https://agentrouter.org/v1/models      → 200 Aliyun-WAF HTML (NOT API)
+ * The bare www/docs host is fronted by an anti-bot page; server-side clients
+ * must use the co. API host. Official portal: https://co.agentrouter.org/portal
+ * ("Base URL OpenAI compatible: https://co.agentrouter.org/v1").
+ * Override AGENT_ROUTER_BASE_URL only when routing through a proxy.
  */
-const DEFAULT_BASE_URL = 'https://agentrouter.org/v1'
+const DEFAULT_BASE_URL = 'https://co.agentrouter.org/v1'
 
 /**
  * Detects an Aliyun-WAF anti-bot interstitial (the gateway's edge protection).
@@ -111,8 +124,16 @@ export class AgentRouterModule implements AiProvider {
     return key
   }
 
+  /** Base URL, normalized (no trailing slash, exactly one /v1 — the
+   *  AgentRouter OpenAI-compatible contract REQUIRES the /v1 suffix). */
+  get baseUrl(): string {
+    return normalizeOpenAiCompatibleBaseUrl(
+      process.env.AGENT_ROUTER_BASE_URL || DEFAULT_BASE_URL
+    )
+  }
+
   private getBaseUrl(): string {
-    return (process.env.AGENT_ROUTER_BASE_URL || DEFAULT_BASE_URL).replace(/\/+$/, '')
+    return this.baseUrl
   }
 
   isConfigured(): boolean {
