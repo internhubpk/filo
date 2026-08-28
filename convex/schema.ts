@@ -361,6 +361,9 @@ export default defineSchema({
     endedAt: v.optional(v.number()),
     pausedAt: v.optional(v.number()),
     resumedAt: v.optional(v.number()),
+    // Timestamp the subscription FIRST became active (paid confirmation via
+    // webhook/tracker reconciliation, or admin manual activation).
+    activatedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

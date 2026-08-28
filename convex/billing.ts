@@ -963,7 +963,6 @@ export const applySubscriptionTransition = mutation({
       case "active":
         patch.resumedAt = sub.status === "paused" ? now : undefined;
         patch.endedAt = undefined;
-        patch.failedAt = undefined;
         break;
       case "paused":
         patch.pausedAt = now;
