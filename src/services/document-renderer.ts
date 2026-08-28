@@ -299,6 +299,31 @@ export class PdfRenderer implements DocumentRenderer {
     const chunks: Buffer[] = []
     
     doc.on('data', (chunk: Buffer) => chunks.push(chunk))
+
+    // Completion promise — attached BEFORE any content is drawn so a pdfkit
+    // failure (missing font metrics in serverless bundles, invalid content,
+    // stream errors) REJECTS instead of leaving the render promise pending
+    // forever. Without this the endpoint hangs until the platform timeout
+    // and the generation job appears stuck at the render stage.
+    const done = new Promise<RendererOutput>((resolve, reject) => {
+      const fail = (err: Error) =>
+        reject(new Error(`PDF rendering failed: ${err.message}`))
+      doc.on('error', fail)
+      const timer = setTimeout(
+        () => fail(new Error('PDF rendering timed out after 120s')),
+        120_000
+      )
+      doc.on('end', () => {
+        clearTimeout(timer)
+        const buffer = Buffer.concat(chunks)
+        resolve({
+          buffer,
+          filename,
+          mimeType: 'application/pdf',
+          size: buffer.length,
+        })
+      })
+    })
     
     // Set up fonts and colors
     const primaryColor = document.specification.design.colors?.primary || '#1a1a1a'
@@ -393,18 +418,8 @@ export class PdfRenderer implements DocumentRenderer {
     
     // Finalize the document
     doc.end()
-    
-    return new Promise((resolve) => {
-      doc.on('end', () => {
-        const buffer = Buffer.concat(chunks)
-        resolve({
-          buffer,
-          filename,
-          mimeType: 'application/pdf',
-          size: buffer.length,
-        })
-      })
-    })
+
+    return done
   }
 
   private renderPdfTable(doc: any, data: any[]) {

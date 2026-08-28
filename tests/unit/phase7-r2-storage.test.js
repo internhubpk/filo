@@ -140,6 +140,27 @@ test('§3 render route classifies and logs the failure kind before responding', 
   assert.match(renderRoute, /\[GENERATION-RENDER\] R2 upload failed/)
 })
 
+test('§3a render route 500s are diagnosable (precise message, not generic)', () => {
+  const outerCatch = renderRoute.match(/\} catch \(error\) \{[\s\S]*?INTERNAL_ERROR[\s\S]*?\n  \}/)?.[0] || ''
+  assert.ok(outerCatch, 'outer catch block must exist')
+  assert.match(outerCatch, /Render failed: \$\{msg\.slice\(0, 300\)\}/, 'outer 500 must surface the precise reason')
+  assert.doesNotMatch(outerCatch, /error: 'Internal server error'/, 'generic hidden 500 message must be gone')
+})
+
+test('§3b COMPLETE_FAILED releases the render claim before returning', () => {
+  const block = renderRoute.match(/if \(!done\.success\) \{[\s\S]*?COMPLETE_FAILED[\s\S]*?\n    \}/)?.[0] || ''
+  assert.ok(block, 'COMPLETE_FAILED block must exist')
+  assert.match(block, /releaseRenderClaim/, 'complete-failure must release the claim so retries are not IN_FLIGHT-bounced')
+})
+
+test('§3c PDF renderer rejects on pdfkit errors and cannot hang forever', () => {
+  const pdf = read('src', 'services', 'document-renderer.ts')
+  const pdfRender = pdf.match(/class PdfRenderer[\s\S]*?async render\([\s\S]*?\n  \}/)?.[0] || ''
+  assert.match(pdfRender, /doc\.on\('error', fail\)/, 'pdfkit stream errors must reject the render promise')
+  assert.match(pdfRender, /timed out after 120s/, 'PDF render must be bounded by a timeout')
+  assert.match(pdfRender, /return done/, 'render must await the guarded promise')
+})
+
 // ---------------------------------------------------------------------------
 // §4 — files upload route
 // ---------------------------------------------------------------------------

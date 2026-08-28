@@ -301,6 +301,16 @@ export async function POST(request: NextRequest) {
     })) as { success: boolean; error?: string }
 
     if (!done.success) {
+      // Release the claim so the next retry (worker renderRetry / browser
+      // fallback) is not bounced as IN_FLIGHT for 100s. The file is already
+      // in R2 and the artifact saved — retrying is safe but should start now.
+      await convexClient.mutation(api.generation.releaseRenderClaim, {
+        serverToken,
+        jobId: jobId as any,
+        error: `Complete failed: ${(done.error || 'unknown').slice(0, 300)}`,
+      }).catch((releaseErr: unknown) => {
+        console.error('[GENERATION-RENDER] Failed to release render claim:', releaseErr)
+      })
       return bad(done.error || 'Could not complete job', 'COMPLETE_FAILED', 500)
     }
 
@@ -318,9 +328,19 @@ export async function POST(request: NextRequest) {
       },
     })
   } catch (error) {
+    const msg = error instanceof Error ? error.message : String(error)
     console.error('[GENERATION-RENDER] Unhandled error:', error)
+    // Diagnosable 500s: the UI progress card renders `error`, so surface the
+    // precise failure reason (bounded — no stacks, no secrets) instead of a
+    // generic string. This is what makes a FILO_SERVER_SECRET mismatch, a
+    // Convex mutation failure, or an SDK error visible on the job card
+    // without trawling server logs.
     return NextResponse.json(
-      { success: false, error: 'Internal server error', code: 'INTERNAL_ERROR' },
+      {
+        success: false,
+        error: `Render failed: ${msg.slice(0, 300)}`,
+        code: 'INTERNAL_ERROR',
+      },
       { status: 500 }
     )
   }
