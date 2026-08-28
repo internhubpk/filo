@@ -13,7 +13,7 @@
 
 import { NextRequest, NextResponse } from "next/server";
 import { requireUser, serverToken, convexQuery, jsonError } from "@/lib/billing-server";
-import { isSafepayConfigured } from "@/lib/safepay";
+import { isSafepayConfigured, getSafepayMode } from "@/lib/safepay";
 
 interface BillingOverview {
   user: { name: string; email: string; status: string };
@@ -72,6 +72,10 @@ export async function GET(request: NextRequest) {
         usedGenerations: overview.usage.generations,
         remainingGenerations: remaining,
         billingEnabled: isSafepayConfigured(),
+        // Non-secret: the hosted-checkout domain reveals it anyway. Lets the
+        // UI show the sandbox dummy-card hint so testers don't burn real
+        // cards against the 3DS emulator (real cards FAIL payer auth here).
+        safepayMode: getSafepayMode(),
       },
     });
   } catch (error) {

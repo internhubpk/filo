@@ -102,6 +102,7 @@ interface BillingData {
   planLimit?: number;
   planStorageMb?: number;
   billingEnabled?: boolean;
+  safepayMode?: string;
 }
 
 interface PlanRow {
@@ -577,6 +578,25 @@ function BillingContent() {
             <Info className="mt-0.5 size-3.5 shrink-0" />
             Online payments aren&apos;t configured on this deployment yet (SAFEPAY_SECRET_KEY missing).
             Plans below are shown for reference.
+          </div>
+        )}
+
+        {billing.data?.safepayMode === "sandbox" && (
+          <div className="mb-4 rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 text-xs">
+            <div className="flex items-start gap-2">
+              <CreditCard className="mt-0.5 size-3.5 shrink-0 text-amber-500" />
+              <div className="space-y-1">
+                <p className="font-medium text-amber-600 dark:text-amber-400">
+                  Sandbox mode — use Safepay&apos;s dummy card for test payments
+                </p>
+                <p className="text-muted-foreground">
+                  On Safepay&apos;s hosted page pay with card <code className="rounded bg-muted px-1 py-0.5 font-mono">5200 0000 0000 1096</code>,
+                  expiry <code className="rounded bg-muted px-1 py-0.5 font-mono">03/28</code>, CVC <code className="rounded bg-muted px-1 py-0.5 font-mono">111</code>,
+                  then pick the successful-authentication option in Safepay&apos;s 3D Secure emulator.
+                  Real cards always fail payer authentication in sandbox, and the same dummy card + email works only ~7–8 times per day.
+                </p>
+              </div>
+            </div>
           </div>
         )}
 
