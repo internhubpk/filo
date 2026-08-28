@@ -434,6 +434,8 @@ class ApiClient {
     planId?: string
     planTier?: string
     interval: 'monthly' | 'yearly'
+    /** Force a NEW Safepay session even when a young pending checkout exists. */
+    force?: boolean
   }): Promise<ApiResponse<{
     checkoutUrl: string
     paymentToken: string
@@ -549,6 +551,34 @@ class ApiClient {
 
   async adminPayments(status?: string): Promise<ApiResponse<any[]>> {
     return this.request(`/admin/payments${status ? `?status=${status}` : ''}`)
+  }
+
+  /**
+   * Billing diagnostics (admin-only): webhook deliveries, billing audit log,
+   * pending checkouts with tracker state — the "why isn't it syncing?" view.
+   */
+  async adminBillingDiagnostics(): Promise<ApiResponse<Record<string, any>>> {
+    return this.request('/admin/billing/diagnostics')
+  }
+
+  /**
+   * Webhook self-test (admin-only): signs a synthetic payment.succeeded event
+   * with the real webhook secret and POSTs it to our own webhook route.
+   * PASS proves: endpoint reachable + signature scheme/secret verify + ledger
+   * records deliveries — without making a real payment.
+   */
+  async adminWebhookSelfTest(): Promise<ApiResponse<{
+    pass: boolean
+    target: string
+    reachable: boolean
+    httpStatus: number | null
+    ledgerRecorded: boolean
+    message: string
+  }>> {
+    return this.request('/admin/billing/webhook-self-test', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
   }
 
   async adminWebhookEvents(status?: string): Promise<ApiResponse<any[]>> {

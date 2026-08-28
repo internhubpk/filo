@@ -137,6 +137,7 @@ interface VerifyPayload {
   subscriptionStatus?: string | null;
   mode?: "sandbox" | "production";
   subscriptionFlowConfigured?: boolean;
+  discovery?: { searched?: number; attached?: boolean; searchError?: string };
 }
 
 /**
@@ -161,8 +162,21 @@ function describeVerify(v: VerifyPayload | null): { line: string; tone: "info" |
     return { line: `Safepay's latest status: ${state} — the payment is still in progress on Safepay's side.`, tone: "info" };
   }
   if (v.reason === "no_tracker") {
+    const d = v.discovery;
+    if (d?.searched) {
+      return {
+        line: `No tracker is attached yet, so the server just searched Safepay's recent payments (${d.searched} seen) for this checkout's order id — none matched. Safepay's webhook or signed return can still confirm it; you can also keep checking.`,
+        tone: "warn",
+      };
+    }
+    if (d?.searchError) {
+      return {
+        line: `No tracker is attached yet and Safepay's payment search is unavailable (${d.searchError}). The webhook or signed return can still confirm this payment.`,
+        tone: "warn",
+      };
+    }
     return {
-      line: "This checkout has no Safepay payment tracker attached, so only Safepay's webhook or its signed redirect can confirm it. Set up the webhook (guide below), or start a new checkout.",
+      line: "This checkout has no Safepay payment tracker attached yet — the server checks Safepay's recent payments for it automatically. Safepay's webhook or signed redirect can also confirm it at any moment.",
       tone: "warn",
     };
   }
@@ -224,9 +238,20 @@ function BillingContent() {
   // so the user sees WHAT Safepay actually reports instead of a black box.
   const [lastVerify, setLastVerify] = useState<VerifyPayload | null>(null);
   const subId = sub?._id ?? null;
+  // Reset the bounded verifier for each NEW pending checkout — otherwise a
+  // timed-out first attempt would suppress auto-verification for the next one.
+  useEffect(() => {
+    setVerifyPolls(0);
+    setLastVerify(null);
+  }, [subId]);
   useEffect(() => {
     if (!pendingCheckout || confirmedForSub === subId) return;
-    if (verifyPolls > 240) return; // keep trying for ~20 minutes of tab time
+    // BOUNDED active verification (§16): ~36 seconds of automatic polling
+    // after the pending state appears, then STOP — a spinner must never run
+    // forever. Afterwards the banner explains the state, keeps the manual
+    // "Check payment status now" button, and the page data still refreshes
+    // quietly (20s) so a later webhook/return still flips the UI to Pro.
+    if (verifyPolls > 5) return; // 6 attempts × 6s ≈ 36s
     const t = setTimeout(async () => {
       setVerifyPolls((p) => p + 1);
       try {
@@ -246,7 +271,7 @@ function BillingContent() {
       } catch {
         /* transient — keep polling */
       }
-    }, 5_000);
+    }, 6_000);
     return () => clearTimeout(t);
   }, [pendingCheckout, verifyPolls, confirmedForSub, subId]);
 
@@ -301,7 +326,7 @@ function BillingContent() {
 
   const activePlanIds = useMemo(() => new Set((plans.data ?? []).map((p) => p._id)), [plans.data]);
 
-  async function startCheckout(plan: PlanRow) {
+  async function startCheckout(plan: PlanRow, opts: { force?: boolean } = {}) {
     if (plan.tier === "free") return;
     if (!plan.contactSales && plan.priceMonthly === 0 && plan.priceYearly === 0) return;
     if (plan.contactSales) {
@@ -310,8 +335,26 @@ function BillingContent() {
     }
     setCheckoutBusy(plan._id);
     try {
-      const res = await apiClient.startCheckout({ planId: plan._id, interval });
+      const res = await apiClient.startCheckout({ planId: plan._id, interval, force: opts.force });
       if (!res.success || !res.data?.checkoutUrl) {
+        // Idempotent Activate-Pro states (§21/§22): a friendly message beats
+        // an opaque "There was an error loading your checkout experience".
+        if (res.code === "ALREADY_SUBSCRIBED") {
+          toast.info("You're already subscribed", {
+            description: res.error || `You're already on ${plan.name}.`,
+            duration: 8000,
+          });
+          await billing.refresh();
+          return;
+        }
+        if (res.code === "CHECKOUT_PENDING") {
+          toast.info("Payment already in progress", {
+            description: res.error || "Check the payment status on this page.",
+            duration: 10000,
+          });
+          await billing.refresh();
+          return;
+        }
         // Safepay configuration failures carry a long operator-actionable
         // diagnosis — render it as the description, not a wall-of-text title.
         toast.error("Could not start checkout", {
@@ -382,14 +425,30 @@ function BillingContent() {
         return (
           <FadeIn>
             <div className="flex items-start gap-3 rounded-xl border border-amber-500/40 bg-amber-500/5 p-4">
-              <Loader2 className="mt-0.5 size-4.5 shrink-0 animate-spin text-amber-500" />
+              {verifyPolls > 5 ? (
+                <Clock className="mt-0.5 size-4.5 shrink-0 text-amber-500" />
+              ) : (
+                <Loader2 className="mt-0.5 size-4.5 shrink-0 animate-spin text-amber-500" />
+              )}
               <div className="flex-1 text-sm">
-                <p className="font-medium">Waiting for payment confirmation</p>
+                <p className="font-medium">
+                  {returnedFromCheckout && verifyPolls <= 5
+                    ? "Verifying your subscription…"
+                    : verifyPolls > 5
+                      ? "Your payment is still being verified"
+                      : "Waiting for payment confirmation"}
+                </p>
                 <p className="mt-0.5 text-muted-foreground">
                   {billing.data?.pendingPlan
                     ? <>You're still on the <span className="font-medium text-foreground">{billing.data.plan?.name ?? "Free"}</span> plan — <span className="font-medium text-foreground">{billing.data.pendingPlan.name}</span> activates the moment Safepay confirms this payment, even if you close this page and come back later.</>
-                    : "We check your payment directly with Safepay every few seconds — your plan activates the moment the payment is confirmed, even if you close this page and come back later."}
+                    : "We check your payment directly with Safepay — your plan activates the moment the payment is confirmed, even if you close this page and come back later."}
                 </p>
+                {verifyPolls > 5 && (
+                  <p className="mt-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[13px] leading-relaxed text-amber-700 dark:text-amber-400">
+                    Your payment was received, but your subscription is still being verified. Please refresh shortly —
+                    or press "Check payment status now" to verify immediately. This page never claims Pro before Safepay confirms it.
+                  </p>
+                )}
                 {lastVerify && (
                   <p
                     className={cn(
@@ -426,7 +485,7 @@ function BillingContent() {
                     variant="ghost"
                     onClick={() => {
                       const pro = (plans.data ?? []).find((p) => p.tier === "pro");
-                      if (pro) void startCheckout(pro);
+                      if (pro) void startCheckout(pro, { force: true });
                     }}
                   >
                     <CreditCard className="mr-1.5 size-3.5" />

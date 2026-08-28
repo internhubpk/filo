@@ -33,6 +33,21 @@ import { appUrl, serverToken, convexMutation } from "@/lib/billing-server";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
+// Tracker param names seen across Safepay integrations (beacon flow, subscribe
+// flow, WooCommerce plugin). The subscribe flow's return parameter names are
+// not publicly documented, so the extraction is intentionally wide.
+const TRACKER_KEYS = ["tracker", "track_id", "trackId", "tracking_id", "token", "beacon"];
+const SIGNATURE_KEYS = ["signature", "sig", "hash", "hmac"];
+const ORDER_KEYS = ["order_id", "orderId", "reference"];
+
+/** Log ONLY safe diagnostic metadata — param NAMES + truncated tracker-ish values. */
+function logReturnDiagnostics(channel: string, keys: string[], tracker?: string, orderId?: string) {
+  console.info(
+    `[billing/return] ${channel}: params=[${keys.join(",")}] ` +
+      `tracker=${tracker ? tracker.slice(0, 14) + "…" : "none"} order_id=${orderId ?? "none"}`
+  );
+}
+
 type BounceStatus = "confirmed" | "return" | "cancelled" | "invalid_signature" | "failed";
 
 function bounce(status: BounceStatus, extra: Record<string, string> = {}) {
@@ -152,33 +167,61 @@ export async function GET(request: NextRequest) {
   // server-to-server check instead of blindly bouncing — this is what
   // recovers payers whose signed return POST never made it (e.g. it went to
   // a stale domain and 404'd).
-  const tracker = request.nextUrl.searchParams.get("tracker") ?? undefined;
-  if (!tracker) {
-    return bounce("cancelled");
-  }
-  const stateSubscriptionId = request.nextUrl.searchParams.get("subscriptionId") ?? undefined;
+  const params = request.nextUrl.searchParams;
+  const tracker = TRACKER_KEYS.map((k) => params.get(k) ?? undefined).find(Boolean);
+  const stateSubscriptionId = params.get("subscriptionId") ?? undefined;
+  const orderId = ORDER_KEYS.map((k) => params.get(k) ?? undefined).find(Boolean);
   const CONVEX_ID_RE = /^[a-z0-9]{25,40}$/;
   const fallbackSubscriptionId =
-    stateSubscriptionId && CONVEX_ID_RE.test(stateSubscriptionId) ? stateSubscriptionId : undefined;
+    stateSubscriptionId && CONVEX_ID_RE.test(stateSubscriptionId)
+      ? stateSubscriptionId
+      : orderId && CONVEX_ID_RE.test(orderId)
+        ? orderId
+        : undefined;
+
+  if (!tracker) {
+    // NOTE: cancels NEVER land here — cancel_url points at /billing directly.
+    // A trackerless GET on this route is Safepay redirecting back with param
+    // names we didn't recognise (or none at all). Log what arrived (names
+    // only) and bounce as "return" so the pending banner keeps working
+    // instead of a misleading "Checkout cancelled" after a successful pay.
+    logReturnDiagnostics("GET without recognised tracker", [...params.keys()]);
+    return bounce("return");
+  }
+  logReturnDiagnostics("GET", [...params.keys()], tracker, orderId);
   const status = await reconcileTrackerOnly(tracker, fallbackSubscriptionId);
   return bounce(status, { tracker });
 }
 
 export async function POST(request: NextRequest) {
   let fields: Record<string, string | undefined> = {};
+  let isJson = false;
   try {
-    const form = await request.formData();
-    fields = Object.fromEntries(
-      Array.from(form.entries()).map(([k, v]) => [k, typeof v === "string" ? v : undefined])
-    );
+    const contentType = request.headers.get("content-type") ?? "";
+    if (contentType.includes("application/json")) {
+      // Some Safepay flows POST the return as JSON — accept it.
+      const json = (await request.json().catch(() => null)) as Record<string, unknown> | null;
+      if (json && typeof json === "object") {
+        isJson = true;
+        for (const [k, v] of Object.entries(json)) {
+          fields[k] = typeof v === "string" ? v : undefined;
+        }
+      }
+    } else {
+      const form = await request.formData();
+      fields = Object.fromEntries(
+        Array.from(form.entries()).map(([k, v]) => [k, typeof v === "string" ? v : undefined])
+      );
+    }
   } catch {
-    // Not a form body — treat like a plain return.
+    // Not a form/JSON body — treat like a plain return.
+    logReturnDiagnostics("POST with unreadable body", [request.headers.get("content-type") ?? "unknown"]);
     return bounce("return");
   }
 
-  const tracker = pick(fields, "tracker", "beacon", "token");
-  const signature = pick(fields, "signature", "sig", "hash");
-  const orderId = pick(fields, "order_id", "orderId", "reference");
+  const tracker = pick(fields, ...TRACKER_KEYS);
+  const signature = pick(fields, ...SIGNATURE_KEYS);
+  const orderId = pick(fields, ...ORDER_KEYS);
   // Our own checkout state rides on the redirect_url query string (Safepay
   // POSTs to that exact URL) — it identifies the payment even when the
   // stored token isn't the tracker (subscription flow).
@@ -194,6 +237,12 @@ export async function POST(request: NextRequest) {
         ? orderId
         : undefined;
   const label = `tracker=${tracker?.slice(0, 12) ?? "n/a"}… order_id=${orderId ?? "n/a"}`;
+  logReturnDiagnostics(
+    `POST${isJson ? " (json)" : " (form)"}`,
+    Object.keys(fields).concat([...request.nextUrl.searchParams.keys()]),
+    tracker,
+    orderId
+  );
 
   if (tracker && signature) {
     if (!verifyReturnSignature(tracker, signature)) {
@@ -212,5 +261,8 @@ export async function POST(request: NextRequest) {
     return bounce(status, { tracker });
   }
 
+  // No tracker under ANY known param name — bounce as "return" (keeps the
+  // pending banner + poller alive) rather than claiming anything. The
+  // diagnostics line above records which params DID arrive.
   return bounce("return");
 }

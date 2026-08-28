@@ -819,6 +819,106 @@ export const resolveSubscriptionForWebhook = query({
 });
 
 /**
+ * AUTHORITATIVE user resolution for webhooks — resolves the FILO USER from
+ * OUR OWN checkout state (data.metadata.order_id = our subscription id)
+ * BEFORE ever falling back to Safepay customer ids or the payer email.
+ *
+ * Why: the payer can CHANGE their email on Safepay's hosted page (and in
+ * practice does — see the sandbox dummy-card daily limit workaround). An
+ * email-based resolution then fails (or worse, matches nobody) even though
+ * the webhook is a perfectly valid payment confirmation for our checkout.
+ * order_id is created by US at checkout time, so it is the safest key.
+ */
+export const resolveSubscriptionOwner = query({
+  args: {
+    serverToken: v.string(),
+    subscriptionDbId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    let sub: any = null;
+    try {
+      sub = await ctx.db.get(args.subscriptionDbId as Id<"subscriptions">);
+    } catch {
+      return null; // invalid id format — not our subscription id
+    }
+    if (!sub) return null;
+    return {
+      userId: sub.userId as Id<"users">,
+      subscriptionId: sub._id as Id<"subscriptions">,
+      status: sub.status as string,
+      planId: sub.planId as Id<"plans">,
+    };
+  },
+});
+
+/**
+ * PRE-FLIGHT CHECKOUT GATE — decides what "Activate <plan>" may do BEFORE
+ * another Safepay session is created (prevents duplicate subscriptions and
+ * surfaces the "already subscribed" state instead of an opaque Safepay 502).
+ *
+ *   already_subscribed — an ACTIVE subscription for THIS plan (+ interval)
+ *                        exists; the UI must show "already on <plan>".
+ *   checkout_pending   — a young PENDING checkout exists; the UI must offer
+ *                        "payment in progress / verify" instead of spawning
+ *                        a second Safepay subscription (Safepay only allows
+ *                        one subscription per customer+plan — the second
+ *                        call is what produced "plan already subscribed").
+ *   allowed            — proceed with a new checkout.
+ */
+export const getCheckoutGate = query({
+  args: {
+    serverToken: v.string(),
+    userId: v.id("users"),
+    planId: v.id("plans"),
+    interval: v.union(v.literal("monthly"), v.literal("yearly")),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+
+    // Latest ACTIVE subscription — if it is for this SAME plan+interval the
+    // user is already subscribed and no new checkout may be created.
+    const active = await ctx.db
+      .query("subscriptions")
+      .withIndex("by_userId_status", (q: any) => q.eq("userId", args.userId).eq("status", "active"))
+      .order("desc")
+      .first();
+    if (active && String(active.planId) === String(args.planId) && active.interval === args.interval) {
+      return {
+        action: "already_subscribed" as const,
+        subscriptionId: active._id as Id<"subscriptions">,
+      };
+    }
+
+    // Young PENDING checkout — block duplicate Safepay sessions. The billing
+    // page's pending banner (verify poller / tracker discovery / webhook)
+    // is the correct surface for this state. Stale pendings (>2h) no longer
+    // block: createPendingSubscription supersedes them.
+    const pendingPayment: any = await ctx.db
+      .query("payments")
+      .withIndex("by_userId", (q: any) => q.eq("userId", args.userId))
+      .order("desc")
+      .first();
+    if (pendingPayment && pendingPayment.status === "pending") {
+      const ageMs = Date.now() - (pendingPayment.createdAt ?? 0);
+      const pendingSub = pendingPayment.subscriptionId
+        ? await ctx.db.get(pendingPayment.subscriptionId)
+        : null;
+      if (pendingSub && (pendingSub as any).status === "pending" && ageMs < 2 * 60 * 60 * 1000) {
+        return {
+          action: "checkout_pending" as const,
+          subscriptionId: pendingSub._id as Id<"subscriptions">,
+          paymentId: pendingPayment._id as Id<"payments">,
+          ageMs,
+        };
+      }
+    }
+
+    return { action: "allowed" as const };
+  },
+});
+
+/**
  * Apply a subscription state transition (the webhook state machine).
  * Also keeps users.planId in sync so entitlements follow confirmed state.
  */
@@ -1229,6 +1329,52 @@ export const reconcileCheckoutFromTracker = mutation({
     });
 
     return { applied: true, paymentStatus: "succeeded" as const, subscriptionStatus };
+  },
+});
+
+/**
+ * Attach a discovered Safepay tracker to a pending payment (tracker
+ * discovery). The SUBSCRIPTION flow stores only the passport auth token at
+ * checkout — the real track_* id becomes known later (webhook metadata,
+ * signed return, or the reporter payments-search). Once discovered, the
+ * poller can verify via the Fetch Tracker API like any one-time payment.
+ * Pending-only and idempotent: never rewrites an already-set tracker or a
+ * processed payment.
+ */
+export const attachTrackerToPayment = mutation({
+  args: {
+    serverToken: v.string(),
+    paymentId: v.id("payments"),
+    tracker: v.string(),
+    discoveredVia: v.string(),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    const payment: any = await ctx.db.get(args.paymentId);
+    if (!payment) return { applied: false, reason: "payment_not_found" as const };
+    if (payment.status !== "pending") {
+      return { applied: false, reason: "payment_not_pending" as const };
+    }
+    if (payment.safepayTrackingId === args.tracker) {
+      return { applied: false, reason: "already_attached" as const };
+    }
+    await ctx.db.patch(args.paymentId, {
+      safepayTrackingId: args.tracker,
+      updatedAt: Date.now(),
+    });
+    await ctx.db.insert("auditLogs", {
+      actorType: "system",
+      action: "billing.tracker_discovered",
+      targetType: "payment",
+      targetId: args.paymentId,
+      metadata: {
+        tracker: args.tracker,
+        discoveredVia: args.discoveredVia,
+        userId: payment.userId,
+      },
+      createdAt: Date.now(),
+    });
+    return { applied: true };
   },
 });
 

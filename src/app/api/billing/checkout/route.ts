@@ -80,7 +80,7 @@ export async function POST(request: NextRequest) {
     }
 
     const body = (await request.json().catch(() => null)) as
-      | { planId?: string; planTier?: string; interval?: string }
+      | { planId?: string; planTier?: string; interval?: string; force?: boolean }
       | null;
     if (!body?.planId && !body?.planTier) {
       return jsonError(400, "planId or planTier is required", "BAD_REQUEST");
@@ -124,6 +124,47 @@ export async function POST(request: NextRequest) {
     const amount = interval === "yearly" ? plan.priceYearly : plan.priceMonthly;
     if (!amount || amount <= 0) {
       return jsonError(400, "Invalid plan amount", "PLAN_INVALID_AMOUNT");
+    }
+
+    // ---- PRE-FLIGHT GATE (§10/§11/§21): never blindly create another
+    // Safepay subscription. Decide from the AUTHORITATIVE Convex state first.
+    const gate = await convexQuery<{
+      action: "already_subscribed" | "checkout_pending" | "allowed";
+      subscriptionId?: string;
+      paymentId?: string;
+      ageMs?: number;
+    }>("billing:getCheckoutGate", {
+      serverToken: serverToken(),
+      userId: user.id,
+      planId: plan._id,
+      interval,
+    });
+    if (gate.action === "already_subscribed") {
+      return NextResponse.json(
+        {
+          success: false,
+          error: `You're already on ${plan.name}. Manage your subscription from the billing page.`,
+          code: "ALREADY_SUBSCRIBED",
+        },
+        { status: 409 }
+      );
+    }
+    if (gate.action === "checkout_pending" && !body.force) {
+      // A young pending checkout exists — offer verification instead of a
+      // second Safepay session (which Safepay rejects with "plan already
+      // subscribed" once the first attempt was actually PAID).
+      const ageMin = Math.round((gate.ageMs ?? 0) / 60000);
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            `You already have a payment in progress for ${plan.name} (started ${ageMin} min ago). ` +
+            "Check its status on the billing page — or press Restart checkout again to force a new one.",
+          code: "CHECKOUT_PENDING",
+          data: { subscriptionId: gate.subscriptionId },
+        },
+        { status: 409 }
+      );
     }
 
     // ---- Persist pending subscription + payment (audit trail starts here) ----
@@ -212,6 +253,25 @@ export async function POST(request: NextRequest) {
           userId: pendingUserId,
           reason: error.diagnosis.message.slice(0, 300),
         }).catch((e) => console.warn("[billing/checkout] failed to retire pending checkout:", e));
+      }
+      // Safepay enforces ONE subscription per customer+plan. When it refuses
+      // with "plan already subscribed" the customer HAS an active Safepay
+      // subscription that Filo failed to sync (webhook/return gap) — surface
+      // an honest, actionable state instead of an opaque 502, and let the
+      // billing page's verification/recovery paths reconcile it.
+      const safepayText = (error.diagnosis.safepayErrors ?? []).join(" ").toLowerCase();
+      if (safepayText.includes("already subscribed") || safepayText.includes("subscription already")) {
+        return NextResponse.json(
+          {
+            success: false,
+            error:
+              "Safepay reports this plan is already subscribed — your payment likely succeeded but hasn't synced yet. " +
+              "Open the billing page and press \"Check payment status now\"; it verifies directly with Safepay and activates your plan.",
+            code: "ALREADY_SUBSCRIBED",
+            diagnosis: diagnosisPayload(error.diagnosis, diag),
+          },
+          { status: 409 }
+        );
       }
       return NextResponse.json(
         {

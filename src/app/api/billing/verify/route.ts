@@ -21,7 +21,7 @@
 // =============================================================================
 
 import { NextRequest, NextResponse } from "next/server";
-import { fetchTrackerState, getSafepayMode, isSubscriptionFlowConfigured } from "@/lib/safepay";
+import { fetchTrackerState, getSafepayMode, isSubscriptionFlowConfigured, searchSafepayPayments } from "@/lib/safepay";
 import { requireUser, serverToken, convexQuery, convexMutation } from "@/lib/billing-server";
 
 export const runtime = "nodejs";
@@ -32,6 +32,7 @@ interface PendingCheckout {
   tracker: string | null;
   paymentStatus: string;
   subscriptionStatus: string | null;
+  subscriptionId: string | null;
   createdAt: number;
 }
 
@@ -59,13 +60,47 @@ export async function POST(request: NextRequest) {
       // Either the row predates tracker storage, or the checkout used the
       // true subscription flow (stores a passport auth token, not a track_*)
       // — Safepay only exposes those via webhook/signed return, never via the
-      // Fetch Tracker API, so say so instead of a misleading "unavailable".
+      // single-tracker Fetch Tracker API.
+      //
+      // TRACKER DISCOVERY: ask Safepay's reporter payments-search for recent
+      // payments on THIS merchant account and adopt the tracker whose
+      // order_id matches OUR subscription id (order_id is set by us at
+      // checkout — the only safely-correlatable key; we never guess from
+      // amounts or emails). Once adopted, verification proceeds normally.
+      const discovery: Record<string, unknown> = {};
+      if (pending.subscriptionId) {
+        const search = await searchSafepayPayments(20);
+        if (search.ok) {
+          discovery.searched = search.payments.length;
+          const match = search.payments.find(
+            (p) => p.orderId && String(p.orderId) === String(pending.subscriptionId) && p.tracker
+          );
+          if (match?.tracker) {
+            const attached = (await convexMutation("billing:attachTrackerToPayment", {
+              serverToken: serverToken(),
+              paymentId: pending.paymentId,
+              tracker: match.tracker,
+              discoveredVia: "verify:payments_search",
+            }).catch((e) => ({ applied: false, error: String(e) }))) as { applied?: boolean };
+            discovery.attached = Boolean(attached?.applied);
+            if (attached?.applied) {
+              console.info(
+                `[billing/verify] tracker ${match.tracker.slice(0, 14)}… discovered for subscription ${pending.subscriptionId} — retrying with tracker`
+              );
+              return await verifyWithTracker(match.tracker, pending.subscriptionStatus, diagnostics);
+            }
+          }
+        } else {
+          discovery.searchError = search.error?.slice(0, 160);
+        }
+      }
       return NextResponse.json({
         success: true,
         data: {
           status: "pending",
           reason: "no_tracker",
           subscriptionStatus: pending.subscriptionStatus,
+          discovery,
           ...diagnostics,
         },
       });
@@ -80,69 +115,7 @@ export async function POST(request: NextRequest) {
       });
     }
 
-    const result = await fetchTrackerState(pending.tracker);
-    if (!result.ok) {
-      return NextResponse.json({
-        success: true,
-        data: {
-          status: "pending",
-          reason: "tracker_unavailable",
-          detail: result.error,
-          subscriptionStatus: pending.subscriptionStatus,
-          ...diagnostics,
-        },
-      });
-    }
-
-    if (result.outcome.kind === "paid") {
-      const applied = await convexMutation<{
-        applied: boolean;
-        reason?: string;
-        paymentStatus?: string;
-        subscriptionStatus?: string | null;
-      }>("billing:reconcileCheckoutFromTracker", {
-        serverToken: serverToken(),
-        tracker: pending.tracker,
-        outcome: "paid",
-        source: "tracker_api",
-        safepayState: result.outcome.state,
-      });
-      const confirmed =
-        applied.applied ||
-        (applied.reason === "already_processed" && applied.subscriptionStatus === "active");
-      return NextResponse.json({
-        success: true,
-        data: {
-          status: confirmed ? "confirmed" : "pending",
-          subscriptionStatus: applied.subscriptionStatus ?? pending.subscriptionStatus,
-          ...diagnostics,
-        },
-      });
-    }
-
-    if (result.outcome.kind === "failed") {
-      await convexMutation("billing:reconcileCheckoutFromTracker", {
-        serverToken: serverToken(),
-        tracker: pending.tracker,
-        outcome: "failed",
-        source: "tracker_api",
-        safepayState: result.outcome.state,
-      }).catch(() => null);
-      return NextResponse.json({
-        success: true,
-        data: { status: "failed", state: result.outcome.state },
-      });
-    }
-
-    return NextResponse.json({
-      success: true,
-      data: {
-        status: "pending",
-        state: result.outcome.state,
-        subscriptionStatus: pending.subscriptionStatus,
-        ...diagnostics,
-      },
-    });
+    return await verifyWithTracker(pending.tracker, pending.subscriptionStatus, diagnostics);
   } catch (error) {
     console.error("[API /billing/verify] Error:", error);
     return NextResponse.json(
@@ -150,4 +123,75 @@ export async function POST(request: NextRequest) {
       { status: 500 }
     );
   }
+}
+
+/** Shared tail: verify an adopted/known tracker and reconcile conclusively. */
+async function verifyWithTracker(
+  tracker: string,
+  subscriptionStatus: string | null,
+  diagnostics: Record<string, unknown>
+): Promise<NextResponse> {
+  const result = await fetchTrackerState(tracker);
+  if (!result.ok) {
+    return NextResponse.json({
+      success: true,
+      data: {
+        status: "pending",
+        reason: "tracker_unavailable",
+        detail: result.error,
+        subscriptionStatus,
+        ...diagnostics,
+      },
+    });
+  }
+
+  if (result.outcome.kind === "paid") {
+    const applied = await convexMutation<{
+      applied: boolean;
+      reason?: string;
+      paymentStatus?: string;
+      subscriptionStatus?: string | null;
+    }>("billing:reconcileCheckoutFromTracker", {
+      serverToken: serverToken(),
+      tracker,
+      outcome: "paid",
+      source: "tracker_api",
+      safepayState: result.outcome.state,
+    });
+    const confirmed =
+      applied.applied ||
+      (applied.reason === "already_processed" && applied.subscriptionStatus === "active");
+    return NextResponse.json({
+      success: true,
+      data: {
+        status: confirmed ? "confirmed" : "pending",
+        subscriptionStatus: applied.subscriptionStatus ?? subscriptionStatus,
+        ...diagnostics,
+      },
+    });
+  }
+
+  if (result.outcome.kind === "failed") {
+    await convexMutation("billing:reconcileCheckoutFromTracker", {
+      serverToken: serverToken(),
+      tracker,
+      outcome: "failed",
+      source: "tracker_api",
+      safepayState: result.outcome.state,
+    }).catch(() => null);
+    return NextResponse.json({
+      success: true,
+      data: { status: "failed", state: result.outcome.state },
+    });
+  }
+
+  return NextResponse.json({
+    success: true,
+    data: {
+      status: "pending",
+      state: result.outcome.state,
+      subscriptionStatus,
+      ...diagnostics,
+    },
+  });
 }

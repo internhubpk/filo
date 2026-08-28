@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Plus, Pencil, PlugZap, Power, RefreshCw } from "lucide-react";
+import { Loader2, Plus, Pencil, PlugZap, Power, RefreshCw, Search, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
 import { useApi } from "@/hooks/use-api";
@@ -86,6 +86,10 @@ export default function AdminPlansPage() {
   const [safepayStatus, setSafepayStatus] = useState<SafepayStatus | null>(null);
   const [statusLoading, setStatusLoading] = useState(false);
   const [probing, setProbing] = useState(false);
+  const [selfTesting, setSelfTesting] = useState(false);
+  const [selfTestResult, setSelfTestResult] = useState<{ pass: boolean; message: string; target: string } | null>(null);
+  const [diagnostics, setDiagnostics] = useState<Record<string, any> | null>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
 
   const refreshSafepayStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -122,6 +126,42 @@ export default function AdminPlansPage() {
       }
     } finally {
       setProbing(false);
+    }
+  }
+
+  /** End-to-end webhook pipeline test: signs a synthetic event with the real
+   *  webhook secret and POSTs it to our own webhook route. */
+  async function runWebhookSelfTest() {
+    setSelfTesting(true);
+    try {
+      const res = await apiClient.adminWebhookSelfTest();
+      if (!res.success || !res.data) {
+        toast.error("Webhook self-test failed", { description: res.error, duration: 20000 });
+        return;
+      }
+      setSelfTestResult(res.data);
+      if (res.data.pass) {
+        toast.success("Webhook self-test PASS", { description: res.data.message, duration: 12000 });
+      } else {
+        toast.error("Webhook self-test FAIL", { description: res.data.message, duration: 20000 });
+      }
+    } finally {
+      setSelfTesting(false);
+    }
+  }
+
+  /** Fetch the billing diagnostics summary (webhook deliveries + pending checkouts). */
+  async function loadBillingDiagnostics() {
+    setDiagLoading(true);
+    try {
+      const res = await apiClient.adminBillingDiagnostics();
+      if (!res.success || !res.data) {
+        toast.error("Could not load billing diagnostics", { description: res.error });
+        return;
+      }
+      setDiagnostics(res.data);
+    } finally {
+      setDiagLoading(false);
     }
   }
 
@@ -251,10 +291,20 @@ export default function AdminPlansPage() {
             )}
             {statusLoading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
           </div>
-          <Button variant="outline" size="sm" onClick={() => void probeSafepay()} disabled={probing}>
-            {probing ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <PlugZap className="mr-1.5 size-4" />}
-            Test Safepay connection
-          </Button>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => void loadBillingDiagnostics()} disabled={diagLoading}>
+              {diagLoading ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <Search className="mr-1.5 size-4" />}
+              Billing diagnostics
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void runWebhookSelfTest()} disabled={selfTesting}>
+              {selfTesting ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <Webhook className="mr-1.5 size-4" />}
+              Webhook self-test
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void probeSafepay()} disabled={probing}>
+              {probing ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <PlugZap className="mr-1.5 size-4" />}
+              Test Safepay connection
+            </Button>
+          </div>
         </div>
         {safepayStatus && (
           <div className="mt-3 space-y-2">
@@ -280,6 +330,33 @@ export default function AdminPlansPage() {
                 {safepayStatus.probe.ok ? "PASS" : "FAIL"}
                 {safepayStatus.probe.httpStatus != null ? ` (HTTP ${safepayStatus.probe.httpStatus})` : ""}: {safepayStatus.probe.message}
               </p>
+            )}
+            {selfTestResult && (
+              <p className={`text-xs ${selfTestResult.pass ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
+                Webhook self-test {selfTestResult.pass ? "PASS" : "FAIL"} → {selfTestResult.target}
+                <span className="mt-1 block whitespace-pre-wrap font-sans text-muted-foreground">{selfTestResult.message}</span>
+              </p>
+            )}
+            {diagnostics && (
+              <div className="rounded-md border bg-muted/40 p-2.5 text-xs">
+                <p className="font-medium">
+                  Webhook deliveries recorded: {diagnostics.summary?.webhookEventsRecorded ?? 0} · pending payments: {diagnostics.summary?.pendingPayments ?? 0}
+                </p>
+                {diagnostics.summary?.webhookHint && (
+                  <p className="mt-1 text-amber-600 dark:text-amber-400">{diagnostics.summary.webhookHint}</p>
+                )}
+                {(diagnostics.webhookEvents ?? []).slice(0, 5).map((e: any, i: number) => (
+                  <p key={i} className="mt-1 font-mono text-[11px] text-muted-foreground">
+                    {new Date(e.receivedAt).toLocaleTimeString()} · {e.eventType} · {e.status}
+                    {e.error ? ` · ${String(e.error).slice(0, 80)}` : ""}
+                  </p>
+                ))}
+                {(diagnostics.pendingCheckouts ?? []).slice(0, 5).map((p: any) => (
+                  <p key={p.paymentId} className="mt-1 font-mono text-[11px] text-muted-foreground">
+                    pending · sub {String(p.subscriptionId ?? "?").slice(0, 10)}… · {p.currency} {p.amount} · tracker: {p.hasTracker ? "yes" : "NO"}
+                  </p>
+                ))}
+              </div>
             )}
           </div>
         )}

@@ -130,6 +130,16 @@ export async function POST(request: NextRequest) {
 
   const event = normalizeWebhookEvent(payload);
 
+  // SAFE diagnostic metadata (§29): never secrets, never full tokens.
+  console.info(
+    `[SAFEPAY WEBHOOK] envelope: type=${event.eventType} id=${event.eventId} ` +
+      `tracker=${event.trackingId ? event.trackingId.slice(0, 14) + "…" : "none"} ` +
+      `order_id=${event.filoSubscriptionId ?? "none"} state=${event.safepayState ?? "none"} ` +
+      `sub_id=${event.safepaySubscriptionId ?? "none"} amount=${event.amountPkr ?? "?"} ${event.currency ?? "PKR"} ` +
+      `email=${event.customerEmail ? event.customerEmail.slice(0, 2) + "***@" + (event.customerEmail.split("@")[1] ?? "") : "none"} ` +
+      `bytes=${rawBody.length}`
+  );
+
   // ---- 2b. Merchant guard: the payload carries the sender's merchant API
   // key (sec_…) — reject events that were signed correctly but belong to a
   // DIFFERENT Safepay account (e.g. a misconfigured dashboard endpoint).
@@ -165,23 +175,79 @@ export async function POST(request: NextRequest) {
   }
 
   // ---- 4. Resolve the Filo user ----
+  // ORDER MATTERS (§9/§26): resolve from OUR checkout state first
+  // (data.metadata.order_id = our subscription id — created by us, immune to
+  // the payer changing their email on Safepay's hosted page), then Safepay
+  // customer id, then the payer email LAST. Email-only resolution silently
+  // dropped valid confirmations whenever the hosted-page email differed.
   let user: WebhookUser | null = null;
-  try {
-    user = await convexQuery<WebhookUser | null>("billing:resolveUserForWebhook", {
-      serverToken: serverToken(),
-      customerId: event.customerId,
-      email: event.customerEmail,
-    });
-  } catch (err) {
-    console.error("[SAFEPAY WEBHOOK] user resolution failed:", err);
+  if (event.filoSubscriptionId) {
+    try {
+      const owner = await convexQuery<{
+        userId: string;
+        subscriptionId: string;
+        status: string;
+      } | null>("billing:resolveSubscriptionOwner", {
+        serverToken: serverToken(),
+        subscriptionDbId: event.filoSubscriptionId,
+      });
+      if (owner) {
+        user = { _id: owner.userId, email: "resolved-by-order-id" };
+        console.info(`[SAFEPAY WEBHOOK] user resolved via order_id → subscription ${owner.subscriptionId} (status=${owner.status})`);
+      }
+    } catch (err) {
+      console.warn("[SAFEPAY WEBHOOK] order_id resolution failed:", err instanceof Error ? err.message : err);
+    }
+  }
+  if (!user) {
+    try {
+      user = await convexQuery<WebhookUser | null>("billing:resolveUserForWebhook", {
+        serverToken: serverToken(),
+        customerId: event.customerId,
+        email: event.customerEmail,
+      });
+    } catch (err) {
+      console.error("[SAFEPAY WEBHOOK] user resolution failed:", err);
+    }
   }
 
   if (!user) {
     // Informational events may legitimately have no user (e.g. error:occurred
     // without customer context). Record as ignored so admins see them.
-    console.warn(`[SAFEPAY WEBHOOK] no Filo user for event ${event.eventId} (${event.eventType})`);
+    console.warn(
+      `[SAFEPAY WEBHOOK] no Filo user for event ${event.eventId} (${event.eventType}) ` +
+        `order_id=${event.filoSubscriptionId ?? "none"} customer=${event.customerId ?? "none"} — recorded as ignored`
+    );
     await recordOutcome(eventDbId, "ignored", { error: "no matching Filo user" });
     return NextResponse.json({ success: true, ignored: true });
+  }
+
+  // ---- 4b. Tracker attachment ----
+  // Store Safepay's tracker on OUR pending checkout payment as soon as any
+  // event carries it. Two wins: (a) upsertPaymentFromWebhook then UPDATES
+  // that row (index lookup by tracking id) instead of inserting a duplicate
+  // payment for the same checkout, and (b) the billing page's verify poller
+  // can track the payment from then on.
+  if (event.trackingId && event.trackingId.startsWith("track_")) {
+    try {
+      const pending = await convexQuery<{ paymentId: string; tracker: string | null } | null>(
+        "billing:getPendingCheckoutForUser",
+        { serverToken: serverToken(), userId: user._id }
+      );
+      if (pending && (!pending.tracker || !pending.tracker.startsWith("track_"))) {
+        const attached = await convexMutation("billing:attachTrackerToPayment", {
+          serverToken: serverToken(),
+          paymentId: pending.paymentId,
+          tracker: event.trackingId,
+          discoveredVia: `webhook:${event.eventType}`,
+        });
+        if ((attached as { applied?: boolean })?.applied) {
+          console.info(`[SAFEPAY WEBHOOK] tracker attached to pending payment ${pending.paymentId}`);
+        }
+      }
+    } catch (err) {
+      console.warn("[SAFEPAY WEBHOOK] tracker attachment failed:", err instanceof Error ? err.message : err);
+    }
   }
 
   // ---- 5. State machine ----

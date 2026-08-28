@@ -429,6 +429,134 @@ export async function fetchTrackerState(tracker: string): Promise<TrackerFetchRe
 }
 
 // -----------------------------------------------------------------------------
+// Payments search — tracker discovery for the subscription flow
+// -----------------------------------------------------------------------------
+// The official @sfpy/node-core SDK exposes Reporter.Payments.search =
+// GET {api}/reporter/api/v1/payments (same X-SFPY-MERCHANT-SECRET auth as the
+// single-tracker fetch). The subscription checkout only stores a passport
+// auth token — the real track_* id becomes known when Safepay tells us
+// (webhook / signed return). When neither arrives, the search endpoint lets
+// us DISCOVER the tracker server-side and reconcile the pending checkout.
+
+/** One normalized payment row from the reporter search endpoint. */
+export interface SearchedPayment {
+  tracker?: string;
+  state?: string;
+  orderId?: string;
+  amount?: number;
+  currency?: string;
+  createdAt?: number;
+  customerEmail?: string;
+}
+
+/**
+ * Pure, defensive parser for the reporter search response. The exact JSON
+ * shape is not publicly documented, so every plausible container is handled
+ * ({data:[...]}, {payments:[...]}, bare array, paginated {items:[…]}).
+ * Values are extracted from wherever they appear; anything secret-looking is
+ * never copied (we only read the whitelisted keys below).
+ */
+export function parsePaymentsSearchResponse(payload: unknown): SearchedPayment[] {
+  const rows: unknown[] =
+    Array.isArray(payload)
+      ? payload
+      : payload && typeof payload === "object"
+        ? ((payload as Record<string, unknown>).data as unknown[]) ??
+          ((payload as Record<string, unknown>).payments as unknown[]) ??
+          ((payload as Record<string, unknown>).items as unknown[]) ??
+          ((payload as Record<string, unknown>).results as unknown[]) ??
+          []
+        : [];
+  if (!Array.isArray(rows)) return [];
+
+  const out: SearchedPayment[] = [];
+  for (const row of rows.slice(0, 100)) {
+    if (!row || typeof row !== "object") continue;
+    const r = row as Record<string, unknown>;
+    // Nested data wrapper variant: { data: { tracker, state, ... } }
+    const inner =
+      r.data && typeof r.data === "object" && !Array.isArray(r.data)
+        ? (r.data as Record<string, unknown>)
+        : r;
+    const tracker =
+      pickString(r, "tracker", "tracking_id", "track_id", "token") ??
+      pickString(inner, "tracker", "tracking_id", "track_id", "token");
+    if (!tracker) continue;
+    const metadata =
+      (inner.metadata && typeof inner.metadata === "object" ? (inner.metadata as Record<string, unknown>) : {}) ||
+      {};
+    const amountRaw = inner.amount ?? r.amount;
+    out.push({
+      tracker,
+      state: pickString(inner, "state") ?? pickString(r, "state"),
+      orderId:
+        pickString(metadata, "order_id", "orderId") ??
+        pickString(inner, "order_id", "orderId") ??
+        pickString(r, "order_id", "orderId"),
+      amount: typeof amountRaw === "number" ? amountRaw : typeof amountRaw === "string" ? parseFloat(amountRaw) || undefined : undefined,
+      currency: pickString(inner, "currency", "currency_iso") ?? pickString(r, "currency"),
+      createdAt:
+        typeof inner.created_at === "number"
+          ? (inner.created_at as number)
+          : typeof inner.createdAt === "number"
+            ? (inner.createdAt as number)
+            : typeof inner.created_at === "string" || typeof inner.createdAt === "string"
+              ? Date.parse(String(inner.created_at ?? inner.createdAt)) || undefined
+              : undefined,
+      customerEmail: pickString(inner, "email", "customer_email") ?? pickString(r, "email"),
+    });
+  }
+  return out;
+}
+
+function pickString(source: Record<string, unknown>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = source[key];
+    if (typeof value === "string" && value.length > 0) return value;
+    if (typeof value === "number") return String(value);
+  }
+  return undefined;
+}
+
+/**
+ * Ask Safepay for the most recent payments on THIS merchant account
+ * (server-to-server). Used by the verify poller to discover the tracker of a
+ * subscription-flow checkout whose webhook/return never surfaced it.
+ */
+export async function searchSafepayPayments(limit = 20): Promise<
+  { ok: boolean; payments: SearchedPayment[]; error?: string }
+> {
+  const config = getSafepayConfig();
+  if (!config.secretKey) {
+    return { ok: false, payments: [], error: "SAFEPAY_SECRET_KEY not configured" };
+  }
+  const url = new URL(`${config.apiBase}/reporter/api/v1/payments`);
+  url.searchParams.set("limit", String(Math.min(Math.max(limit, 1), 100)));
+  try {
+    const res = await fetch(url.toString(), {
+      headers: { "X-SFPY-MERCHANT-SECRET": config.secretKey },
+      cache: "no-store",
+    });
+    if (!res.ok) {
+      const text = await res.text().catch(() => "");
+      return {
+        ok: false,
+        payments: [],
+        error: `payments search HTTP ${res.status}: ${text.slice(0, 200)}`,
+      };
+    }
+    const json = (await res.json().catch(() => null)) as unknown;
+    return { ok: true, payments: parsePaymentsSearchResponse(json) };
+  } catch (err) {
+    return {
+      ok: false,
+      payments: [],
+      error: err instanceof Error ? err.message : "payments search failed",
+    };
+  }
+}
+
+// -----------------------------------------------------------------------------
 // Webhook verification
 // -----------------------------------------------------------------------------
 
