@@ -223,6 +223,15 @@
 }
 
 /* ---- Design-system utilities ---- */
+
+/* Horizontal tab strips (admin navbar on mobile): scrollable but chromeless. */
+.scrollbar-none {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+.scrollbar-none::-webkit-scrollbar {
+  display: none;
+}
 @layer utilities {
   /* Typography scale (paired with Tailwind classes) */
   .text-display {

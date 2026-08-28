@@ -64,6 +64,7 @@ import {
 } from "@/components/ui/sheet";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { Skeleton } from "@/components/ui/skeleton";
+import { LogoMark } from "@/components/shared/logo";
 
 // ---- Navigation model ----
 const NAV_MAIN = [
@@ -342,9 +343,7 @@ function SidebarContent({
       {/* Brand */}
       <div className={cn("flex h-14 items-center border-b", collapsed ? "justify-center px-2" : "px-4")}>
         <Link href="/dashboard" className="flex items-center gap-2 overflow-hidden" aria-label="Filo home">
-          <span className="flex size-7 shrink-0 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <Sparkles className="size-4" />
-          </span>
+          <LogoMark size={28} />
           {!collapsed && <span className="truncate text-[15px] font-semibold tracking-tight">Filo</span>}
         </Link>
       </div>

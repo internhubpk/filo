@@ -126,7 +126,9 @@ export default function DashboardPage() {
     billing.data.planLimit > 0 &&
     (billing.data.usedGenerations ?? 0) / billing.data.planLimit >= 0.8;
 
-  const allArtifacts = artifacts.data?.artifacts ?? [];
+  // Stable identity: `artifacts.data` changes only on fetch completion, so
+  // downstream useMemo deps stay stable (React compiler requirement).
+  const allArtifacts = useMemo(() => artifacts.data?.artifacts ?? [], [artifacts.data]);
   const recent = allArtifacts.slice(0, 8);
   const typeCount = useMemo(() => {
     const c: Record<string, number> = {};

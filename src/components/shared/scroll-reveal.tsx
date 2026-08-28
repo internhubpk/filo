@@ -29,18 +29,19 @@ export function ScrollReveal({
   const ref = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(false);
 
+  // NOTE: never setState synchronously inside this effect (react-hooks/
+  // set-state-in-effect) — every reveal path is async (IO callback or rAF).
+  // Reduced-motion users are handled in CSS: `motion-reduce:transition-none`
+  // below reveals content instantly without animating.
   useEffect(() => {
     const el = ref.current;
     if (!el) return;
 
-    const reduced =
-      typeof window !== "undefined" &&
-      typeof window.matchMedia === "function" &&
-      window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-    if (reduced || typeof IntersectionObserver === "undefined") {
-      setVisible(true);
-      return;
+    // Legacy browsers without IntersectionObserver: reveal on the next
+    // animation frame (before paint, but off the synchronous effect path).
+    if (typeof IntersectionObserver === "undefined") {
+      const raf = requestAnimationFrame(() => setVisible(true));
+      return () => cancelAnimationFrame(raf);
     }
 
     const observer = new IntersectionObserver(
@@ -61,7 +62,11 @@ export function ScrollReveal({
   return (
     <div
       ref={ref}
-      className={cn(visible ? "animate-fade-up" : "opacity-0 translate-y-3.5", className)}
+      className={cn(
+        visible ? "animate-fade-up" : "opacity-0 translate-y-3.5",
+        "motion-reduce:transition-none motion-reduce:[animation:none]",
+        className
+      )}
       style={delay > 0 ? { animationDelay: `${Math.round(delay * 1000)}ms` } : undefined}
     >
       {children}

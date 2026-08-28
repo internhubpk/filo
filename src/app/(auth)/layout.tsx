@@ -1,6 +1,6 @@
-import { Sparkles } from "lucide-react";
 import Link from "next/link";
 import { ThemeSwitch } from "@/components/auth/theme-switch";
+import { LogoMark } from "@/components/shared/logo";
 
 // =============================================================================
 // Auth layout — split screen: form on the left, brand proof on the right.
@@ -13,9 +13,7 @@ export default function AuthLayout({ children }: { children: React.ReactNode }) 
       <div className="flex flex-col px-5 py-6 sm:px-10">
         <div className="flex items-center justify-between">
           <Link href="/" className="flex items-center gap-2" aria-label="Filo home">
-            <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-              <Sparkles className="size-4" />
-            </span>
+            <LogoMark size={28} />
             <span className="text-[15px] font-semibold tracking-tight">Filo</span>
           </Link>
           <ThemeSwitch />

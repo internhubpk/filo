@@ -9,13 +9,13 @@
 import { Suspense, useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { Eye, EyeOff, Loader2, ShieldCheck, ArrowLeft } from "lucide-react";
+import { Eye, EyeOff, Loader2, ShieldCheck, ArrowLeft, Sparkles } from "lucide-react";
 import { apiClient } from "@/lib/api-client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Alert, AlertDescription } from "@/components/ui/alert";
-import { Sparkles } from "lucide-react";
+import { LogoMark } from "@/components/shared/logo";
 
 function AdminLoginForm() {
   const router = useRouter();
@@ -82,8 +82,11 @@ function AdminLoginForm() {
     <div className="flex min-h-screen items-center justify-center bg-muted/30 px-4">
       <div className="w-full max-w-sm">
         <div className="mb-8 text-center">
-          <span className="mx-auto flex size-11 items-center justify-center rounded-xl bg-primary text-primary-foreground">
-            <ShieldCheck className="size-5" />
+          <span className="group relative mx-auto flex size-11 items-center justify-center rounded-xl">
+            <LogoMark size={44} rounded="rounded-xl" />
+            <span className="absolute -bottom-1.5 -right-1.5 flex size-5 items-center justify-center rounded-full border-2 border-background bg-primary text-primary-foreground">
+              <ShieldCheck className="size-3" />
+            </span>
           </span>
           <h1 className="text-display mt-4 text-xl">Filo Admin Console</h1>
           <p className="mt-1 text-sm text-muted-foreground">Restricted to authorized operators.</p>

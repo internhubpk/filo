@@ -43,6 +43,7 @@ import { cn } from "@/lib/utils";
 import { formatPkr } from "@/lib/format";
 import { apiClient } from "@/lib/api-client";
 import { useFiloSession } from "@/hooks/use-session";
+import { LogoMark } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
@@ -576,9 +577,7 @@ function SiteNav({
     >
       <nav className="mx-auto flex h-14 max-w-6xl items-center gap-6 px-4 sm:px-6">
         <Link href="/" className="flex items-center gap-2">
-          <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-            <Sparkles className="size-4" />
-          </span>
+          <LogoMark size={28} />
           <span className="text-[15px] font-semibold tracking-tight">Filo</span>
         </Link>
         <div className="ml-2 hidden items-center gap-1 md:flex">
@@ -790,9 +789,7 @@ function SiteFooter() {
         <div className="flex flex-col gap-10 md:flex-row md:justify-between">
           <div className="max-w-xs">
             <div className="flex items-center gap-2">
-              <span className="flex size-7 items-center justify-center rounded-lg bg-primary text-primary-foreground">
-                <Sparkles className="size-4" />
-              </span>
+              <LogoMark size={28} />
               <span className="text-[15px] font-semibold tracking-tight">Filo</span>
             </div>
             <p className="mt-3 text-sm leading-relaxed text-muted-foreground">
