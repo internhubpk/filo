@@ -46,7 +46,11 @@
 import { v } from "convex/values";
 import { internalAction } from "./_generated/server";
 import { internal } from "./_generated/api";
-import { aiRouter } from "../src/services/ai";
+import {
+  aiRouter,
+  AllProvidersFailedError,
+  userSafeAiMessage,
+} from "../src/services/ai";
 import {
   buildPlanningSystemPrompt,
   buildSectionContentPrompt,
@@ -227,13 +231,24 @@ export const processJob = internalAction({
       // the client triggers the same idempotent endpoint as a final safety
       // net when it sees the job stuck in "rendering".
     } catch (err) {
+      // Spec §16: the USER-visible job error is a clean, actionable message;
+      // the full provider diagnostics stay in the Convex function logs
+      // (console.error below) and are also retained for admins via the
+      // /api/admin/ai/status diagnostics surface.
       const msg = err instanceof Error ? err.message : String(err);
+      const userMsg = userSafeAiMessage(err);
+      if (err instanceof AllProvidersFailedError) {
+        console.error(
+          `[WORKER] job ${jobId} provider diagnostics:`,
+          JSON.stringify(err.attempts)
+        );
+      }
       console.error(`[WORKER] job ${jobId} failed:`, msg);
       await ctx.runMutation(internal.generation.setJobStatus, {
         jobId,
         status: "failed",
         currentStage: "Generation failed",
-        error: msg,
+        error: userMsg,
       });
     }
   },
@@ -365,9 +380,11 @@ async function generateOneUnit(
     if ((unit.attempts ?? 0) + 1 >= 3) {
       // Permanent failure for this unit — rendering will use placeholder
       // content for it (same behavior as the legacy synchronous pipeline).
+      // The unit error is user-visible on the artifact page, so store the
+      // clean message and keep the raw detail in the logs.
       await ctx.runMutation(internal.generation.failUnit, {
         unitId: unit._id,
-        error: msg,
+        error: userSafeAiMessage(err),
       });
     } else {
       // Transient — put it back in the queue (claim already bumped attempts).

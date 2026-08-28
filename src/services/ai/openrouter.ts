@@ -160,4 +160,63 @@ export class OpenRouterProvider implements AiProvider {
       }
     }
   }
+
+  /**
+   * Diagnostics-only probe (AI-repair spec §9): OpenRouter GET /api/v1/key
+   * reports whether the key is valid and whether credits remain — WITHOUT
+   * spending tokens on a generation. Never returns the key itself.
+   */
+  async fetchKeyInfo(): Promise<{
+    valid: boolean
+    httpStatus: number | null
+    latencyMs: number
+    label?: string
+    usage?: number
+    limit?: number | null
+    isFreeTier?: boolean
+    error?: string
+  }> {
+    const startedAt = Date.now()
+    if (!this.isConfigured()) {
+      return { valid: false, httpStatus: null, latencyMs: Date.now() - startedAt, error: 'OPENROUTER_API_KEY not set' }
+    }
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 15_000)
+      const response = await fetch(`${this.getBaseUrl()}/key`, {
+        method: 'GET',
+        headers: { Authorization: `Bearer ${this.getApiKey()}` },
+        signal: controller.signal,
+      })
+      clearTimeout(timer)
+      const bodyText = await response.text().catch(() => '')
+      if (!response.ok) {
+        return {
+          valid: false,
+          httpStatus: response.status,
+          latencyMs: Date.now() - startedAt,
+          error: `HTTP ${response.status}: ${bodyText.slice(0, 200)}`,
+        }
+      }
+      const data = JSON.parse(bodyText) as {
+        data?: { label?: string; usage?: number; limit?: number | null; is_free_tier?: boolean }
+      }
+      return {
+        valid: true,
+        httpStatus: response.status,
+        latencyMs: Date.now() - startedAt,
+        label: data.data?.label,
+        usage: data.data?.usage,
+        limit: data.data?.limit ?? null,
+        isFreeTier: data.data?.is_free_tier,
+      }
+    } catch (err) {
+      return {
+        valid: false,
+        httpStatus: null,
+        latencyMs: Date.now() - startedAt,
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+  }
 }

@@ -82,12 +82,99 @@ export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly st
   },
 }
 
-/** Default retry policy — mirrors the documented production defaults. */
+/** Default retry policy — bounded, spec §5: attempt → short backoff →
+ *  attempt → fallback. Two tries per model, four per provider at most. */
 export const DEFAULT_RETRY_POLICY: RetryPolicy = {
-  maxAttempts: 3,
+  maxAttempts: 2,
   baseDelayMs: 1_000,
   maxDelayMs: 30_000,
   backoffMultiplier: 2,
+}
+
+/** Hard cap on total attempts per provider per generate() call (all models
+ *  combined) — no provider ever eats more than 4 round trips of one user
+ *  request. */
+export const MAX_ATTEMPTS_PER_PROVIDER = 4
+
+// ==================== PROVIDER HEALTH (short-lived, in-isolate) ====================
+// Spec §14: quota exhaustion and repeated 5xx temporarily demote a provider
+// instead of sending every user request into a retry storm. State is
+// deliberately in-memory (per serverless isolate) and expires quickly — a
+// provider is NEVER permanently disabled based on transient failures.
+
+type ProviderHealthState = 'healthy' | 'degraded' | 'quota_exhausted'
+
+interface ProviderHealthEntry {
+  state: ProviderHealthState
+  /** Epoch ms after which the entry expires back to healthy. */
+  until: number
+  consecutiveUnavailable: number
+}
+
+const QUOTA_COOLDOWN_MS = 10 * 60 * 1000
+const DEGRADED_COOLDOWN_MS = 2 * 60 * 1000
+const DEGRADED_AFTER_CONSECUTIVE_UNAVAILABLE = 4
+
+const providerHealth = new Map<ProviderId, ProviderHealthEntry>()
+
+function freshHealthEntry(): ProviderHealthEntry {
+  return { state: 'healthy', until: 0, consecutiveUnavailable: 0 }
+}
+
+function currentHealth(id: ProviderId): ProviderHealthEntry {
+  const entry = providerHealth.get(id)
+  if (!entry) return freshHealthEntry()
+  if (entry.state !== 'healthy' && Date.now() >= entry.until) {
+    // Cooldown expired — recover, keep the consecutive counter so repeated
+    // failures immediately re-demote.
+    entry.state = 'healthy'
+  }
+  return entry
+}
+
+function recordProviderFailure(id: ProviderId, code: string): void {
+  const entry = currentHealth(id)
+  if (code === 'QUOTA_EXCEEDED') {
+    // Account-level billing exhaustion — hammering changes nothing.
+    entry.state = 'quota_exhausted'
+    entry.until = Date.now() + QUOTA_COOLDOWN_MS
+  } else if (
+    code === 'PROVIDER_UNAVAILABLE' ||
+    code === 'TIMEOUT' ||
+    code === 'NETWORK_ERROR'
+  ) {
+    entry.consecutiveUnavailable += 1
+    if (entry.consecutiveUnavailable >= DEGRADED_AFTER_CONSECUTIVE_UNAVAILABLE) {
+      // Retry storm guard: reduce future attempts instead of skipping
+      // outright (transient 503s must still be able to recover).
+      entry.state = 'degraded'
+      entry.until = Date.now() + DEGRADED_COOLDOWN_MS
+    }
+  } else {
+    // Auth/model/request errors say nothing about availability.
+    entry.consecutiveUnavailable = 0
+  }
+  providerHealth.set(id, entry)
+}
+
+function recordProviderSuccess(id: ProviderId): void {
+  providerHealth.set(id, freshHealthEntry())
+}
+
+/** Health snapshot for admin diagnostics (no network, no secrets). */
+export function providerHealthSnapshot(): Array<{
+  provider: ProviderId
+  state: ProviderHealthState
+  cooldownRemainingMs: number
+}> {
+  return (['GEMINI', 'OPENROUTER', 'OPENAI'] as ProviderId[]).map((id) => {
+    const entry = currentHealth(id)
+    return {
+      provider: id,
+      state: entry.state,
+      cooldownRemainingMs: entry.state === 'healthy' ? 0 : Math.max(0, entry.until - Date.now()),
+    }
+  })
 }
 
 /** Provider fallback order. Unconfigured providers are skipped at runtime. */
@@ -132,6 +219,12 @@ class AiRouter {
     return Promise.all(listProviders().map((p) => p.healthCheck()))
   }
 
+  /** In-isolate health snapshot (no network) — admin diagnostics. */
+  healthSnapshot() {
+    this.ensureProviders()
+    return providerHealthSnapshot()
+  }
+
   /**
    * Generate with retry + provider fallback.
    *
@@ -149,10 +242,26 @@ class AiRouter {
   ): Promise<AiResponse> {
     this.ensureProviders()
 
+    // ---------- REQUEST VALIDATION FIRST (spec §13) ----------
+    // User/request errors must NEVER be fanned out to every provider: an
+    // empty prompt is invalid for Gemini AND OpenRouter AND OpenAI alike.
+    const messages = Array.isArray(request?.messages) ? request.messages : []
+    const hasContent = messages.some((m) => String(m?.content ?? '').trim().length > 0)
+    if (!hasContent) {
+      throw new AiBaseError(
+        'AI request rejected before any provider call: empty prompt.',
+        'INVALID_REQUEST',
+        'ROUTER',
+        false
+      )
+    }
+
     const policy: RetryPolicy = {
       ...DEFAULT_RETRY_POLICY,
       ...generateOptions.retryPolicy,
     }
+    const trace = generateOptions.requestId || request.options?.requestId
+    const traceTag = trace ? ` trace=${trace}` : ''
 
     const attemptLog: Array<{
       provider: ProviderId
@@ -166,21 +275,45 @@ class AiRouter {
     for (const providerId of chain) {
       const provider = getProvider(providerId)
       if (!provider || !provider.isConfigured()) {
+        // Spec §10/§12: an unconfigured provider is DISABLED, not attempted
+        // and failed. It contributes one diagnostic line, zero network calls.
         attemptLog.push({
           provider: providerId,
           code: 'PROVIDER_UNCONFIGURED',
           message: provider
-            ? 'no API key configured — skipped'
+            ? 'disabled: no API key configured — skipped'
             : 'provider not registered — skipped',
         })
         continue
       }
 
+      // Spec §14/§23: honor short-lived health state.
+      const health = currentHealth(providerId)
+      if (health.state === 'quota_exhausted') {
+        attemptLog.push({
+          provider: providerId,
+          code: 'QUOTA_EXCEEDED',
+          message: `skipped: quota cooldown active for ${Math.ceil((health.until - Date.now()) / 1000)}s`,
+        })
+        continue
+      }
+
       const models = this.buildModelChain(providerId, request, generateOptions)
+      // Degraded providers get ONE attempt per model instead of the full
+      // budget — enough to recover, never enough for a storm.
+      const providerMaxAttempts = health.state === 'degraded' ? 1 : policy.maxAttempts
+      let providerAttemptsUsed = 0
 
       for (const model of models) {
-        const maxAttempts = policy.maxAttempts
-        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (providerAttemptsUsed >= MAX_ATTEMPTS_PER_PROVIDER) {
+          console.warn(
+            `[AI]${traceTag} provider=${providerId} attempt budget (${MAX_ATTEMPTS_PER_PROVIDER}) exhausted — moving to next provider`
+          )
+          break
+        }
+
+        for (let attempt = 1; attempt <= providerMaxAttempts; attempt++) {
+          providerAttemptsUsed += 1
           try {
             const response = await provider.generate({
               messages: request.messages,
@@ -191,9 +324,10 @@ class AiRouter {
               },
             })
 
+            recordProviderSuccess(providerId)
             if (attempt > 1 || models.length > 1) {
               console.info(
-                `[AI] success provider=${providerId} model=${model} attempt=${attempt} tokens=${response.usage.totalTokens} durationMs=${response.durationMs}`
+                `[AI]${traceTag} success provider=${providerId} model=${model} attempt=${attempt} tokens=${response.usage.totalTokens} durationMs=${response.durationMs}`
               )
             }
             return response
@@ -204,16 +338,27 @@ class AiRouter {
               code: aiErr.code,
               message: aiErr.message,
             })
+            recordProviderFailure(providerId, aiErr.code)
 
             console.warn(
-              `[AI] attempt failed provider=${providerId} model=${model} attempt=${attempt}/${maxAttempts} code=${aiErr.code}: ${aiErr.message}`
+              `[AI]${traceTag} attempt failed provider=${providerId} model=${model} attempt=${attempt}/${providerMaxAttempts} code=${aiErr.code}: ${aiErr.message}`
             )
 
-            // Non-retryable → move to the next model/provider immediately.
+            // Spec §8/§23: quota/billing exhaustion is ACCOUNT-level. Stop
+            // using this provider for the rest of THIS request and put it
+            // on cooldown — do not walk its remaining models.
+            if (aiErr.code === 'QUOTA_EXCEEDED') {
+              break
+            }
+
+            // Model-not-found → the NEXT MODEL is a genuinely different
+            // option (spec §15); retrying the same dead model is not.
+            // Non-retryable → advance immediately; retryable → bounded
+            // backoff below.
             if (!aiErr.retryable) break
 
-            // Last attempt overall → let the outer loops move on.
-            if (attempt === maxAttempts) break
+            // Last attempt for this model → next model/provider.
+            if (attempt === providerMaxAttempts) break
 
             // Exponential backoff with jitter (±25%).
             const backoff = Math.min(
@@ -224,16 +369,21 @@ class AiRouter {
             await this.sleep(jitter)
           }
         }
+
+        if (attemptLog.some((a) => a.provider === providerId && a.code === 'QUOTA_EXCEEDED')) {
+          break
+        }
       }
     }
 
-    throw new AllProvidersFailedError(
-      attemptLog.map((a) => ({
-        provider: a.provider,
-        code: a.code as AiBaseError['code'],
-        message: a.message,
-      }))
-    )
+    const aggregated = attemptLog.map((a) => ({
+      provider: a.provider,
+      code: a.code as AiBaseError['code'],
+      message: a.message,
+    }))
+    // Developer diagnostics always retain the full failure chain (spec §16).
+    console.error(`[AI]${traceTag} all providers failed:`, JSON.stringify(aggregated))
+    throw new AllProvidersFailedError(aggregated)
   }
 
   /**

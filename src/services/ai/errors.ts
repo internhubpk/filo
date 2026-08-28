@@ -11,16 +11,17 @@ import type { ProviderId } from './types'
 export type AiErrorCode =
   | 'API_KEY_MISSING'
   | 'PROVIDER_UNCONFIGURED'
-  | 'AUTH_FAILED'
+  | 'AUTH_FAILED' // spec category: AUTHENTICATION_FAILED (401/403)
   | 'RATE_LIMITED'
   | 'QUOTA_EXCEEDED'
   | 'INVALID_REQUEST'
   | 'CONTEXT_TOO_LONG'
-  | 'CONTENT_FILTERED'
+  | 'CONTENT_FILTERED' // spec category: CONTENT_BLOCKED
   | 'MODEL_NOT_FOUND'
   | 'PROVIDER_UNAVAILABLE'
   | 'TIMEOUT'
   | 'NETWORK_ERROR'
+  | 'CONFIGURATION_ERROR'
   | 'MALFORMED_RESPONSE'
   | 'JSON_PARSE_FAILED'
   | 'SCHEMA_VALIDATION_FAILED'
@@ -229,6 +230,22 @@ export class ContentFilteredError extends AiBaseError {
   }
 }
 
+/**
+ * Bad server-side configuration (malformed base URL, invalid env shape).
+ * NOT retryable. A different provider may still serve the request — but a
+ * misconfiguration never masquerades as a provider outage.
+ */
+export class ConfigurationError extends AiBaseError {
+  constructor(provider: ProviderId, detail: string) {
+    super(
+      `${provider} is misconfigured: ${detail}.`,
+      'CONFIGURATION_ERROR',
+      provider,
+      false
+    )
+  }
+}
+
 /** Context window exceeded — NOT retryable with the same payload. */
 export class ContextTooLongError extends AiBaseError {
   constructor(provider: ProviderId, detail?: string) {
@@ -288,6 +305,11 @@ export function errorFromHttpStatus(
       )
     case 413:
     case 400:
+      // An invalid API key arrives as 400 INVALID_ARGUMENT from Google —
+      // classify it as an AUTH problem, never INVALID_REQUEST/UNAVAILABLE.
+      if (/api[_ ]?key|api_key_invalid|unregistered/i.test(body)) {
+        return new AuthFailedError(provider, status, body.slice(0, 200))
+      }
       // 400 is usually a bad request, but Gemini returns it for token limits too.
       if (/token|context|length/i.test(body)) {
         return new ContextTooLongError(provider, body.slice(0, 200))
@@ -311,4 +333,39 @@ export function errorFromHttpStatus(
         status
       )
   }
+}
+
+/**
+ * Map any thrown AI error to a USER-SAFE message (AI-repair spec §16):
+ * never exposes provider ids, error codes, model ids, or response bodies.
+ * Full diagnostics stay in server logs and in the error object (`attempts`)
+ * for developers/admins.
+ */
+export function userSafeAiMessage(err: unknown): string {
+  if (err instanceof AllProvidersFailedError) {
+    return 'We could not generate your document right now. Please try again in a moment.'
+  }
+  if (err instanceof AiBaseError) {
+    switch (err.code) {
+      case 'RATE_LIMITED':
+      case 'TIMEOUT':
+      case 'NETWORK_ERROR':
+      case 'PROVIDER_UNAVAILABLE':
+        return 'The AI service is busy right now. Please try again in a moment.'
+      case 'QUOTA_EXCEEDED':
+        return 'The AI service has reached its usage limit. Please try again later.'
+      case 'AUTH_FAILED':
+      case 'API_KEY_MISSING':
+      case 'PROVIDER_UNCONFIGURED':
+      case 'CONFIGURATION_ERROR':
+        return 'The AI service is temporarily unavailable due to a configuration issue. Please contact support.'
+      case 'CONTENT_FILTERED':
+        return 'Your request was blocked by the AI safety system. Please adjust the content and try again.'
+      case 'CONTEXT_TOO_LONG':
+        return 'Your request is too large for the AI service. Try a shorter prompt or fewer sections.'
+      default:
+        return 'Something went wrong while generating. Please try again.'
+    }
+  }
+  return 'Something went wrong while generating. Please try again.'
 }

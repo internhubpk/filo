@@ -103,6 +103,11 @@ export async function convexMutation<T = unknown>(name: string, args: Record<str
   return (await convex.mutation(name as never, args as never)) as T;
 }
 
+export async function convexAction<T = unknown>(name: string, args: Record<string, unknown>): Promise<T> {
+  const convex = getConvexClient();
+  return (await convex.action(name as never, args as never)) as T;
+}
+
 /** Validate that the acting user is an admin against the LIVE Convex record. */
 export function isAdminUser(liveUser: Record<string, unknown>): boolean {
   return liveUser.isAdmin === true && liveUser.status === "active";

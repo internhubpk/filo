@@ -9,7 +9,14 @@
 // internal implementation details — do NOT import them from app code.
 // =============================================================================
 
-export { aiRouter, MODEL_MATRIX, PROVIDER_FALLBACK_ORDER, DEFAULT_RETRY_POLICY } from './router'
+export {
+  aiRouter,
+  MODEL_MATRIX,
+  PROVIDER_FALLBACK_ORDER,
+  DEFAULT_RETRY_POLICY,
+  MAX_ATTEMPTS_PER_PROVIDER,
+  providerHealthSnapshot,
+} from './router'
 export type { GenerateOptions, AiTask } from './router'
 
 export {

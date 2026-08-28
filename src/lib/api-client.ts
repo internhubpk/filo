@@ -585,6 +585,47 @@ class ApiClient {
     return this.request(`/admin/webhooks${status ? `?status=${status}` : ''}`)
   }
 
+  /**
+   * Admin: AI provider configuration snapshot from the Convex runtime
+   * (no network probes, no secrets).
+   */
+  async adminAiStatus(): Promise<ApiResponse<{
+    environment: string
+    generatedAt: number
+    routerHealth: Array<{ provider: string; state: string; cooldownRemainingMs: number }>
+    providers: Array<{
+      id: string
+      displayName: string
+      configured: boolean
+      enabled?: boolean
+      status?: string
+      defaultModel: string
+      models: string[]
+      listModels?: { httpStatus: number | null; latencyMs: number; availableConfiguredModels: string[]; missingConfiguredModels: string[]; error?: string }
+      ping?: { ok: boolean; httpStatus: number | null; latencyMs: number; model: string; errorCode?: string; error?: string }
+      keyInfo?: { valid: boolean; httpStatus: number | null; latencyMs: number; label?: string; usage?: number; limit?: number | null; isFreeTier?: boolean; error?: string }
+    }>
+  }>> {
+    return this.request('/admin/ai/status', { method: 'GET' })
+  }
+
+  /**
+   * Admin: run LIVE AI provider probes from the Convex runtime —
+   * Gemini ListModels + 1-token generateContent, OpenRouter /key.
+   * Reports HTTP status/latency/error codes only; never API keys.
+   */
+  async adminAiProbe(): Promise<ApiResponse<{
+    environment: string
+    generatedAt: number
+    routerHealth: Array<{ provider: string; state: string; cooldownRemainingMs: number }>
+    providers: Array<Record<string, unknown>>
+  }>> {
+    return this.request('/admin/ai/status', {
+      method: 'POST',
+      body: JSON.stringify({}),
+    })
+  }
+
   async adminAuditLogs(action?: string): Promise<ApiResponse<any[]>> {
     return this.request(`/admin/audit${action ? `?action=${action}` : ''}`)
   }

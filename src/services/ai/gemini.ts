@@ -18,6 +18,16 @@
 //     provisioned at a different time may not see every model). When the
 //     API answers 404 MODEL_NOT_FOUND, the provider transparently retries
 //     the remaining models in GEMINI_MODELS before surfacing an error.
+//
+// API SURFACE DECISION (AI-repair spec §1 — evaluated 2026-08, do not
+// migrate blindly):
+//   Filo stays on generateContent (REST, v1beta). Google's Interactions API
+//   targets stateful/agent-style interactions; Filo needs none of that —
+//   every call is a single stateless structured-JSON completion
+//   (systemInstruction + responseMimeType/responseSchema). generateContent
+//   is GA, fully supported, and the request shape below maps 1:1 to it.
+//   Migrating would add surface area for zero capability gain. Re-evaluate
+//   ONLY if Filo adds agentic multi-turn tool flows.
 // =============================================================================
 
 import type {
@@ -30,6 +40,7 @@ import type { AiProvider } from './provider'
 import {
   AiBaseError,
   ApiKeyMissingError,
+  ConfigurationError,
   errorFromHttpStatus,
   MalformedResponseError,
   normalizeAiError,
@@ -135,7 +146,18 @@ export class GeminiProvider implements AiProvider {
 
   private getBaseUrl(): string {
     const raw = process.env.GEMINI_BASE_URL?.trim() || DEFAULT_BASE_URL;
-    return normalizeGeminiBaseUrl(raw);
+    const normalized = normalizeGeminiBaseUrl(raw);
+    // Strict validation at REQUEST time: an unparseable base URL is a
+    // CONFIGURATION_ERROR (operator action needed), not a network outage.
+    try {
+      new URL(normalized)
+    } catch {
+      throw new ConfigurationError(
+        'GEMINI',
+        `GEMINI_BASE_URL "${raw.slice(0, 100)}" is not a valid URL`
+      )
+    }
+    return normalized;
   }
 
   isConfigured(): boolean {
@@ -272,6 +294,131 @@ export class GeminiProvider implements AiProvider {
         provider: 'GEMINI',
         configured: true,
         latencyMs: Date.now() - startedAt,
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+  }
+
+  /**
+   * Diagnostics-only LIVE probe (AI-repair spec §3): one minimal
+   * generateContent request from the SAME runtime the caller runs in.
+   * Records HTTP status, latency, model and the provider error code —
+   * never the API key. Never used on the generate path.
+   */
+  async ping(): Promise<{
+    ok: boolean
+    httpStatus: number | null
+    latencyMs: number
+    model: string
+    errorCode?: string
+    error?: string
+  }> {
+    const startedAt = Date.now()
+    const model = 'gemini-flash-lite-latest'
+    try {
+      await this.generate({
+        messages: [{ role: 'user', content: 'ping' }],
+        options: { model, maxTokens: 1, timeoutMs: 15_000 },
+      })
+      return { ok: true, httpStatus: 200, latencyMs: Date.now() - startedAt, model }
+    } catch (err) {
+      const aiErr = normalizeAiError('GEMINI', err)
+      return {
+        ok: false,
+        httpStatus: aiErr.statusCode ?? null,
+        latencyMs: Date.now() - startedAt,
+        model,
+        errorCode: aiErr.code,
+        error: aiErr.message.slice(0, 300),
+      }
+    }
+  }
+
+  /**
+   * Diagnostics-only probe (AI-repair spec §3/§6): ListModels against the
+   * configured surface. Answers "can we reach Gemini", "is the key valid",
+   * and "which of OUR configured model ids actually exist for this key" —
+   * without ever exposing the key itself. Never used on the generate path.
+   */
+  async diagnose(): Promise<{
+    reachable: boolean
+    httpStatus: number | null
+    latencyMs: number
+    configuredModels: string[]
+    availableConfiguredModels: string[]
+    missingConfiguredModels: string[]
+    error?: string
+  }> {
+    const startedAt = Date.now()
+    const latencyMs = () => Date.now() - startedAt
+    if (!this.isConfigured()) {
+      return {
+        reachable: false,
+        httpStatus: null,
+        latencyMs: latencyMs(),
+        configuredModels: [...GEMINI_MODELS],
+        availableConfiguredModels: [],
+        missingConfiguredModels: [...GEMINI_MODELS],
+        error: 'GEMINI_API_KEY not set',
+      }
+    }
+    let apiKey: string
+    let baseUrl: string
+    try {
+      apiKey = this.getApiKey()
+      baseUrl = this.getBaseUrl()
+    } catch (err) {
+      return {
+        reachable: false,
+        httpStatus: null,
+        latencyMs: latencyMs(),
+        configuredModels: [...GEMINI_MODELS],
+        availableConfiguredModels: [],
+        missingConfiguredModels: [...GEMINI_MODELS],
+        error: err instanceof Error ? err.message : String(err),
+      }
+    }
+    try {
+      const controller = new AbortController()
+      const timer = setTimeout(() => controller.abort(), 15_000)
+      const response = await fetch(`${baseUrl}/models?pageSize=200&key=${encodeURIComponent(apiKey)}`, {
+        method: 'GET',
+        signal: controller.signal,
+      })
+      clearTimeout(timer)
+      const bodyText = await response.text().catch(() => '')
+      if (!response.ok) {
+        return {
+          reachable: response.status < 500,
+          httpStatus: response.status,
+          latencyMs: latencyMs(),
+          configuredModels: [...GEMINI_MODELS],
+          availableConfiguredModels: [],
+          missingConfiguredModels: [...GEMINI_MODELS],
+          error: `HTTP ${response.status}: ${bodyText.slice(0, 200)}`,
+        }
+      }
+      const data = JSON.parse(bodyText) as { models?: Array<{ name?: string }> }
+      const names = (data.models ?? [])
+        .map((m) => String(m.name || '').replace(/^models\//, ''))
+        .filter(Boolean)
+      const available = GEMINI_MODELS.filter((m) => names.includes(m))
+      return {
+        reachable: true,
+        httpStatus: response.status,
+        latencyMs: latencyMs(),
+        configuredModels: [...GEMINI_MODELS],
+        availableConfiguredModels: available,
+        missingConfiguredModels: GEMINI_MODELS.filter((m) => !names.includes(m)),
+      }
+    } catch (err) {
+      return {
+        reachable: false,
+        httpStatus: null,
+        latencyMs: latencyMs(),
+        configuredModels: [...GEMINI_MODELS],
+        availableConfiguredModels: [],
+        missingConfiguredModels: [...GEMINI_MODELS],
         error: err instanceof Error ? err.message : String(err),
       }
     }

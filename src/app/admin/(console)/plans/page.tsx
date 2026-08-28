@@ -8,7 +8,7 @@
 // =============================================================================
 
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { Loader2, Plus, Pencil, PlugZap, Power, RefreshCw, Search, Webhook } from "lucide-react";
+import { Bot, Loader2, Plus, Pencil, PlugZap, Power, RefreshCw, Search, Webhook } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
 import { useApi } from "@/hooks/use-api";
@@ -77,6 +77,26 @@ interface SafepayStatus {
   probe: { ok: boolean; httpStatus: number | null; message: string; kind?: string } | null;
 }
 
+interface AiProviderRow {
+  id: string;
+  displayName: string;
+  configured: boolean;
+  enabled?: boolean;
+  status?: string;
+  defaultModel: string;
+  models: string[];
+  listModels?: { httpStatus: number | null; latencyMs: number; availableConfiguredModels: string[]; missingConfiguredModels: string[]; error?: string };
+  ping?: { ok: boolean; httpStatus: number | null; latencyMs: number; model: string; errorCode?: string; error?: string };
+  keyInfo?: { valid: boolean; httpStatus: number | null; latencyMs: number; label?: string; usage?: number; limit?: number | null; isFreeTier?: boolean; error?: string };
+}
+
+interface AiStatus {
+  environment: string;
+  generatedAt: number;
+  routerHealth: Array<{ provider: string; state: string; cooldownRemainingMs: number }>;
+  providers: AiProviderRow[];
+}
+
 export default function AdminPlansPage() {
   const plans = useApi<PlanRow[]>(() => apiClient.adminPlans().then((r) => (r.success ? (r.data as unknown as PlanRow[]) : null)));
   const [editing, setEditing] = useState<typeof EMPTY_FORM | null>(null);
@@ -90,6 +110,54 @@ export default function AdminPlansPage() {
   const [selfTestResult, setSelfTestResult] = useState<{ pass: boolean; message: string; target: string } | null>(null);
   const [diagnostics, setDiagnostics] = useState<Record<string, any> | null>(null);
   const [diagLoading, setDiagLoading] = useState(false);
+  const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
+  const [aiStatusLoading, setAiStatusLoading] = useState(false);
+  const [aiProbing, setAiProbing] = useState(false);
+
+  const refreshAiStatus = useCallback(async () => {
+    setAiStatusLoading(true);
+    try {
+      const res = await apiClient.adminAiStatus();
+      setAiStatus(res.success ? (res.data as unknown as AiStatus) : null);
+    } finally {
+      setAiStatusLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshAiStatus();
+  }, [refreshAiStatus]);
+
+  /** LIVE probes from the Convex runtime (Gemini ListModels + 1-token call;
+   *  OpenRouter /key). Reports HTTP status/latency/error codes — no secrets. */
+  async function probeAiProviders() {
+    setAiProbing(true);
+    try {
+      const res = await apiClient.adminAiProbe();
+      if (!res.success || !res.data) {
+        toast.error("AI probe failed", { description: res.error, duration: 15000 });
+        return;
+      }
+      const status = res.data as unknown as AiStatus;
+      setAiStatus(status);
+      const gemini = status.providers?.find((p) => p.id === "GEMINI") as AiProviderRow | undefined;
+      const ping = gemini?.ping;
+      if (ping?.ok) {
+        toast.success("Gemini reachable from Convex", {
+          description: `${ping.model} answered in ${ping.latencyMs}ms`,
+        });
+      } else if (ping) {
+        toast.error("Gemini probe FAILED", {
+          description: `${ping.errorCode ?? "ERROR"}${ping.httpStatus ? ` (HTTP ${ping.httpStatus})` : ""}: ${ping.error ?? "unknown"}`,
+          duration: 20000,
+        });
+      } else {
+        toast.warning("Probe ran — Gemini not configured or skipped", { duration: 10000 });
+      }
+    } finally {
+      setAiProbing(false);
+    }
+  }
 
   const refreshSafepayStatus = useCallback(async () => {
     setStatusLoading(true);
@@ -358,6 +426,84 @@ export default function AdminPlansPage() {
                 ))}
               </div>
             )}
+          </div>
+        )}
+      </div>
+
+      {/* AI providers — generation runs in Convex, so this is the truthful
+          view of what the AI layer can actually reach (AI-repair spec §17). */}
+      <div className="rounded-lg border bg-card p-4">
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <Bot className="size-4 text-muted-foreground" />
+            <span className="text-sm font-medium">AI providers</span>
+            {aiStatus && (
+              <Badge variant="outline" className="font-mono text-[11px]">
+                runtime: {aiStatus.environment}
+              </Badge>
+            )}
+            {aiStatusLoading && <Loader2 className="size-3.5 animate-spin text-muted-foreground" />}
+          </div>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => void refreshAiStatus()} disabled={aiStatusLoading}>
+              {aiStatusLoading ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <RefreshCw className="mr-1.5 size-4" />}
+              Refresh
+            </Button>
+            <Button variant="outline" size="sm" onClick={() => void probeAiProviders()} disabled={aiProbing}>
+              {aiProbing ? <Loader2 className="mr-1.5 size-4 animate-spin" /> : <Bot className="mr-1.5 size-4" />}
+              Run live AI probe
+            </Button>
+          </div>
+        </div>
+        {aiStatus && (
+          <div className="mt-3 space-y-2">
+            {(aiStatus.routerHealth ?? []).map((h) => (
+              <span key={h.provider} className="mr-3 inline-block font-mono text-[11px] text-muted-foreground">
+                {h.provider}: {h.state}
+                {h.cooldownRemainingMs > 0 ? ` (cooldown ${Math.ceil(h.cooldownRemainingMs / 1000)}s)` : ""}
+              </span>
+            ))}
+            {(aiStatus.providers ?? []).map((p) => (
+              <div key={p.id} className="rounded-md border bg-muted/40 p-2.5 text-xs">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-medium">{p.displayName}</span>
+                  {p.configured ? (
+                    <Badge className="bg-emerald-500/10 text-emerald-600 dark:text-emerald-400">configured</Badge>
+                  ) : (
+                    <Badge variant="outline">not configured</Badge>
+                  )}
+                  {p.configured === false && p.status && (
+                    <span className="text-muted-foreground">{p.status}</span>
+                  )}
+                  <span className="font-mono text-[11px] text-muted-foreground">default: {p.defaultModel}</span>
+                </div>
+                {p.ping && (
+                  <p className={`mt-1 ${p.ping.ok ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
+                    generateContent probe: {p.ping.ok ? "PASS" : "FAIL"}
+                    {p.ping.httpStatus != null ? ` (HTTP ${p.ping.httpStatus})` : ""} · {p.ping.model} · {p.ping.latencyMs}ms
+                    {p.ping.errorCode ? ` · ${p.ping.errorCode}` : ""}
+                    {p.ping.error ? <span className="block whitespace-pre-wrap font-sans text-muted-foreground">{p.ping.error}</span> : null}
+                  </p>
+                )}
+                {p.listModels && (
+                  <p className="mt-1 text-muted-foreground">
+                    models valid: {p.listModels.availableConfiguredModels.length}/{p.listModels.availableConfiguredModels.length + p.listModels.missingConfiguredModels.length}
+                    {p.listModels.missingConfiguredModels.length > 0 ? ` · missing: ${p.listModels.missingConfiguredModels.join(", ")}` : ""}
+                    {p.listModels.error ? ` · ${p.listModels.error}` : ""}
+                  </p>
+                )}
+                {p.keyInfo && (
+                  <p className={`mt-1 ${p.keyInfo.valid ? "text-emerald-600 dark:text-emerald-400" : "text-destructive"}`}>
+                    OpenRouter key: {p.keyInfo.valid ? "VALID" : "INVALID"}
+                    {p.keyInfo.httpStatus != null ? ` (HTTP ${p.keyInfo.httpStatus})` : ""}
+                    {p.keyInfo.isFreeTier ? " · free tier" : ""}
+                    {p.keyInfo.usage != null ? ` · used ${p.keyInfo.usage}` : ""}
+                    {p.keyInfo.limit != null ? ` / ${p.keyInfo.limit}` : ""}
+                    {p.keyInfo.error ? <span className="block whitespace-pre-wrap font-sans text-muted-foreground">{p.keyInfo.error}</span> : null}
+                  </p>
+                )}
+              </div>
+            ))}
           </div>
         )}
       </div>
