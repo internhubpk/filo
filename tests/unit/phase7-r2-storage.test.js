@@ -32,6 +32,11 @@
 //       bucket, bucket stays PRIVATE, CORS policy for browser presigned
 //       uploads.
 //   §9  R2 credentials never reach the browser (no NEXT_PUBLIC_R2 anywhere).
+//   §10 R2 4xx request rejections (NotImplemented/InvalidArgument/…) classify
+//       as non-retryable SERVICE, the S3Client is pinned to R2 compat config
+//       (WHEN_REQUIRED checksums + path-style), and the render 503 body
+//       carries s3ErrorName + detail so failures self-diagnose from the
+//       browser Network tab alone.
 
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
@@ -283,4 +288,50 @@ test('§9 no NEXT_PUBLIC_R2 variables anywhere', () => {
   for (const src of srcs) {
     assert.doesNotMatch(src, /NEXT_PUBLIC_R2/, 'R2 credentials must never be public')
   }
+})
+
+// ---------------------------------------------------------------------------
+// §10 — R2 4xx request rejections + self-diagnosing 503 bodies
+//       (the "kind: UNKNOWN" blind spot: a PutObject refused by R2 with
+//       e.g. NotImplemented used to fall through to UNKNOWN with no detail)
+// ---------------------------------------------------------------------------
+
+test('§10 S3Client is pinned to the documented R2 compatibility config', () => {
+  assert.match(client, /forcePathStyle:\s*true/, 'R2 requires path-style addressing')
+  assert.match(
+    client,
+    /requestChecksumCalculation:\s*"WHEN_REQUIRED"/,
+    'SDK v3.729+ default (WHEN_SUPPORTED) stamps CRC32 headers R2 rejects with NotImplemented'
+  )
+  assert.match(client, /responseChecksumValidation:\s*"WHEN_REQUIRED"/)
+  assert.match(client, /region:\s*"auto"/)
+})
+
+test('§10 classifier recognizes 4xx request rejections as non-retryable SERVICE', () => {
+  assert.match(errors, /notimplemented/, 'NotImplemented (checksum rejection) must be classified')
+  for (const name of ['malformedxml', 'invalidargument', 'entitytolarge', 'permanentredirect']) {
+    assert.ok(errors.includes(name), `4xx class ${name} must be recognized`)
+  }
+  assert.match(errors, /status >= 400 && status < 500/, 'generic 4xx catch-all must exist')
+  assert.match(
+    errors,
+    /kind: 'SERVICE',\s*\n\s*retryable: false/,
+    'request rejections are deterministic — not retryable'
+  )
+  assert.match(errors, /requestChecksumCalculation/, 'NotImplemented hint names the fix')
+})
+
+test('§10 UNKNOWN fallthrough detail carries the raw error name', () => {
+  assert.match(
+    errors,
+    /\$\{name \|\| code \|\| 'Unknown error'\}/,
+    'UNKNOWN detail must be name-prefixed so logs are actionable'
+  )
+})
+
+test('§10 render route 503 body exposes s3ErrorName + detail (self-diagnosing)', () => {
+  assert.match(renderRoute, /r2S3ErrorName/, 'render route must import the helper')
+  assert.match(renderRoute, /s3ErrorName:\s*r2S3ErrorName\(r2Error\)/)
+  assert.match(renderRoute, /detail:\s*info\.detail/)
+  assert.match(errors, /export function r2S3ErrorName/, 'helper must be exported')
 })

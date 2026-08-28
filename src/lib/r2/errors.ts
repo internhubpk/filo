@@ -22,6 +22,9 @@
 //                                   (env vars missing/empty)
 //   NoSuchBucket                  → R2_BUCKET_NAME does not match a bucket
 //   NetworkingError / ENOTFOUND   → network/DNS failure
+//   NotImplemented / InvalidArgument /
+//   MalformedXML / 4xx (other)    → R2 refused the request itself
+//                                   (e.g. SDK default checksum headers)
 //   InternalError / SlowDown /
 //   ServiceUnavailable            → Cloudflare-side transient failure
 // =============================================================================
@@ -147,12 +150,46 @@ export function classifyR2Error(error: unknown): R2ErrorInfo {
     }
   }
 
+  // ---- 5b. Request-level rejections (R2 answered HTTP 4xx) ----------------
+  // The request REACHED R2 and was refused: NotImplemented (R2 rejecting the
+  // SDK's default flexible-checksum headers — fixed by the S3Client pins in
+  // client.ts), InvalidArgument, MalformedXML, EntityTooLarge, redirects
+  // (wrong endpoint / account-id). Retrying the identical request cannot
+  // succeed, so these are non-retryable SERVICE failures (still 503).
+  if (
+    /notimplemented|malformedxml|invalidargument|invalidbucketname|entitytolarge|keytoolong|metadatatoolarge|permanentredirect|temporaryredirect|xmlparser|illegallocationconstraint/.test(
+      haystack
+    ) ||
+    (typeof status === 'number' && status >= 400 && status < 500)
+  ) {
+    const hint =
+      /notimplemented/.test(haystack)
+        ? ' — R2 refused a request feature enabled by default in AWS SDK v3 (flexible checksums); the S3Client must set requestChecksumCalculation: "WHEN_REQUIRED"'
+        : ''
+    return {
+      kind: 'SERVICE',
+      retryable: false,
+      detail: `R2 rejected the request (${name || code || `HTTP ${status ?? '?'}`})${hint}`,
+    }
+  }
+
   // ---- 6. Everything else ----------------------------------------------------
   return {
     kind: 'UNKNOWN',
     retryable: true,
-    detail: message.slice(0, 200) || name || code || 'Unknown R2 error',
+    detail: `${name || code || 'Unknown error'}: ${message.slice(0, 180) || 'no message (check the S3 client configuration)'}`,
   }
+}
+
+/**
+ * Best-effort extraction of the raw S3 error NAME (e.g. "NotImplemented",
+ * "InvalidAccessKeyId") for diagnostic response bodies. Never throws, never
+ * returns credential values.
+ */
+export function r2S3ErrorName(error: unknown): string | undefined {
+  if (!error || typeof error !== 'object') return undefined
+  const name = (error as AwsLikeError).name
+  return typeof name === 'string' && name.length > 0 ? name.slice(0, 60) : undefined
 }
 
 /**

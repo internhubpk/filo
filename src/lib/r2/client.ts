@@ -8,9 +8,22 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 // R2 Client configuration
+// R2 compatibility pins (all three are the documented Cloudflare R2 setup):
+//  - forcePathStyle: true          → path-style addressing (bucket in the
+//    path, not a DNS prefix). Avoids virtual-host resolution surprises.
+//  - requestChecksumCalculation /
+//    responseChecksumValidation: "WHEN_REQUIRED" → the AWS SDK v3.729+
+//    defaults to WHEN_SUPPORTED and stamps every PutObject with flexible
+//    CRC32 checksum headers; R2 rejects those on many accounts with
+//    HTTP 400 NotImplemented ("a header you provided implies functionality
+//    that is not implemented") — which previously surfaced as an unclassified
+//    503 UNKNOWN. WHEN_REQUIRED is also valid against AWS S3.
 const r2Client = new S3Client({
   region: "auto",
   endpoint: process.env.R2_ENDPOINT || `https://${process.env.R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+  forcePathStyle: true,
+  requestChecksumCalculation: "WHEN_REQUIRED",
+  responseChecksumValidation: "WHEN_REQUIRED",
   credentials: {
     accessKeyId: process.env.R2_ACCESS_KEY_ID || "",
     secretAccessKey: process.env.R2_SECRET_ACCESS_KEY || "",

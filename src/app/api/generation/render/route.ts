@@ -24,7 +24,7 @@ import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 import { getConvexClient } from '@/lib/convex-server'
 import { renderArtifact } from '@/services/document-renderer'
-import { classifyR2Error, isR2Configured, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
+import { classifyR2Error, isR2Configured, r2S3ErrorName, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 import type { ArtifactSpecification, OutputFormat } from '@/types'
 
 // Rendering is CPU-bound and typically takes a few seconds; allow up to 5
@@ -255,6 +255,11 @@ export async function POST(request: NextRequest) {
           code: 'FILE_STORAGE_UNAVAILABLE',
           kind: info.kind,
           retryable: info.retryable,
+          // Diagnosis surface: the raw S3 error name + the classifier detail,
+          // so a failing render is identifiable from the browser Network tab
+          // alone (no server log access needed). Bounded and secret-free.
+          s3ErrorName: r2S3ErrorName(r2Error),
+          detail: info.detail,
         },
         { status: 503 }
       )
