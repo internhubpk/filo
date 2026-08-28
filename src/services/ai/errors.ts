@@ -175,8 +175,27 @@ export class AllProvidersFailedError extends AiBaseError {
   constructor(
     attempts: Array<{ provider: ProviderId; code: AiErrorCode; message: string }>
   ) {
+    // Surface EVERY attempt's detail (HTTP status + provider message) so the
+    // error is actionable from the UI alone. Consecutive duplicates (same
+    // provider+code, e.g. retry rounds) collapse into one "×N" entry.
+    const parts: string[] = []
+    for (let i = 0; i < attempts.length; i++) {
+      const a = attempts[i]
+      let count = 1
+      while (
+        i + count < attempts.length &&
+        attempts[i + count].provider === a.provider &&
+        attempts[i + count].code === a.code
+      ) {
+        count++
+      }
+      i += count - 1
+      const label = count > 1 ? `${a.provider}:${a.code} ×${count}` : `${a.provider}:${a.code}`
+      const detail = a.message ? ` — ${a.message.slice(0, 200)}` : ''
+      parts.push(`${label}${detail}`)
+    }
     super(
-      `All AI providers failed (${attempts.map((a) => `${a.provider}:${a.code}`).join(', ')}).`,
+      `All AI providers failed (${parts.join(' | ')}).`,
       'ALL_PROVIDERS_FAILED',
       'ROUTER',
       false

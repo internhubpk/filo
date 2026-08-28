@@ -26,11 +26,15 @@ import {
 
 const DEFAULT_BASE_URL = 'https://openrouter.ai/api/v1'
 
+// Slugs verified against the LIVE public catalog
+// (GET https://openrouter.ai/api/v1/models, 2026-08-28). Retired slugs
+// ('anthropic/claude-3.5-sonnet', 'google/gemini-2.0-flash-001') removed —
+// they 404 MODEL_NOT_FOUND on every call.
 export const OPENROUTER_MODELS = [
   'openai/gpt-4o-mini',
   'openai/gpt-4o',
-  'anthropic/claude-3.5-sonnet',
-  'google/gemini-2.0-flash-001',
+  'anthropic/claude-sonnet-4.5',
+  'google/gemini-2.5-flash',
   'meta-llama/llama-3.1-70b-instruct',
 ] as const
 

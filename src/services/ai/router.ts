@@ -48,21 +48,26 @@ export type AiTask =
 /**
  * Model preference per task, per provider. First entry is preferred; the
  * router walks the list only if a model 404s.
+ *
+ * OPENROUTER slugs verified against the LIVE public catalog
+ * (GET https://openrouter.ai/api/v1/models, 2026-08-28): the previous
+ * 'anthropic/claude-3.5-sonnet' and 'google/gemini-2.0-flash-001' slugs are
+ * RETIRED (404 MODEL_NOT_FOUND on every call).
  */
 export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly string[]>>> = {
   fast: {
     GEMINI: ['gemini-2.0-flash-lite', 'gemini-2.0-flash'],
-    OPENROUTER: ['openai/gpt-4o-mini'],
+    OPENROUTER: ['openai/gpt-4o-mini', 'google/gemini-2.5-flash'],
     OPENAI: ['gpt-4o-mini'],
   },
   generation: {
     GEMINI: ['gemini-2.0-flash', 'gemini-2.5-flash'],
-    OPENROUTER: ['openai/gpt-4o-mini', 'anthropic/claude-3.5-sonnet'],
+    OPENROUTER: ['openai/gpt-4o-mini', 'google/gemini-2.5-flash'],
     OPENAI: ['gpt-4o-mini', 'gpt-4o'],
   },
   reasoning: {
     GEMINI: ['gemini-2.5-pro', 'gemini-2.5-flash'],
-    OPENROUTER: ['anthropic/claude-3.5-sonnet', 'openai/gpt-4o'],
+    OPENROUTER: ['anthropic/claude-sonnet-4.5', 'openai/gpt-5-mini'],
     OPENAI: ['gpt-4o', 'gpt-4.1'],
   },
   json: {
@@ -72,7 +77,7 @@ export const MODEL_MATRIX: Record<AiTask, Partial<Record<ProviderId, readonly st
   },
   longform: {
     GEMINI: ['gemini-2.5-flash', 'gemini-flash-latest'], // 1.5 models are retired
-    OPENROUTER: ['anthropic/claude-3.5-sonnet'],
+    OPENROUTER: ['anthropic/claude-sonnet-4.5', 'google/gemini-2.5-flash'],
     OPENAI: ['gpt-4o'],
   },
 }
