@@ -149,3 +149,15 @@ export function generateR2Key(
   
   return `${prefix}/${userId}/${timestamp}-${randomString}-${sanitizedName}`;
 }
+
+// ==================== OBJECT-KEY OWNERSHIP (spec §45) ====================
+// Live object-key namespaces per user:
+//   uploads/{userId}/...                      — user-uploaded files
+//   users/{userId}/artifacts/{id}/v{n}/...    — generated artifact versions
+// Every download/delete path derives authorization from ONE of these
+// prefixes — a key outside the caller's namespaces is forbidden regardless
+// of what the client claims.
+export function ownsObjectKey(key: string, userId: string): boolean {
+  const k = String(key || "");
+  return k.startsWith(`uploads/${userId}/`) || k.startsWith(`users/${userId}/`);
+}

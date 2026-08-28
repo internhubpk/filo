@@ -22,6 +22,9 @@ import {
   Clock,
   Sparkles,
   RotateCcw,
+  History,
+  Share2,
+  Loader2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
@@ -39,8 +42,52 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { StaggerContainer, StaggerItem } from "@/components/animations";
 import type { DocumentTypeMeta } from "@/components/generation/artifact-type";
+
+// Format-aware export options per artifact type (spec §43 — never show
+// irrelevant formats; only genuinely renderable conversions are exposed).
+const EXPORT_FORMATS: Record<string, string[]> = {
+  document: ["DOCX", "PDF", "TXT"],
+  report: ["DOCX", "PDF", "TXT"],
+  proposal: ["DOCX", "PDF", "TXT"],
+  contract: ["DOCX", "PDF", "TXT"],
+  invoice: ["PDF", "XLSX"],
+  resume: ["PDF", "DOCX"],
+  lesson_plan: ["PDF", "DOCX"],
+  email: ["DOCX", "PDF", "TXT"],
+  spreadsheet: ["XLSX", "CSV", "PDF"],
+  presentation: ["PPTX", "PDF"],
+  csv: ["CSV", "XLSX"],
+  custom: ["DOCX", "PDF"],
+};
+
+interface VersionRow {
+  version: number;
+  operation: string;
+  sourceVersion?: number;
+  format: string;
+  filename: string;
+  r2Key: string;
+  size: number;
+  qaReport?: { score?: number; repaired?: number; issueCount?: number };
+  createdAt: number;
+}
 
 export interface ArtifactRow {
   _id: string;
@@ -77,6 +124,11 @@ export function ArtifactLibrary({
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [toDelete, setToDelete] = useState<ArtifactRow | null>(null);
   const [deleting, setDeleting] = useState(false);
+  const [historyFor, setHistoryFor] = useState<ArtifactRow | null>(null);
+  const [versions, setVersions] = useState<VersionRow[] | null>(null);
+  const [versionsLoading, setVersionsLoading] = useState(false);
+  const [restoring, setRestoring] = useState<number | null>(null);
+  const [exporting, setExporting] = useState<string | null>(null);
 
   const list = useApi<{ artifacts?: ArtifactRow[]; total?: number }>(
     ready && user
@@ -130,6 +182,91 @@ export function ArtifactLibrary({
       });
     }
   }, []);
+
+  // ---- Export to another format (spec §42/§43) → downloads as new version ----
+  const exportAs = useCallback(
+    async (row: ArtifactRow, format: string) => {
+      setExporting(`${row._id}:${format}`);
+      try {
+        const token = JSON.parse(localStorage.getItem("filo_session") || "{}").token;
+        const res = await fetch(
+          `/api/artifacts/${encodeURIComponent(row._id)}/export?format=${format}`,
+          { headers: { Authorization: `Bearer ${token}` } }
+        );
+        const json = (await res.json().catch(() => null)) as
+          | { success: boolean; data?: { filename: string; message: string }; error?: string; code?: string }
+          | null;
+        if (!res.ok || !json?.success) {
+          throw new Error(json?.error || `HTTP ${res.status}`);
+        }
+        toast.success(`Exported as ${format}`, { description: json.data?.message || "Saved as a new version." });
+        await list.refresh();
+      } catch (err) {
+        toast.error(`Export to ${format} failed`, {
+          description: err instanceof Error ? err.message.slice(0, 160) : "Please try again.",
+        });
+      } finally {
+        setExporting(null);
+      }
+    },
+    [list]
+  );
+
+  // ---- Version history (spec §27/§28) ----
+  const openHistory = useCallback(async (row: ArtifactRow) => {
+    setHistoryFor(row);
+    setVersions(null);
+    setVersionsLoading(true);
+    try {
+      const token = JSON.parse(localStorage.getItem("filo_session") || "{}").token;
+      const res = await fetch(`/api/artifacts/${encodeURIComponent(row._id)}/versions`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const json = (await res.json().catch(() => null)) as
+        | { success: boolean; data?: { versions: VersionRow[] }; error?: string }
+        | null;
+      if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`);
+      setVersions(json.data?.versions ?? []);
+    } catch (err) {
+      toast.error("Could not load version history", {
+        description: err instanceof Error ? err.message.slice(0, 140) : undefined,
+      });
+      setHistoryFor(null);
+    } finally {
+      setVersionsLoading(false);
+    }
+  }, []);
+
+  const restoreVersion = useCallback(
+    async (version: number) => {
+      if (!historyFor) return;
+      setRestoring(version);
+      try {
+        const token = JSON.parse(localStorage.getItem("filo_session") || "{}").token;
+        const res = await fetch(`/api/artifacts/${encodeURIComponent(historyFor._id)}/versions`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ version }),
+        });
+        const json = (await res.json().catch(() => null)) as
+          | { success: boolean; data?: { newVersion: number }; error?: string }
+          | null;
+        if (!res.ok || !json?.success) throw new Error(json?.error || `HTTP ${res.status}`);
+        toast.success(`Restored version ${version}`, {
+          description: `Saved as version ${json.data?.newVersion} — previous files are kept.`,
+        });
+        await openHistory(historyFor);
+        await list.refresh();
+      } catch (err) {
+        toast.error("Restore failed", {
+          description: err instanceof Error ? err.message.slice(0, 140) : undefined,
+        });
+      } finally {
+        setRestoring(null);
+      }
+    },
+    [historyFor, list, openHistory]
+  );
 
   async function confirmDelete() {
     if (!toDelete) return;
@@ -295,10 +432,55 @@ export function ArtifactLibrary({
                 <div className="mt-auto flex items-center justify-between pt-4">
                   <span className="flex items-center gap-1 text-xs text-muted-foreground">
                     <Clock className="size-3" /> {timeAgo(row.createdAt)}
+                    {(row.versionCount ?? 1) > 1 ? (
+                      <span className="ml-1 rounded bg-muted px-1.5 py-0.5 font-medium">v{row.versionCount}</span>
+                    ) : null}
                   </span>
                   <div className="flex gap-1 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-                    <Button variant="ghost" size="icon" className="size-7" onClick={() => void download(row)} aria-label={`Download ${row.title}`}>
-                      <Download className="size-3.5" />
+                    <DropdownMenu>
+                      <DropdownMenuTrigger asChild>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="size-7"
+                          aria-label={`Download or export ${row.title}`}
+                        >
+                          <Download className="size-3.5" />
+                        </Button>
+                      </DropdownMenuTrigger>
+                      <DropdownMenuContent align="end" className="w-48">
+                        <DropdownMenuLabel>Download</DropdownMenuLabel>
+                        <DropdownMenuItem onClick={() => void download(row)}>
+                          <Download className="mr-2 size-3.5" /> {row.format || "File"}
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
+                        <DropdownMenuLabel>Export as</DropdownMenuLabel>
+                        {(EXPORT_FORMATS[row.type] ?? ["PDF"])
+                          .filter((f) => f !== row.format)
+                          .map((f) => (
+                            <DropdownMenuItem
+                              key={f}
+                              disabled={exporting === `${row._id}:${f}`}
+                              onClick={() => void exportAs(row, f)}
+                            >
+                              {exporting === `${row._id}:${f}` ? (
+                                <Loader2 className="mr-2 size-3.5 animate-spin" />
+                              ) : (
+                                <Share2 className="mr-2 size-3.5" />
+                              )}
+                              {f}
+                            </DropdownMenuItem>
+                          ))}
+                      </DropdownMenuContent>
+                    </DropdownMenu>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="size-7"
+                      onClick={() => void openHistory(row)}
+                      aria-label={`Version history for ${row.title}`}
+                    >
+                      <History className="size-3.5" />
                     </Button>
                     <Button
                       variant="ghost"
@@ -344,8 +526,45 @@ export function ArtifactLibrary({
               <span className="hidden sm:block"><StatusChip status={row.status} /></span>
               <span className="hidden text-xs text-muted-foreground sm:block">{timeAgo(row.createdAt)}</span>
               <div className="flex justify-end gap-1">
-                <Button variant="ghost" size="icon" className="size-8" onClick={() => void download(row)} aria-label={`Download ${row.title}`}>
-                  <Download className="size-4" />
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button variant="ghost" size="icon" className="size-8" aria-label={`Download or export ${row.title}`}>
+                      <Download className="size-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-48">
+                    <DropdownMenuLabel>Download</DropdownMenuLabel>
+                    <DropdownMenuItem onClick={() => void download(row)}>
+                      <Download className="mr-2 size-3.5" /> {row.format || "File"}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuLabel>Export as</DropdownMenuLabel>
+                    {(EXPORT_FORMATS[row.type] ?? ["PDF"])
+                      .filter((f) => f !== row.format)
+                      .map((f) => (
+                        <DropdownMenuItem
+                          key={f}
+                          disabled={exporting === `${row._id}:${f}`}
+                          onClick={() => void exportAs(row, f)}
+                        >
+                          {exporting === `${row._id}:${f}` ? (
+                            <Loader2 className="mr-2 size-3.5 animate-spin" />
+                          ) : (
+                            <Share2 className="mr-2 size-3.5" />
+                          )}
+                          {f}
+                        </DropdownMenuItem>
+                      ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="size-8"
+                  onClick={() => void openHistory(row)}
+                  aria-label={`Version history for ${row.title}`}
+                >
+                  <History className="size-4" />
                 </Button>
                 <Button
                   variant="ghost"
@@ -372,6 +591,66 @@ export function ArtifactLibrary({
         loading={deleting}
         onConfirm={() => void confirmDelete()}
       />
+
+      {/* Version history (spec §27/§28) */}
+      <Dialog open={Boolean(historyFor)} onOpenChange={(o) => !o && setHistoryFor(null)}>
+        <DialogContent className="max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <History className="size-4 text-primary" /> Version history
+            </DialogTitle>
+            <DialogDescription>
+              {historyFor?.title} — every AI edit and export is preserved. Restoring keeps all files.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="max-h-[50vh] space-y-2 overflow-y-auto pr-1">
+            {versionsLoading ? (
+              <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
+                <Loader2 className="mr-2 size-4 animate-spin" /> Loading versions…
+              </div>
+            ) : (versions ?? []).length === 0 ? (
+              <p className="py-8 text-center text-sm text-muted-foreground">
+                No version history yet — it starts with the first generation.
+              </p>
+            ) : (
+              (versions ?? []).map((v) => (
+                <div
+                  key={v.version}
+                  className="flex items-center justify-between gap-3 rounded-lg border bg-card px-3 py-2.5"
+                >
+                  <div className="min-w-0">
+                    <p className="flex items-center gap-2 text-sm font-medium">
+                      <span className="rounded bg-muted px-1.5 py-0.5 text-xs font-semibold">v{v.version}</span>
+                      <span className="capitalize text-muted-foreground">{v.operation.replace("_", " ")}</span>
+                      <span className="rounded bg-muted/60 px-1.5 py-0.5 text-[10px] font-semibold tracking-wide text-muted-foreground">
+                        {v.format}
+                      </span>
+                    </p>
+                    <p className="mt-0.5 truncate text-xs text-muted-foreground">
+                      {v.filename} · {Math.round(v.size / 1024)}KB · {timeAgo(v.createdAt)}
+                      {v.qaReport?.score !== undefined ? ` · QA ${v.qaReport.score}/100` : ""}
+                    </p>
+                  </div>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 shrink-0 px-2.5 text-xs"
+                    disabled={restoring === v.version || (historyFor?.versionCount ?? 1) === v.version}
+                    onClick={() => void restoreVersion(v.version)}
+                  >
+                    {restoring === v.version ? (
+                      <Loader2 className="mr-1 size-3 animate-spin" />
+                    ) : (
+                      <RotateCcw className="mr-1 size-3" />
+                    )}
+                    {(historyFor?.versionCount ?? 1) === v.version ? "Current" : "Restore"}
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
     </div>
   );
 }

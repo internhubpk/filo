@@ -56,7 +56,8 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    // Keys are namespaced per user: uploads/{userId}/...
+    // Keys are namespaced per user: uploads/{userId}/... (uploads) and
+    // users/{userId}/artifacts/... (generated files) — see ownsObjectKey.
     const userPrefix = `uploads/${userId}/`
 
     if (action === 'upload') {
@@ -84,8 +85,10 @@ export async function POST(request: NextRequest) {
       })
     } else {
       const key = String(existingKey)
-      // Restrict downloads to the caller's own prefix — no cross-user reads.
-      if (!key.startsWith(userPrefix)) {
+      // Restrict downloads to the caller's own namespaces — no cross-user reads
+      // (uploads + generated artifact keys, spec §45).
+      const { ownsObjectKey } = await import('@/lib/r2/client')
+      if (!ownsObjectKey(key, userId)) {
         return NextResponse.json(
           { error: 'Access denied for this file key', code: 'FORBIDDEN_KEY' },
           { status: 403 }

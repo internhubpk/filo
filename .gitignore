@@ -73,3 +73,6 @@ instructions.md
 # Playwright
 test-results/
 playwright-report/
+
+# Compiled engine output for the unit-test harness (phase8)
+/tests/.build/

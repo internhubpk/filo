@@ -44,7 +44,18 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "no-useless-escape": "off",
   },
 }, {
-  ignores: ["node_modules/**", ".next/**", "out/**", "build/**", "next-env.d.ts", "examples/**", "skills", "convex/_generated/**"]
+  ignores: [
+    "node_modules/**",
+    ".next/**",
+    "out/**",
+    "build/**",
+    "next-env.d.ts",
+    "examples/**",
+    "skills",
+    "convex/_generated/**",
+    // Compiled engine output for the unit-test harness (tests/unit/phase8).
+    "tests/.build/**",
+  ]
 }];
 
 export default eslintConfig;

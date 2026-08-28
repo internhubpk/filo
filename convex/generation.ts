@@ -149,6 +149,11 @@ export const createJob = internalMutation({
     appBaseUrl: v.optional(v.string()),
     brandConfig: v.optional(v.any()),
     attachedFileNames: v.optional(v.array(v.string())),
+    // Extracted file content for AI context (spec §21/§22) — capped well
+    // below the 1MB Convex document limit by the enqueue route.
+    sourceContext: v.optional(v.string()),
+    // Regeneration target (spec §27): the artifact this job versions.
+    sourceArtifactId: v.optional(v.id("artifacts")),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -161,6 +166,8 @@ export const createJob = internalMutation({
       appBaseUrl: args.appBaseUrl,
       brandConfig: args.brandConfig,
       attachedFileNames: args.attachedFileNames,
+      sourceContext: args.sourceContext,
+      sourceArtifactId: args.sourceArtifactId,
       status: "queued",
       currentStage: "Queued",
       progress: 0,
@@ -176,7 +183,7 @@ export const createJob = internalMutation({
   },
 });
 
-/** Persist the blueprint + create unit rows. */
+/** Persist the blueprint + design plan + create unit rows. */
 export const initializeUnits = internalMutation({
   args: {
     jobId: v.id("generationJobs"),
@@ -190,6 +197,7 @@ export const initializeUnits = internalMutation({
     ),
     model: v.optional(v.string()),
     provider: v.optional(v.string()),
+    designPlan: v.optional(v.any()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
@@ -197,6 +205,7 @@ export const initializeUnits = internalMutation({
     if (!job || job.blueprint) return; // idempotent — never double-plan
     await ctx.db.patch(args.jobId, {
       blueprint: args.blueprint,
+      designPlan: args.designPlan,
       totalUnits: args.sections.length,
       model: args.model,
       provider: args.provider,
@@ -475,6 +484,8 @@ export const enqueueJob = mutation({
     appBaseUrl: v.optional(v.string()),
     brandConfig: v.optional(v.any()),
     attachedFileNames: v.optional(v.array(v.string())),
+    sourceContext: v.optional(v.string()),
+    sourceArtifactId: v.optional(v.id("artifacts")),
     // Fallback AI keys (from the Next.js env) for deployments where the
     // keys are not yet set on Convex. Never persisted to the database —
     // forwarded only to the scheduled worker invocation.
@@ -536,6 +547,8 @@ export const enqueueJob = mutation({
       appBaseUrl: args.appBaseUrl,
       brandConfig: args.brandConfig,
       attachedFileNames: args.attachedFileNames,
+      sourceContext: args.sourceContext,
+      sourceArtifactId: args.sourceArtifactId,
     });
 
     await ctx.scheduler.runAfter(0, internal.worker.processJob, {

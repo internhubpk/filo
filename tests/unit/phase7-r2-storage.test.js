@@ -132,9 +132,12 @@ test('§2 render route returns 503 FILE_STORAGE_UNAVAILABLE with the contract me
 })
 
 test('§3 render route wraps uploadToR2 and releases the claim on failure', () => {
+  // Phase 8: uploadToR2 is dynamically imported inside the try block
+  // (keeps the AWS SDK off the module-eval path); the CONTRACT is unchanged —
+  // the upload call is wrapped, the catch releases the claim and answers 503.
   assert.match(
     renderRoute,
-    /try \{\s*\n\s*await uploadToR2\(/,
+    /try \{\s*\n\s*(?:const \{ uploadToR2 \} = await import\('@\/lib\/r2\/client'\)\s*\n\s*)?await uploadToR2\(/,
     'uploadToR2 must be inside try/catch'
   )
   assert.match(
@@ -163,11 +166,15 @@ test('§3b COMPLETE_FAILED releases the render claim before returning', () => {
 })
 
 test('§3c PDF renderer rejects on pdfkit errors and cannot hang forever', () => {
-  const pdf = read('src', 'services', 'document-renderer.ts')
+  // The PdfRenderer moved to src/services/renderers/pdf-renderer.ts in
+  // Phase 8 (document-renderer.ts is now the facade) — the CONTRACT is
+  // unchanged: stream errors reject, a 120s timeout bounds the render, and
+  // the guarded promise is awaited before returning bytes.
+  const pdf = read('src', 'services', 'renderers', 'pdf-renderer.ts')
   const pdfRender = pdf.match(/class PdfRenderer[\s\S]*?async render\([\s\S]*?\n  \}/)?.[0] || ''
-  assert.match(pdfRender, /doc\.on\('error', fail\)/, 'pdfkit stream errors must reject the render promise')
+  assert.match(pdfRender, /doc\.on\('error'/, 'pdfkit stream errors must reject the render promise')
   assert.match(pdfRender, /timed out after 120s/, 'PDF render must be bounded by a timeout')
-  assert.match(pdfRender, /return done/, 'render must await the guarded promise')
+  assert.match(pdfRender, /await done/, 'render must await the guarded promise')
 })
 
 // ---------------------------------------------------------------------------

@@ -19,8 +19,15 @@
 
 ### Core Capabilities
 - **🤖 AI-Powered Document Generation** - Create professional documents, spreadsheets, presentations with AI
-- **📊 Multi-Format Output** - Export to DOCX, PDF, XLSX, PPTX, CSV
-- **☁️ Cloud Storage Integration** - Cloudflare R2 for reliable file storage
+- **🎨 Two-Stage AI Pipeline** - A dedicated AI *designer* chooses theme, audience, tone and density before the *architect* plans sections and the writer generates content
+- **🗂 Professional Theme Engine** - 18 validated design families (Executive, Corporate, Financial, Legal, Academic, Modern Tech, …) — the AI selects from a closed registry, never invents colors
+- **📥 Real File Ingestion** - Upload DOCX / PDF / XLSX / PPTX / CSV / TXT and the AI actually reads them (headings, tables, sheets, slides, formulas) to ground generation
+- **📊 Multi-Format Output** - Native DOCX (editable), themed PDF, ExcelJS spreadsheets with REAL formulas, PPTX decks, CSV, TXT, HTML
+- **📈 Chart & Diagram Engines** - Mathematically correct charts (Apache ECharts → SVG → PNG) and deterministic SVG diagrams (flowcharts, timelines) embedded in every format
+- **🔍 Visual QA** - Every artifact passes structural validation (overflow risks, placeholder text, oversized tables, slide density) with a bounded auto-repair pass before it can complete
+- **🕘 Version History** - Every generation, AI edit, export and restore is an immutable version — restore any previous version anytime
+- **🔁 Format Conversion** - Export any generated artifact to its other supported formats (e.g. DOCX → PDF, XLSX → CSV) as a new version
+- **☁️ Cloud Storage Integration** - Cloudflare R2 with versioned object keys (`users/{uid}/artifacts/{id}/v{n}/…`)
 - **🔄 Real-Time Database** - Convex for instant data synchronization
 - 🚀 **Instant Activation** - Sign up and generate immediately (no payment step)
 
@@ -69,9 +76,17 @@ filo/
 │   │   ├── r2/client.ts       # R2 storage client
 │   │   └── utils.ts           # Utility functions
 │   ├── services/              # Business logic
-│   │   ├── ai.ts              # AI service layer
-│   │   ├── artifact-engine.ts # Document generation engine
-│   │   └── file-service.ts    # File handling service
+│   │   ├── ai/                # AI provider layer (AgentRouter → Gemini → OpenAI)
+│   │   ├── themes.ts          # Theme engine (18 validated design families)
+│   │   ├── design-planning.ts # Stage-A AI designer (design plans + validation)
+│   │   ├── artifact-planning.ts # Stage-B architect prompts + blueprint parsing
+│   │   ├── ingestion/         # File ingestion (DOCX/PDF/XLSX/PPTX/CSV/TXT)
+│   │   ├── chart-engine.ts    # ECharts SSR → SVG → PNG
+│   │   ├── diagram-engine.ts  # Deterministic SVG diagrams
+│   │   ├── renderers/         # DOCX / PDF / PPTX / XLSX / CSV / TXT / HTML
+│   │   ├── document-renderer.ts # Renderer facade (renderArtifact)
+│   │   ├── qa/structural.ts   # Structural QA + bounded auto-repair
+│   │   └── artifact-engine.ts # Legacy engine (dormant)
 │   └── types/                 # TypeScript type definitions
 ├── convex/                    # Convex database
 │   ├── schema.ts              # Database schema (10 tables)

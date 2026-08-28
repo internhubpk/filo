@@ -7,8 +7,9 @@
 // definitive fix for the 504s: nothing long-running happens on Vercel.
 //
 // Pipeline (server-side, tab-independent):
-//   this route → generation:enqueueJob → scheduled worker (plan + sections)
-//   → POST /api/generation/render (DOCX/PDF/… + R2 upload) → job completed
+//   this route → generation:enqueueJob → scheduled worker (designer + plan +
+//   sections) → POST /api/generation/render (DOCX/PDF/… + R2 upload) → job
+//   completed
 //
 // Checks BEFORE any AI spend:
 //   1. Authentication (HMAC session + live DB re-read)
@@ -18,6 +19,12 @@
 //   4. Monthly quota (plan limit vs usage, from real DB values)
 //   5. Duplicate guard (one active job per user; returns the running jobId
 //      so the client can just attach to it)
+//
+// FILE INGESTION (spec §21/§22): attached files are INGESTED HERE — real
+// content extraction (DOCX/PDF/XLSX/PPTX/CSV/TXT) via the ingestion pipeline
+// — and the bounded, structured context is passed to the worker so the AI
+// genuinely operates on the user's material. Previously only file NAMES
+// reached the worker and content was silently discarded.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -25,6 +32,7 @@ import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 import { getConvexClient } from '@/lib/convex-server'
 import { isAiChatAllowedForPlan, type PlanEntitlementDoc } from '@/lib/ai-entitlement'
+import { ingestFile, buildSourceContext, type IngestedFile } from '@/services/ingestion'
 
 // Shape of the plan documents we read for entitlement/quota decisions.
 type PlanDoc = PlanEntitlementDoc
@@ -135,6 +143,45 @@ export async function POST(request: NextRequest) {
         { success: false, error: 'Invalid files payload', code: 'INVALID_FILES' },
         { status: 400 }
       )
+    }
+
+    // ==================== FILE INGESTION (spec §21/§22) ====================
+    // Extract STRUCTURED content from the attached files so the AI can
+    // actually work with them. Files arrive as base64 (client-side encode);
+    // we ingest with magic-byte type detection (never trusting the declared
+    // MIME alone) and build a bounded textual context.
+    const ingestionWarnings: string[] = []
+    let sourceContext: string | undefined
+    if (safeFiles.length > 0) {
+      const ingested: IngestedFile[] = []
+      for (const f of safeFiles) {
+        try {
+          let buffer: Buffer
+          try {
+            const base64 = f.content.includes(',') ? f.content.slice(f.content.indexOf(',') + 1) : f.content
+            buffer = Buffer.from(base64, 'base64')
+          } catch {
+            ingestionWarnings.push(`${f.filename}: could not decode file content`)
+            continue
+          }
+          if (buffer.length === 0) {
+            ingestionWarnings.push(`${f.filename}: file is empty`)
+            continue
+          }
+          const result = await ingestFile(buffer, f.filename, f.mimeType)
+          ingested.push(result)
+          for (const w of result.warnings) ingestionWarnings.push(`${f.filename}: ${w}`)
+        } catch (ingestErr) {
+          // One unreadable file must not block the whole generation — the AI
+          // still gets the prompt (and the file NAME) as context.
+          const msg = ingestErr instanceof Error ? ingestErr.message : String(ingestErr)
+          ingestionWarnings.push(`${f.filename}: ${msg.slice(0, 140)}`)
+        }
+      }
+      if (ingested.length > 0) {
+        // Bounded context: comfortably below the 1MB Convex document cap.
+        sourceContext = buildSourceContext(ingested, 48_000)
+      }
     }
 
     if (userId === 'dev-user') {
@@ -252,6 +299,8 @@ export async function POST(request: NextRequest) {
       appBaseUrl: origin,
       brandConfig: brandConfig ?? undefined,
       attachedFileNames: safeFiles.map((f) => f.filename),
+      sourceContext: sourceContext || undefined,
+      sourceArtifactId: (body.sourceArtifactId || undefined) as any,
       // Fallback keys so the worker can call AI even before the keys are
       // configured on the Convex deployment. Recommended production setup:
       // `npx convex env set AGENT_ROUTER_API_KEY ...` (then these stay unused).
@@ -270,7 +319,8 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(
-      `[AGENT-GENERATE] Job ${result.jobId} queued for user ${userId} (prompt: ${prompt.substring(0, 80)}…)`
+      `[AGENT-GENERATE] Job ${result.jobId} queued for user ${userId} (prompt: ${prompt.substring(0, 80)}…)` +
+        (sourceContext ? ` + ${safeFiles.length} ingested file(s), context ${sourceContext.length} chars` : '')
     )
 
     return NextResponse.json({
@@ -279,6 +329,7 @@ export async function POST(request: NextRequest) {
         jobId: result.jobId,
         status: 'queued',
         message: 'Generation started — it will continue even if you close this page.',
+        ingestionWarnings: ingestionWarnings.length > 0 ? ingestionWarnings : undefined,
       },
     })
   } catch (error) {

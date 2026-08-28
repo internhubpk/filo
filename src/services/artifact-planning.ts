@@ -23,18 +23,42 @@ export type DocumentFormat = 'DOCX' | 'PDF' | 'XLSX' | 'PPTX' | 'CSV'
 
 // ==================== PROMPTS ====================
 
-export function buildPlanningSystemPrompt(type: string, format: DocumentFormat): string {
+export function buildPlanningSystemPrompt(
+  type: string,
+  format: DocumentFormat,
+  design?: { theme: string; audience: string; tone: string; density: string; visualPriority: string[]; useCharts: boolean; useTables: boolean; useMetrics: boolean }
+): string {
   const formatHints: Record<string, string> = {
-    DOCX: 'This will be rendered as a Word document (.docx). Plan sections that work well in a document format with headings, paragraphs, lists, and tables.',
-    PDF: 'This will be rendered as a PDF. Plan sections that work well in a paginated format with clear hierarchy.',
-    XLSX: 'This will be rendered as an Excel spreadsheet. Plan sections as logical data groups, each becoming a worksheet. Include table data with headers.',
-    PPTX: 'This will be rendered as a PowerPoint presentation. Plan each section as a slide. The first section should be the title/cover slide. Keep text concise - slides should not be text-heavy.',
+    DOCX: 'This will be rendered as a Word document (.docx). Plan sections that work well in a document format with headings, paragraphs, lists, tables, charts, metric highlights, callouts, and a cover page.',
+    PDF: 'This will be rendered as a PDF. Plan sections that work well in a paginated format with clear hierarchy, a designed cover page, and visually distinct blocks (metrics, callouts, charts).',
+    XLSX: 'This will be rendered as an Excel spreadsheet. Plan sections as logical data groups, each becoming a worksheet. Include table data with headers, computed columns with formulas, and a summary sheet first.',
+    PPTX: 'This will be rendered as a PowerPoint presentation. Plan each section as a slide. The first section should be the title/cover slide, the last a closing slide. Keep text concise - slides must not be text-heavy.',
     CSV: 'This will be rendered as CSV. Plan sections as data tables with consistent columns.',
   }
 
+  const designContext = design
+    ? `\nDESIGN DIRECTION (decided by the designer stage — follow it):\n- Theme: ${design.theme}\n- Audience: ${design.audience} · Tone: ${design.tone} · Density: ${design.density}\n- Visual priority: ${design.visualPriority.join(', ')}\n- Charts ${design.useCharts ? 'encouraged' : 'not needed'} · Tables ${design.useTables ? 'encouraged' : 'minimal'} · Metric highlights ${design.useMetrics ? 'encouraged' : 'not needed'}\n- Density guidance: light = fewer, punchier sections; medium = balanced; dense = thorough sections.\n`
+    : ''
+
+  const componentVocabulary = `
+COMPONENT VOCABULARY (use these types in section components):
+- paragraph: rich text body (string, 3-5 sentences)
+- heading: sub-heading inside a section (short string)
+- list: bullet points (array of strings)
+- table: data table (2D array, first row = headers)
+- quote: notable quotation (string)
+- metric_grid: 2-4 headline KPIs (array of {label, value, change?, unit?} objects)
+- callout: highlighted note/insight (string) — use for key takeaways, warnings, insights
+- chart: data visualization (object {chartType: "bar|line|pie|donut|area", title, categories: string[], series: [{name, data: number[]}], note?})
+- timeline: chronological steps (array of {label, description})
+- key_takeaways: executive summary bullets (array of strings)
+- two_column: side-by-side comparison (object {leftTitle, leftPoints: string[], rightTitle, rightPoints: string[]})
+
+Use metric_grid in the opening section of business/report documents. Use charts when data relationships matter. Use callout sparingly for emphasis. For XLSX prefer table-heavy sections; for PPTX prefer list/metric_grid/chart with minimal paragraph text.`
+
   return `You are Filo's document architect. Create a detailed structural plan for a ${type} document.
 
-${formatHints[format] || formatHints.DOCX}
+${formatHints[format] || formatHints.DOCX}${designContext}${componentVocabulary}
 
 CRITICAL RULES:
 1. Respond ONLY with valid JSON
@@ -59,7 +83,7 @@ You must respond with a JSON object:
       "components": [
         {
           "id": "comp-id-1",
-          "type": "heading|paragraph|list|table|quote",
+          "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|key_takeaways|two_column",
           "order": 0,
           "content": null,
           "note": "Brief note about what content should go here"
@@ -79,6 +103,10 @@ export interface SectionPromptInput {
   outputFormat: string
   originalPrompt: string
   globalContext?: string
+  /** Structured content extracted from user-uploaded files (spec §21-22). */
+  sourceContext?: string | null
+  /** Theme/audience/tone direction from the designer stage (spec §8). */
+  designDirection?: string | null
 }
 
 export function buildSectionContentPrompt(input: SectionPromptInput): {
@@ -90,23 +118,31 @@ export function buildSectionContentPrompt(input: SectionPromptInput): {
 Document Title: ${input.documentTitle}
 Document Type: ${input.documentType}
 Output Format: ${input.outputFormat}
-
+${input.designDirection ? `\nDesign direction: ${input.designDirection}\n` : ''}
 RULES:
 1. Generate COMPLETE, PROFESSIONAL content - NO placeholders, NO lorem ipsum
-2. For table type: return content as a 2D array (array of arrays) with headers as the first row
+2. For table type: return content as a 2D array (array of arrays) with headers as the first row. Cells may be plain values or formula strings like "=SUM(B2:B10)" when the format is XLSX and a computed column makes sense.
 3. For list type: return content as an array of strings
 4. For paragraph type: return content as a plain text string
 5. For heading type: return content as a short string (the heading text)
 6. For quote type: return content as a string with the quote text
-7. Keep content substantial - each paragraph should be 3-5 sentences minimum
-8. Tables should have at least 3 rows of data
-9. Lists should have at least 3 items
+7. For metric_grid type: return an array of 2-4 objects, each {"label": "Revenue", "value": "$1.2M", "change": "+18% YoY", "unit": "USD"}
+8. For callout type: return a string — one high-impact insight or note
+9. For chart type: return an object {"chartType": "bar|line|pie|donut|area", "title": "Chart title", "categories": ["Q1","Q2","Q3","Q4"], "series": [{"name": "Revenue", "data": [120, 135, 150, 180]}], "note": "optional caption"}
+10. For timeline type: return an array of {"label": "Phase name", "description": "what happens"}
+11. For key_takeaways type: return an array of 3-5 concise strings
+12. For two_column type: return {"leftTitle": "...", "leftPoints": ["..."], "rightTitle": "...", "rightPoints": ["..."]}
+13. Keep content substantial - each paragraph should be 3-5 sentences minimum
+14. Tables should have at least 3 rows of data
+15. Lists should have at least 3 items
+16. Chart data must be NUMERICALLY CONSISTENT with any table data in the same document
+17. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones
 
 RESPOND WITH JSON:
 {
   "components": [
     {
-      "type": "paragraph|heading|list|table|quote",
+      "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|key_takeaways|two_column",
       "content": "the actual content here"
     }
   ]
@@ -122,6 +158,7 @@ RESPOND WITH JSON:
 Section Title: ${input.sectionTitle}
 Section Type: ${input.sectionType}
 ${notes}
+${input.sourceContext ? `\nSOURCE MATERIAL EXTRACTED FROM THE USER'S FILES (ground the content in these facts where relevant — do not contradict them):\n${input.sourceContext.slice(0, 12000)}\n` : ''}
 ${input.globalContext ? `\nPreviously written content (for continuity, do not repeat):\n${input.globalContext}\n` : ''}
 Original Request: ${input.originalPrompt}
 
@@ -157,7 +194,12 @@ function uuid(): string {
 export function parsePlanResponse(
   aiContent: string,
   artifactType: string,
-  outputFormat: DocumentFormat
+  outputFormat: DocumentFormat,
+  designOverrides?: {
+    design?: DesignSpecification
+    sourceContext?: string | null
+    metadata?: Record<string, unknown>
+  }
 ): ArtifactSpecification {
   // Parsed loosely (same as the legacy pipeline) — AI JSON is normalized
   // field-by-field below rather than trusted structurally.
@@ -199,7 +241,7 @@ export function parsePlanResponse(
     description: parsed.description,
     outputFormat: outputFormat as OutputFormat,
     sections,
-    design: getDefaultDesign(outputFormat),
+    design: designOverrides?.design ?? getDefaultDesign(outputFormat),
     metadata: {
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
@@ -207,6 +249,7 @@ export function parsePlanResponse(
       language: 'en',
       tags: [],
       keywords: [],
+      ...(designOverrides?.metadata ?? {}),
     },
     validation: {
       requireTitle: true,
@@ -222,14 +265,42 @@ export function parsePlanResponse(
   }
 }
 
+/** Well-known component types emitted by the content stage (spec §10). */
+export const COMPONENT_TYPES = [
+  'PARAGRAPH',
+  'HEADING',
+  'LIST',
+  'TABLE',
+  'QUOTE',
+  'METRIC_GRID',
+  'CALLOUT',
+  'CHART',
+  'TIMELINE',
+  'KEY_TAKEAWAYS',
+  'TWO_COLUMN',
+] as const
+
+export type NormalizedComponentType = (typeof COMPONENT_TYPES)[number]
+
 export function normalizeComponentType(type: string): string {
   const typeMap: Record<string, string> = {
     'paragraph': 'PARAGRAPH',
+    'text': 'PARAGRAPH',
     'heading': 'HEADING',
     'list': 'LIST',
     'table': 'TABLE',
-    'quote': 'PARAGRAPH',
-    'text': 'PARAGRAPH',
+    'quote': 'QUOTE',
+    'metric_grid': 'METRIC_GRID',
+    'metricgrid': 'METRIC_GRID',
+    'metrics': 'METRIC_GRID',
+    'callout': 'CALLOUT',
+    'chart': 'CHART',
+    'timeline': 'TIMELINE',
+    'key_takeaways': 'KEY_TAKEAWAYS',
+    'keytakeaways': 'KEY_TAKEAWAYS',
+    'two_column': 'TWO_COLUMN',
+    'twocolumn': 'TWO_COLUMN',
+    // Legacy/plain types degrade gracefully to paragraph
     'code': 'PARAGRAPH',
     'image': 'PARAGRAPH',
   }

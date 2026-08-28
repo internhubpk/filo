@@ -272,6 +272,23 @@ export default defineSchema({
     // independently, and so a resumed job doesn't re-plan.
     blueprint: v.optional(v.any()),
 
+    // Design plan from the STAGE-A AI designer call (spec §8): theme id,
+    // audience, tone, density, visual priority. Stored so retries reuse the
+    // same validated direction and the render route can re-derive tokens.
+    designPlan: v.optional(v.any()),
+
+    // Structured context extracted from user-attached files at enqueue time
+    // (spec §21/§22). BOUNDED well below the 1MB Convex document cap — the
+    // enqueue route extracts + caps it server-side before it ever reaches
+    // Convex. Previously only file NAMES were kept and content was dropped,
+    // which made "upload + ask AI to edit" impossible.
+    sourceContext: v.optional(v.string()),
+
+    // When regenerating/editing an existing artifact (spec §24/§27): the
+    // artifact this job produces a NEW VERSION of. The render route then
+    // bumps versionCount on the SAME artifact instead of creating a new one.
+    sourceArtifactId: v.optional(v.id("artifacts")),
+
     // Original app origin (e.g. "https://filo-ailab99.vercel.app") captured
     // at enqueue time. The worker calls this origin's /api/generation/render
     // to render + persist the file, so rendering survives tab close/logout.
@@ -323,6 +340,33 @@ export default defineSchema({
     .index("by_jobId", ["jobId"])
     .index("by_jobId_status", ["jobId", "status"])
     .index("by_jobId_sequence", ["jobId", "sequence"]),
+
+  // =============================================================================
+  // ARTIFACT VERSIONS (spec §27 — "Users must not lose the previous document
+  // after an AI modification"). Every significant render of an artifact — first
+  // generation, AI edit, regenerate, format export — appends an immutable
+  // version row pointing at the R2 object of that revision. Restoring a
+  // version re-points the artifact's fileId at the version's file row.
+  // =============================================================================
+  artifactVersions: defineTable({
+    artifactId: v.id("artifacts"),
+    userId: v.id("users"),
+    version: v.number(), // 1-based, monotonically increasing per artifact
+    operation: v.string(), // 'generate' | 'ai_edit' | 'regenerate' | 'export' | 'restore'
+    sourceVersion: v.optional(v.number()), // version this one was derived from
+    format: v.string(), // DOCX | PDF | XLSX | PPTX | CSV | TXT
+    filename: v.string(),
+    fileId: v.id("files"),
+    r2Key: v.string(),
+    size: v.number(),
+    jobId: v.optional(v.id("generationJobs")),
+    // Structured QA summary (spec §29/§31): score, issues found/repaired.
+    qaReport: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("by_artifactId", ["artifactId"])
+    .index("by_artifactId_version", ["artifactId", "version"])
+    .index("by_userId", ["userId"]),
 
   // =============================================================================
   // BILLING (Safepay sandbox subscriptions)

@@ -1,0 +1,47 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "outDir": "../.build",
+    "rootDir": "../../src",
+    "skipLibCheck": true,
+    "strict": false,
+    "noImplicitAny": false,
+    "esModuleInterop": true,
+    "allowSyntheticDefaultImports": true,
+    "resolveJsonModule": true,
+    "declaration": false,
+    "sourceMap": false,
+    "noEmit": false,
+    "baseUrl": "../..",
+    "paths": {
+      "@/*": ["src/*"],
+      "@convex/*": ["convex/*"]
+    },
+    "lib": ["ES2022", "DOM"]
+  },
+  "include": [
+    "../../src/types/index.ts",
+    "../../src/services/themes.ts",
+    "../../src/services/design-planning.ts",
+    "../../src/services/artifact-planning.ts",
+    "../../src/services/ingestion/types.ts",
+    "../../src/services/ingestion/csv.ts",
+    "../../src/services/ingestion/docx.ts",
+    "../../src/services/ingestion/pdf.ts",
+    "../../src/services/ingestion/xlsx.ts",
+    "../../src/services/ingestion/pptx.ts",
+    "../../src/services/ingestion/index.ts",
+    "../../src/services/chart-engine.ts",
+    "../../src/services/diagram-engine.ts",
+    "../../src/services/qa/structural.ts",
+    "../../src/services/renderers/shared.ts",
+    "../../src/services/renderers/docx-renderer.ts",
+    "../../src/services/renderers/pdf-renderer.ts",
+    "../../src/services/renderers/pptx-renderer.ts",
+    "../../src/services/renderers/xlsx-renderer.ts",
+    "../../src/services/renderers/text-renderers.ts",
+    "../../src/services/document-renderer.ts"
+  ]
+}

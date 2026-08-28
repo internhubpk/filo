@@ -1,12 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server'
-import { generateDownloadUrl, fileExistsInR2 } from '@/lib/r2/client'
+import { generateDownloadUrl, fileExistsInR2, ownsObjectKey } from '@/lib/r2/client'
 import { validateSessionToken } from '@/lib/session'
 import { classifyR2Error, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 
 // GET /api/files/[fileId]/download - Generate download URL or redirect
 // This endpoint provides a download link for a specific file.
 // SECURITY: requires a valid session; callers may only access keys under
-// their own uploads/{userId}/ prefix.
+// their own uploads/{userId}/ or users/{userId}/artifacts/ prefixes.
 
 export async function GET(
   request: NextRequest,
@@ -34,8 +34,10 @@ export async function GET(
       )
     }
 
-    // Ownership: files are stored under uploads/{userId}/... — no cross-user reads.
-    if (!fileId.startsWith(`uploads/${session.user.id}/`)) {
+    // Ownership: user files live under uploads/{userId}/... and generated
+    // artifacts under users/{userId}/artifacts/... (spec §45). No cross-user
+    // reads — either prefix proves the object belongs to the caller.
+    if (!ownsObjectKey(fileId, session.user.id)) {
       return NextResponse.json(
         { error: 'Access denied for this file', code: 'FORBIDDEN_FILE' },
         { status: 403 }
@@ -147,8 +149,8 @@ export async function DELETE(
       )
     }
 
-    // Ownership: only the uploader may delete.
-    if (!fileId.startsWith(`uploads/${session.user.id}/`)) {
+    // Ownership: only the uploader/owner may delete.
+    if (!ownsObjectKey(fileId, session.user.id)) {
       return NextResponse.json(
         { error: 'Access denied for this file', code: 'FORBIDDEN_FILE' },
         { status: 403 }

@@ -56,6 +56,38 @@ export const listUserArtifacts = query({
   },
 });
 
+/** Single artifact with ownership check (null when absent or not owned). */
+export const getArtifactForUser = query({
+  args: { artifactId: v.id("artifacts"), userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.userId !== args.userId) return null;
+    return artifact;
+  },
+});
+
+/** Update an artifact's title/format after a new version renders (spec §27). */
+export const updateArtifactMeta = mutation({
+  args: {
+    artifactId: v.id("artifacts"),
+    userId: v.id("users"),
+    title: v.optional(v.string()),
+    format: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.userId !== args.userId) {
+      return { success: false as const, error: "Artifact not found" };
+    }
+    await ctx.db.patch(args.artifactId, {
+      ...(args.title !== undefined ? { title: args.title } : {}),
+      ...(args.format !== undefined ? { format: args.format } : {}),
+      updatedAt: Date.now(),
+    });
+    return { success: true as const };
+  },
+});
+
 // ==================== ACTION: Generate Artifact ====================
 
 /**
@@ -402,6 +434,16 @@ export const deleteUserArtifact = mutation({
       }
     }
 
+    // Delete version history rows (spec §27): the artifact is gone, its
+    // version trail goes with it.
+    const versionRows = await ctx.db
+      .query("artifactVersions")
+      .withIndex("by_artifactId", (q) => q.eq("artifactId", args.artifactId))
+      .collect();
+    for (const row of versionRows) {
+      await ctx.db.delete(row._id);
+    }
+
     await ctx.db.delete(args.artifactId);
     return { success: true as const, r2Key };
   },
@@ -424,5 +466,194 @@ export const linkFile = mutation({
       updatedAt: Date.now(),
     });
     return { success: true };
+  },
+});
+
+// =============================================================================
+// ARTIFACT VERSIONS (spec §27)
+// =============================================================================
+// Every significant render appends an immutable version row. Users never lose
+// a previous document after an AI modification: restoring a version re-points
+// the artifact at that version's file (and records the restore as a new
+// version entry so history stays append-only).
+// =============================================================================
+
+/**
+ * Append a version row for an artifact and bump its versionCount.
+ * Called by the render route AFTER the file is in R2 and the file row exists.
+ * Operation: 'generate' | 'ai_edit' | 'regenerate' | 'export' | 'restore'.
+ */
+export const saveArtifactVersion = mutation({
+  args: {
+    serverToken: v.string(),
+    artifactId: v.id("artifacts"),
+    userId: v.id("users"),
+    operation: v.string(),
+    sourceVersion: v.optional(v.number()),
+    format: v.string(),
+    filename: v.string(),
+    fileId: v.id("files"),
+    r2Key: v.string(),
+    size: v.number(),
+    jobId: v.optional(v.id("generationJobs")),
+    qaReport: v.optional(v.any()),
+  },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact) return { success: false as const, error: "Artifact not found" };
+    if (artifact.userId !== args.userId) {
+      return { success: false as const, error: "Forbidden: not your artifact" };
+    }
+
+    // Next version number = max(existing) + 1 (append-only, race-safe enough
+    // for single-user flows; the render claim already single-flights renders).
+    const existing = await ctx.db
+      .query("artifactVersions")
+      .withIndex("by_artifactId_version", (q) => q.eq("artifactId", args.artifactId))
+      .order("desc")
+      .take(1);
+    const nextVersion = (existing[0]?.version ?? 0) + 1;
+
+    const now = Date.now();
+    await ctx.db.insert("artifactVersions", {
+      artifactId: args.artifactId,
+      userId: args.userId,
+      version: nextVersion,
+      operation: args.operation,
+      sourceVersion: args.sourceVersion,
+      format: args.format,
+      filename: args.filename,
+      fileId: args.fileId,
+      r2Key: args.r2Key,
+      size: args.size,
+      jobId: args.jobId,
+      qaReport: args.qaReport,
+      createdAt: now,
+    });
+
+    // Keep the artifact pointed at the LATEST file and format.
+    await ctx.db.patch(args.artifactId, {
+      versionCount: nextVersion,
+      fileId: args.fileId,
+      format: args.format,
+      updatedAt: now,
+    });
+
+    return { success: true as const, version: nextVersion };
+  },
+});
+
+/** List an artifact's versions (newest first). Ownership enforced. */
+export const listArtifactVersions = query({
+  args: { artifactId: v.id("artifacts"), userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.userId !== args.userId) {
+      return { success: false as const, versions: [] as Array<Record<string, unknown>> };
+    }
+    const rows = await ctx.db
+      .query("artifactVersions")
+      .withIndex("by_artifactId", (q) => q.eq("artifactId", args.artifactId))
+      .order("desc")
+      .collect();
+    return {
+      success: true as const,
+      versions: rows.map((r) => ({
+        version: r.version,
+        operation: r.operation,
+        sourceVersion: r.sourceVersion,
+        format: r.format,
+        filename: r.filename,
+        fileId: r._id,
+        r2Key: r.r2Key,
+        size: r.size,
+        qaReport: r.qaReport,
+        createdAt: r.createdAt,
+      })),
+    };
+  },
+});
+
+/**
+ * Restore a previous version: re-point the artifact's fileId/format at the
+ * requested version's file row, and append a 'restore' version entry so the
+ * audit trail stays complete. The old file bytes in R2 are never deleted.
+ */
+export const restoreArtifactVersion = mutation({
+  args: {
+    serverToken: v.string(),
+    artifactId: v.id("artifacts"),
+    userId: v.id("users"),
+    version: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.userId !== args.userId) {
+      return { success: false as const, error: "Artifact not found" };
+    }
+    const target = await ctx.db
+      .query("artifactVersions")
+      .withIndex("by_artifactId_version", (q) =>
+        q.eq("artifactId", args.artifactId).eq("version", args.version)
+      )
+      .first();
+    if (!target) {
+      return { success: false as const, error: `Version ${args.version} not found` };
+    }
+
+    const now = Date.now();
+    const latest = await ctx.db
+      .query("artifactVersions")
+      .withIndex("by_artifactId", (q) => q.eq("artifactId", args.artifactId))
+      .order("desc")
+      .first();
+    const nextVersion = (latest?.version ?? 0) + 1;
+
+    await ctx.db.insert("artifactVersions", {
+      artifactId: args.artifactId,
+      userId: args.userId,
+      version: nextVersion,
+      operation: "restore",
+      sourceVersion: args.version,
+      format: target.format,
+      filename: target.filename,
+      fileId: target.fileId,
+      r2Key: target.r2Key,
+      size: target.size,
+      qaReport: target.qaReport,
+      createdAt: now,
+    });
+
+    await ctx.db.patch(args.artifactId, {
+      fileId: target.fileId,
+      format: target.format,
+      versionCount: nextVersion,
+      updatedAt: now,
+    });
+
+    return { success: true as const, version: nextVersion, restoredFrom: args.version };
+  },
+});
+
+/**
+ * Fetch an artifact's source job (blueprint + completed units) so the export
+ * route can re-render the SAME content in another format (spec §42).
+ */
+export const getArtifactSourceJob = query({
+  args: { artifactId: v.id("artifacts"), userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.userId !== args.userId) return null;
+    const job = await ctx.db
+      .query("generationJobs")
+      .withIndex("by_artifactId", (q) => q.eq("artifactId", args.artifactId))
+      .order("desc")
+      .first();
+    if (!job || !job.blueprint) return null;
+    const units = await ctx.db
+      .query("generationUnits")
+      .withIndex("by_jobId_sequence", (q) => q.eq("jobId", job._id))
+      .collect();
+    return { job, units };
   },
 });

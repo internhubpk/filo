@@ -59,6 +59,14 @@ import {
   normalizeComponentType,
   type DocumentFormat,
 } from "../src/services/artifact-planning";
+import {
+  buildDesignerSystemPrompt,
+  buildDesignerUserPrompt,
+  parseDesignPlan,
+  applyDesignPlan,
+  describeDesignPlan,
+  type DesignPlan,
+} from "../src/services/design-planning";
 
 // ==================== TYPES ====================
 
@@ -96,24 +104,45 @@ export const processJob = internalAction({
     if (["completed", "failed", "cancelled"].includes(job.status)) return;
 
     try {
-      // ---------- PHASE 1: PLANNING ----------
+      // ---------- PHASE 1: TWO-STAGE PLANNING (spec §8) ----------
+      // Stage A — AI DESIGNER: decides audience, tone, theme, density and
+      //   visual priority. Strictly validated against the closed theme
+      //   registry (themes.ts); a bad/unusable designer response falls back
+      //   to a safe format-appropriate default instead of failing the job.
+      // Stage B — AI ARCHITECT: builds the section blueprint UNDER the
+      //   designer's constraints (never invents its own visual direction).
       if (!job.blueprint) {
         await ctx.runMutation(internal.generation.setJobStatus, {
           jobId,
           status: "planning",
-          currentStage: "Planning document structure",
+          currentStage: "Planning document design",
           progress: 2,
         });
 
         const artifactType = (job.artifactType || "document").toUpperCase();
         const outputFormat = normalizeFormat(job.outputFormat, artifactType);
 
-        const planPrompt = buildPlanningSystemPrompt(artifactType, outputFormat);
+        // ----- Stage A: designer -----
+        const designPlan = await designStage(job, outputFormat);
+        const { design } = applyDesignPlan(designPlan, outputFormat);
+        const designDirection = describeDesignPlan(designPlan);
+
+        // ----- Stage B: architect -----
+        const planPrompt = buildPlanningSystemPrompt(artifactType, outputFormat, {
+          theme: designPlan.theme,
+          audience: designPlan.audience,
+          tone: designPlan.tone,
+          density: designPlan.density,
+          visualPriority: designPlan.visualPriority,
+          useCharts: designPlan.useCharts,
+          useTables: designPlan.useTables,
+          useMetrics: designPlan.useMetrics,
+        });
         const planResponse = await aiRouter.generate(
           {
             messages: [
               { role: "system", content: planPrompt },
-              { role: "user", content: job.prompt },
+              { role: "user", content: planUserPrompt(job) },
             ],
             options: {
               temperature: 0.7,
@@ -127,12 +156,14 @@ export const processJob = internalAction({
         const blueprint = parsePlanResponse(
           planResponse.content || "{}",
           artifactType,
-          outputFormat
+          outputFormat,
+          { design }
         );
 
         await ctx.runMutation(internal.generation.initializeUnits, {
           jobId,
           blueprint: blueprint as unknown as Record<string, unknown>,
+          designPlan: designPlan as unknown as Record<string, unknown>,
           sections: blueprint.sections.map((s, i) => ({
             id: s.id,
             title: s.title,
@@ -333,6 +364,75 @@ export const renderRetry = internalAction({
 // ==================== HELPERS ====================
 
 /**
+ * STAGE A — the AI designer call (spec §8). Never fails the job: any error
+ * (provider outage, malformed JSON) degrades to the format-appropriate
+ * default design plan so generation can proceed.
+ */
+async function designStage(
+  job: { prompt: string; sourceContext?: string | null; artifactType?: string | null },
+  outputFormat: DocumentFormat
+): Promise<DesignPlan> {
+  try {
+    const sourceSummary = job.sourceContext
+      ? job.sourceContext.slice(0, 2000)
+      : null;
+    const { system, user } = {
+      system: buildDesignerSystemPrompt(outputFormat),
+      user: buildDesignerUserPrompt(job.prompt, outputFormat, sourceSummary),
+    };
+    const response = await aiRouter.generate(
+      {
+        messages: [
+          { role: "system", content: system },
+          { role: "user", content: user },
+        ],
+        options: {
+          temperature: 0.4,
+          maxTokens: 1200,
+          responseFormat: { type: "json" as const },
+        },
+      },
+      { task: "reasoning" }
+    );
+    return parseDesignPlan(response.content || "{}", job.prompt, outputFormat);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[WORKER] designer stage failed — using safe default design: ${msg.slice(0, 200)}`
+    );
+    // Deterministic, validated fallback (spec §36: repair/retry → here,
+    // degrade gracefully rather than failing a paid job on an optional stage).
+    return parseDesignPlan("{}", job.prompt, outputFormat);
+  }
+}
+
+/**
+ * The architect prompt body: the user request plus extracted file context so
+ * plans can be grounded in attached source material (spec §21/§26).
+ */
+function planUserPrompt(job: { prompt: string; sourceContext?: string | null }): string {
+  const context = job.sourceContext?.trim();
+  if (context) {
+    return (
+      `${job.prompt}\n\nSOURCE MATERIAL EXTRACTED FROM THE USER'S ATTACHED FILES ` +
+      `(the plan MUST be grounded in this content; reuse its structure, facts ` +
+      `and figures where relevant):\n${context.slice(0, 20000)}`
+    );
+  }
+  return job.prompt;
+}
+
+/** Human-readable design direction from the job's persisted designPlan. */
+function designDirectionFor(job: { designPlan?: unknown }): string | null {
+  const plan = job.designPlan as
+    | { theme?: string; audience?: string; tone?: string; density?: string }
+    | null
+    | undefined;
+  if (!plan || typeof plan !== "object") return null;
+  return describeDesignPlan(parseDesignPlan(JSON.stringify(plan), "", "DOCX"));
+}
+
+/**
  * Generate ONE section unit. Returns true when the unit was requeued due to
  * a TRANSIENT AI failure (caller then schedules the next invocation on a
  * delay instead of immediately).
@@ -404,6 +504,11 @@ async function generateOneUnit(
     outputFormat: blueprint.outputFormat || "DOCX",
     originalPrompt: job.prompt,
     globalContext,
+    // Ground content in attached-file context + the designer's direction
+    // (spec §8/§21/§26).
+    sourceContext: typeof job.sourceContext === "string" ? job.sourceContext : null,
+    designDirection:
+      typeof designDirectionFor(job) === "string" ? designDirectionFor(job) : undefined,
   });
 
   try {

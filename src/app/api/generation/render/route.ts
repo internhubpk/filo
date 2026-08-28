@@ -7,16 +7,21 @@
 //
 //   1. claimRender (idempotent, single-flight guard per job)
 //   2. rebuild the ArtifactSpecification from the job blueprint + units
-//   3. renderArtifact → real DOCX/PDF/XLSX/PPTX/CSV bytes (Node runtime)
-//   4. upload to R2 + save artifact/file records
-//   5. generation:completeJobRendered — the only path to "completed"
+//   3. STRUCTURAL QA (spec §29-31): validate → bounded auto-repair → re-check
+//   4. renderArtifact → real DOCX/PDF/XLSX/PPTX/CSV bytes (Node runtime)
+//   5. post-render output validation (signature + size sanity)
+//   6. professional filename + versioned R2 key (spec §44/§45)
+//   7. upload to R2 + save artifact/file records + VERSION record (spec §27)
+//   8. generation:completeJobRendered — the only path to "completed"
 //
 // AUTH (either one):
 //   • { serverToken } — FILO_SERVER_SECRET (Convex worker path)
 //   • Authorization: Bearer <session> — the job OWNER (browser fallback path)
 //
-// This route is why generation can finish with the tab closed: the worker
-// (or a later client visit) triggers it independent of any single request.
+// QUALITY GATE (spec §31): an artifact is only marked completed when
+// generation succeeded AND the file rendered AND storage succeeded AND
+// validation passed. Storage failures answer 503 FILE_STORAGE_UNAVAILABLE
+// with the claim released so retry chains stay alive — never a fake success.
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -24,6 +29,13 @@ import { validateSessionToken } from '@/lib/session'
 import { api } from '@convex/_generated/api'
 import { getConvexClient } from '@/lib/convex-server'
 import { renderArtifact } from '@/services/document-renderer'
+import { buildArtifactFilename } from '@/services/renderers/shared'
+import {
+  autoRepair,
+  validateDocument,
+  validateRenderedOutput,
+  type QaComponent,
+} from '@/services/qa/structural'
 import { classifyR2Error, isR2Configured, r2S3ErrorName, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
 import type { ArtifactSpecification, OutputFormat } from '@/types'
 
@@ -40,6 +52,7 @@ interface RenderJob {
   outputFormat?: string
   status: string
   blueprint?: Record<string, unknown> | null
+  sourceArtifactId?: string | null
   error?: string
 }
 
@@ -61,6 +74,12 @@ interface RenderComponent {
 
 function bad(error: string, code: string, status: number) {
   return NextResponse.json({ success: false, error, code }, { status })
+}
+
+/** Versioned artifact key (spec §45): users/{uid}/artifacts/{aid}/v{n}/{file} */
+function artifactR2Key(userId: string, artifactId: string, version: number, filename: string): string {
+  const safeName = filename.replace(/[^a-zA-Z0-9._-]/g, '_')
+  return `users/${userId}/artifacts/${artifactId}/v${version}/${safeName}`
 }
 
 export async function POST(request: NextRequest) {
@@ -191,10 +210,51 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    // ==================== STRUCTURAL QA (spec §29/§30/§31) ================
+    // Validate the assembled document, run ONE deterministic repair pass
+    // (split overlong paragraphs, drop empty tables, cap slide bullets) and
+    // re-check. QA issues that survive repair degrade to warnings — only
+    // render/storage failures fail the job.
+    const qaComponents: QaComponent[] = components.map((c) => ({
+      sectionId: c.sectionId,
+      index: c.order,
+      type: c.type,
+      content: c.content,
+    }))
+    let qaReport = validateDocument(blueprint, qaComponents)
+    let effectiveComponents: RenderComponent[] = components
+    if (!qaReport.passed || qaReport.issues.length > 0) {
+      const repaired = autoRepair(blueprint, qaComponents, qaReport)
+      qaReport = repaired.report
+      // Repaired components are render-ready (repair only transforms content,
+      // splits overlong paragraphs, converts tiny lists, drops empty tables —
+      // never reorders sections). Rebuild the render list directly from them
+      // so split chunks and conversions are all preserved.
+      if (repaired.components !== qaComponents && repaired.components.length > 0) {
+        effectiveComponents = repaired.components.map((q, i) => ({
+          sectionId: q.sectionId,
+          componentId: `qa-${i}`,
+          type: q.type,
+          content: q.content,
+          order: i,
+        }))
+      }
+    }
+    const qaSummary = {
+      score: qaReport.score,
+      passed: qaReport.passed,
+      repaired: qaReport.repaired,
+      issueCount: qaReport.issues.length,
+      issues: qaReport.issues.slice(0, 12).map((i) => ({ type: i.type, severity: i.severity, sectionId: i.sectionId, repaired: i.repaired ?? false })),
+    }
+    if (!qaReport.passed) {
+      console.warn(`[GENERATION-RENDER] job ${jobId} QA score ${qaReport.score}: ${qaReport.issues.filter((i) => i.severity === 'error').map((i) => i.type).join(', ')}`)
+    }
+
     // ==================== RENDER (Node runtime: docx/exceljs/pptxgenjs) ===
     let rendered
     try {
-      rendered = await renderArtifact(blueprint, components, format)
+      rendered = await renderArtifact(blueprint, effectiveComponents, format)
     } catch (renderErr) {
       const msg = renderErr instanceof Error ? renderErr.message : String(renderErr)
       console.error('[GENERATION-RENDER] renderArtifact failed:', msg)
@@ -208,6 +268,79 @@ export async function POST(request: NextRequest) {
       return bad(`Document rendering failed: ${msg}`, 'RENDER_FAILED', 500)
     }
 
+    // ==================== POST-RENDER VALIDATION (spec §31) ================
+    const buffer = Buffer.from(rendered.buffer)
+    const outputCheck = validateRenderedOutput(buffer, format, rendered.mimeType || '')
+    if (!outputCheck.ok) {
+      const reasons = outputCheck.issues.map((i) => i.message).join('; ')
+      console.error(`[GENERATION-RENDER] job ${jobId} output validation failed: ${reasons}`)
+      await convexClient.mutation(api.generation.releaseRenderClaim, {
+        serverToken,
+        jobId: jobId as any,
+        error: `Rendered file failed validation: ${reasons.slice(0, 250)}`,
+      })
+      return bad(`Rendered file failed validation: ${reasons}`, 'DOCUMENT_VALIDATION_FAILED', 500)
+    }
+
+    // ==================== TARGET ARTIFACT (spec §27 versioning) ===========
+    // Regeneration of an existing artifact → new VERSION on the SAME artifact.
+    // Fresh generation → new artifact record, version 1.
+    const operation = job.sourceArtifactId ? 'ai_edit' : 'generate'
+    let artifactId: string
+    let baseVersionCount = 0
+
+    if (job.sourceArtifactId) {
+      const existing = (await convexClient.query(api.artifacts.getArtifactForUser, {
+        artifactId: job.sourceArtifactId as any,
+        userId: job.userId as any,
+      })) as { _id: string; versionCount?: number } | null
+      if (existing) {
+        artifactId = existing._id
+        baseVersionCount = existing.versionCount ?? 1
+        // Title/format track the latest revision.
+        await convexClient.mutation(api.artifacts.updateArtifactMeta, {
+          artifactId: artifactId as any,
+          userId: job.userId as any,
+          title: blueprint.title || 'Untitled document',
+          format,
+        }).catch(() => {})
+      } else {
+        // Source artifact was deleted mid-flight — create a fresh one.
+        const fresh = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
+          userId: job.userId as any,
+          title: blueprint.title || 'Untitled document',
+          type: (job.artifactType || blueprint.type || 'document').toLowerCase(),
+          format,
+          prompt: job.prompt,
+          status: 'completed',
+        })) as { saved: boolean; dbId?: string } | null
+        artifactId = fresh?.dbId ?? ''
+        baseVersionCount = 0
+      }
+    } else {
+      const saved = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
+        userId: job.userId as any,
+        title: blueprint.title || 'Untitled document',
+        type: (job.artifactType || blueprint.type || 'document').toLowerCase(),
+        format,
+        prompt: job.prompt,
+        status: 'completed',
+      })) as { saved: boolean; dbId?: string } | null
+
+      if (!saved?.saved || !saved.dbId) {
+        await convexClient.mutation(api.generation.releaseRenderClaim, {
+          serverToken,
+          jobId: jobId as any,
+          error: 'Artifact record could not be saved — retrying is safe (file is in R2).',
+        })
+        return bad('Could not save artifact record', 'SAVE_FAILED', 500)
+      }
+      artifactId = saved.dbId
+    }
+
+    // ==================== PROFESSIONAL FILENAME (spec §44) =================
+    const filename = buildArtifactFilename(blueprint.title || 'Generated_Document', format)
+
     // ==================== PERSIST (R2 + Convex records) ==================
     // R2 FAILURE CONTRACT: any storage failure answers HTTP 503
     // "File storage temporarily unavailable" (code FILE_STORAGE_UNAVAILABLE)
@@ -217,13 +350,12 @@ export async function POST(request: NextRequest) {
     // 100s, every retry was bounced as IN_FLIGHT, and jobs hung at 97%
     // ("Creating your file") with no user-visible cause.
     const userId = job.userId
-    const buffer = Buffer.from(rendered.buffer)
-    const { uploadToR2, generateR2Key } = await import('@/lib/r2/client')
-    const r2Key = generateR2Key(userId, rendered.filename || `artifact-${Date.now()}`)
+    const r2Key = artifactR2Key(userId, artifactId, baseVersionCount + 1, filename)
     try {
+      const { uploadToR2 } = await import('@/lib/r2/client')
       await uploadToR2(r2Key, buffer, rendered.mimeType || 'application/octet-stream', {
-        originalName: rendered.filename || 'artifact',
-        size: String(rendered.size ?? buffer.length),
+        originalName: filename,
+        size: String(buffer.length),
         workspaceId: userId,
         ownerId: userId,
         uploadedAt: new Date().toISOString(),
@@ -265,44 +397,52 @@ export async function POST(request: NextRequest) {
       )
     }
 
-    const saved = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
-      userId: userId as any,
-      title: blueprint.title || 'Untitled document',
-      type: (job.artifactType || blueprint.type || 'document').toLowerCase(),
-      format,
-      prompt: job.prompt,
-      status: 'completed',
-    })) as { saved: boolean; dbId?: string } | null
-
-    if (!saved?.saved || !saved.dbId) {
-      await convexClient.mutation(api.generation.releaseRenderClaim, {
-        serverToken,
-        jobId: jobId as any,
-        error: 'Artifact record could not be saved — retrying is safe (file is in R2).',
-      })
-      return bad('Could not save artifact record', 'SAVE_FAILED', 500)
-    }
-
     const fileDbId = (await convexClient.mutation(api.files.registerFile, {
       userId: userId as any,
-      originalName: rendered.filename || 'artifact',
+      originalName: filename,
       mimeType: rendered.mimeType || 'application/octet-stream',
-      size: rendered.size ?? buffer.length,
+      size: buffer.length,
       r2Key,
+      artifactId: artifactId as any,
     })) as unknown as string
 
-    await convexClient.mutation(api.artifacts.linkFile, {
-      artifactId: saved.dbId as any,
-      userId: userId as any,
-      fileId: fileDbId as any,
-    })
+    // ==================== VERSION RECORD (spec §27) =======================
+    // Appends the immutable version row and points the artifact at the new
+    // file. Non-fatal: a version-row hiccup must not lose a finished file.
+    let versionNumber = baseVersionCount + 1
+    try {
+      const versionResult = (await convexClient.mutation(api.artifacts.saveArtifactVersion, {
+        serverToken,
+        artifactId: artifactId as any,
+        userId: userId as any,
+        operation,
+        format,
+        filename,
+        fileId: fileDbId as any,
+        r2Key,
+        size: buffer.length,
+        jobId: jobId as any,
+        qaReport: qaSummary,
+      })) as { success: boolean; version?: number }
+      if (versionResult?.success && versionResult.version) {
+        versionNumber = versionResult.version
+      }
+    } catch (versionErr) {
+      console.error('[GENERATION-RENDER] Version record failed (non-fatal):', versionErr)
+      // Fall back to a direct file link so the artifact stays usable.
+      await convexClient.mutation(api.artifacts.linkFile, {
+        artifactId: artifactId as any,
+        userId: userId as any,
+        fileId: fileDbId as any,
+      }).catch(() => {})
+    }
 
     const done = (await convexClient.mutation(api.generation.completeJobRendered, {
       serverToken,
       jobId: jobId as any,
-      artifactId: saved.dbId as any,
-      fileName: rendered.filename,
-      fileSize: rendered.size ?? buffer.length,
+      artifactId: artifactId as any,
+      fileName: filename,
+      fileSize: buffer.length,
     })) as { success: boolean; error?: string }
 
     if (!done.success) {
@@ -320,16 +460,18 @@ export async function POST(request: NextRequest) {
     }
 
     console.log(
-      `[GENERATION-RENDER] job ${jobId} completed: ${rendered.filename} (${rendered.size} bytes) → R2 ${r2Key}`
+      `[GENERATION-RENDER] job ${jobId} completed: ${filename} v${versionNumber} (${buffer.length} bytes, QA ${qaReport.score}) → R2 ${r2Key}`
     )
 
     return NextResponse.json({
       success: true,
       data: {
         status: 'completed',
-        artifactId: saved.dbId,
-        fileName: rendered.filename,
-        fileSize: rendered.size ?? buffer.length,
+        artifactId,
+        fileName: filename,
+        fileSize: buffer.length,
+        version: versionNumber,
+        qa: qaSummary,
       },
     })
   } catch (error) {

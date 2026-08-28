@@ -55,6 +55,19 @@ import { FadeIn } from "@/components/animations";
 
 const PROMPT_MIN = 10;
 
+// Quick edit actions for imported files (spec §41) — one tap composes a
+// professional instruction around the attached source material.
+const QUICK_EDIT_ACTIONS: Array<{ label: string; template: string }> = [
+  { label: "Rewrite", template: "Rewrite the attached file's content professionally, keeping all key facts:" },
+  { label: "Improve", template: "Improve the attached file — stronger structure, clearer language, professional polish:" },
+  { label: "Redesign", template: "Redesign the attached content into a polished, professionally themed document:" },
+  { label: "Summarize", template: "Summarize the attached file into a clear executive brief:" },
+  { label: "Expand", template: "Expand the attached file with more depth, examples and analysis:" },
+  { label: "Convert", template: "Convert the attached file into a complete new document:" },
+  { label: "Fix grammar", template: "Fix grammar, spelling and style in the attached content while preserving meaning:" },
+  { label: "Analyze", template: "Analyze the attached file and produce a structured analytical report:" },
+];
+
 interface AttachedFile {
   filename: string;
   mimeType: string;
@@ -565,6 +578,35 @@ export default function CreatePage() {
                         </button>
                       </span>
                     ))}
+                  </div>
+                )}
+
+                {/* Quick edit actions for imported files (spec §41) */}
+                {files.length > 0 && (
+                  <div className="border-t px-4 py-3">
+                    <p className="mb-2 text-xs text-muted-foreground">
+                      Filo reads your files — pick what to do with them:
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {QUICK_EDIT_ACTIONS.map((action) => (
+                        <button
+                          key={action.label}
+                          onClick={() =>
+                            setPrompt((prev) => {
+                              const base = prev.trim()
+                              const composed = base
+                                ? `${action.template} ${base}`
+                                : action.template
+                              return composed
+                            })
+                          }
+                          className="rounded-full border bg-muted/40 px-3 py-1.5 text-xs font-medium text-foreground/80 transition-colors hover:border-primary/40 hover:bg-primary/10 hover:text-primary"
+                          aria-label={action.label}
+                        >
+                          {action.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
 
