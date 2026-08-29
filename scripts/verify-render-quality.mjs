@@ -280,7 +280,50 @@ async function verifyCsv(buffer, label) {
   check(`${label}: CSV consistent column count`, lines.slice(1).every((l) => l.split(',').length === cols), 'ragged rows')
 }
 
+// ==================== LONG-DOC FIXTURE BUILDER ====================
+
+export function buildLongSpec(themeId = 'academic') {
+  const sections = [{ id: 'cover', type: 'cover', title: 'Reliability Engineering Master Notes', order: 0, components: [] }]
+  const partTitles = ['Foundations of Failure', 'Measuring and Steering', 'Operating at Scale']
+  const chapterTitles = [
+    'What Failure Really Costs', 'Error Budgets as Currency', 'The Architecture of Incidents', 'Alerting That Respects Attention',
+    'Latency Is a Feature', 'Capacity as a Forecast', 'Dependency Chains and Blast Radius', 'Postmortems That Change Behavior',
+    'SLOs That Survive Contact', 'Burn Rates and Multiwindows', 'Dashboards That Answer Questions', 'Toil Accounting',
+    'Progressive Delivery', 'Feature Flags at Scale', 'Data Integrity Under Fire', 'Chaos With Guardrails',
+    'The On-Call Contract', 'Runbooks as Living Systems', 'Load Sheds and Graceful Death', 'Cross-Region Storytelling',
+    'Cost of Nine Nines', 'Team Topologies for Reliability', 'Security During Incidents', 'The Automation Ladder',
+  ]
+  let ch = 0
+  partTitles.forEach((pt, pi) => {
+    sections.push({ id: `part${pi}`, type: 'heading', title: pt, order: sections.length, level: 'part', number: ['I', 'II', 'III'][pi], visuals: [], components: [{ id: `part${pi}-intro`, type: 'paragraph', order: 0, content: para(70), data: null }] })
+    for (let k = 0; k < 8; k++) {
+      ch++
+      const words = 850 + Math.floor(Math.random() * 250)
+      sections.push({
+        id: `ch${ch}`, type: 'content', title: chapterTitles[ch - 1], order: sections.length, level: 'chapter', number: `${ch}`, visuals: ch % 3 === 0 ? [{ kind: 'chart', hint: 'bar: quarterly view' }] : [],
+        components: [
+          { id: `ch${ch}-a`, type: 'paragraph', order: 0, content: para(words), data: null },
+          { id: `ch${ch}-b`, type: 'paragraph', order: 1, content: para(words), data: null },
+          { id: `ch${ch}-c`, type: 'paragraph', order: 2, content: para(words), data: null },
+          ...(ch % 3 === 0 ? [{ id: `ch${ch}-x`, type: 'chart', order: 3, content: { chartType: 'bar', title: `Signal ${ch}: quarterly evolution`, categories: ['Q1', 'Q2', 'Q3', 'Q4'], series: [{ name: 'index', data: [40 + ch, 45 + ch, 38 + ch, 52 + ch] }] }, data: null }] : []),
+        ],
+      })
+    }
+  })
+  return {
+    id: 'spec-long', type: 'document', title: 'Reliability Engineering Master Notes',
+    description: 'Comprehensive study notes on distributed systems reliability.',
+    outputFormat: 'DOCX', sections,
+    design: { theme: { name: themeId, variant: 'professional', primaryStyle: 'formal' } },
+    metadata: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), version: 1, language: 'en', tags: [], keywords: [] },
+    validation: { requireTitle: true, maxSections: 80, minSections: 1, requiredSections: [], forbiddenContent: [], maxLength: 400000, mustIncludeBranding: false, validateCalculations: true, validateReferences: false },
+  }
+}
+
 // ==================== MAIN ====================
+
+const isDirectRun = process.argv[1] && (import.meta.url === new URL(`file://${process.argv[1]}`).href || import.meta.url.endsWith(process.argv[1].split('/').pop()))
+export const fixtures = { buildRichSpec, compsFor, buildLongSpec, LOREM, para }
 
 async function main() {
   console.log('\n══════════ RENDER QUALITY VERIFICATION (v2 engine) ══════════\n')
@@ -387,15 +430,7 @@ async function main() {
       }
     })
 
-    const longSpec = {
-      id: 'spec-long', type: 'document', title: 'Reliability Engineering Master Notes',
-      description: 'Comprehensive study notes on distributed systems reliability.',
-      outputFormat: 'DOCX', sections,
-      design: { theme: { name: 'academic', variant: 'professional', primaryStyle: 'formal' } },
-      metadata: { createdAt: new Date().toISOString(), updatedAt: new Date().toISOString(), version: 1, language: 'en', tags: [], keywords: [] },
-      validation: { requireTitle: true, maxSections: 80, minSections: 1, requiredSections: [], forbiddenContent: [], maxLength: 400000, mustIncludeBranding: false, validateCalculations: true, validateReferences: false },
-    }
-
+    const longSpec = buildLongSpec('academic')
     const t0 = Date.now()
     const out = await renderArtifact(longSpec, compsFor(longSpec), 'DOCX')
     const docxMs = Date.now() - t0
@@ -432,7 +467,9 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  console.error('HARNESS CRASH:', e)
-  process.exit(1)
-})
+if (isDirectRun) {
+  await main().catch((e) => {
+    console.error('HARNESS CRASH:', e)
+    process.exit(1)
+  })
+}
