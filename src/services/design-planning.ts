@@ -17,6 +17,7 @@
 import { resolveTheme, themeCatalogForPrompt, themeExists } from './themes'
 import type { DesignSpecification } from '@/types'
 import type { DocumentFormat } from '@/services/artifact-planning'
+import { extractJsonObject } from '@/services/artifact-planning'
 
 // ==================== DESIGN PLAN MODEL ====================
 
@@ -119,16 +120,12 @@ export function parseDesignPlan(
 ): DesignPlan {
   let raw: Record<string, unknown> = {}
   try {
-    raw = JSON.parse(aiContent)
+    // Bulletproof extractor (shared with the architect stage): survives prose
+    // wrapping, fences, trailing commas and truncated output. An unusable
+    // design degrades to safe defaults below — it can never fail the job.
+    raw = extractJsonObject(aiContent)
   } catch {
-    const fenced = aiContent.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (fenced) {
-      try {
-        raw = JSON.parse(fenced[1])
-      } catch {
-        raw = {}
-      }
-    }
+    raw = {}
   }
 
   const defaultTheme = defaultThemeFor(format)

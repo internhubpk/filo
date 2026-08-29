@@ -38,6 +38,7 @@ import {
   AllProvidersFailedError,
   normalizeAiError,
 } from './errors'
+import { extractJsonObject } from '../artifact-planning'
 
 // ==================== MODEL SELECTION TABLE ====================
 
@@ -146,7 +147,7 @@ export const MAX_CONSECUTIVE_NETWORK_FAILURES = 2
 // deliberately in-memory (per serverless isolate) and expires quickly — a
 // provider is NEVER permanently disabled based on transient failures.
 
-type ProviderHealthState = 'healthy' | 'degraded' | 'quota_exhausted'
+type ProviderHealthState = 'healthy' | 'degraded' | 'quota_exhausted' | 'auth_invalid'
 
 interface ProviderHealthEntry {
   state: ProviderHealthState
@@ -157,6 +158,7 @@ interface ProviderHealthEntry {
 
 const QUOTA_COOLDOWN_MS = 10 * 60 * 1000
 const DEGRADED_COOLDOWN_MS = 2 * 60 * 1000
+const AUTH_COOLDOWN_MS = 10 * 60 * 1000
 const DEGRADED_AFTER_CONSECUTIVE_UNAVAILABLE = 4
 
 const providerHealth = new Map<ProviderId, ProviderHealthEntry>()
@@ -182,6 +184,14 @@ function recordProviderFailure(id: ProviderId, code: string): void {
     // Account-level billing exhaustion — hammering changes nothing.
     entry.state = 'quota_exhausted'
     entry.until = Date.now() + QUOTA_COOLDOWN_MS
+  } else if (code === 'AUTH_FAILED' || code === 'CONFIGURATION_ERROR') {
+    // Broken credential / wrong base URL: DETERMINISTIC account-wide
+    // failure. Without a cooldown every AI call re-burns a doomed round
+    // trip (observed: AGENT_ROUTER 401 'Invalid API Key' before EVERY
+    // fallback call). 10-minute cooldown self-heals once the operator
+    // fixes the key; recordProviderSuccess clears it immediately.
+    entry.state = 'auth_invalid'
+    entry.until = Date.now() + AUTH_COOLDOWN_MS
   } else if (
     code === 'PROVIDER_UNAVAILABLE' ||
     code === 'TIMEOUT' ||
@@ -361,6 +371,14 @@ class AiRouter {
         })
         continue
       }
+      if (health.state === 'auth_invalid') {
+        attemptLog.push({
+          provider: providerId,
+          code: 'AUTH_FAILED',
+          message: `skipped: credentials were rejected — cooldown ${Math.ceil((health.until - Date.now()) / 1000)}s (fix the API key or wait for the cooldown to re-probe)`,
+        })
+        continue
+      }
 
       const models = this.buildModelChain(providerId, request, generateOptions)
       // Degraded providers get ONE attempt per model instead of the full
@@ -528,6 +546,13 @@ class AiRouter {
         } catch {
           /* fall through */
         }
+      }
+      // Last resort: the shared bulletproof extractor (brace-balanced scan,
+      // trailing-comma / control-char repair, truncation auto-close).
+      try {
+        return extractJsonObject(trimmed) as T
+      } catch {
+        /* fall through */
       }
       throw new AiBaseError(
         `Model returned non-JSON content: ${trimmed.slice(0, 200)}...`,

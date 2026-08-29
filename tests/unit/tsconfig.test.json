@@ -42,6 +42,8 @@
     "../../src/services/renderers/pptx-renderer.ts",
     "../../src/services/renderers/xlsx-renderer.ts",
     "../../src/services/renderers/text-renderers.ts",
-    "../../src/services/document-renderer.ts"
+    "../../src/services/document-renderer.ts",
+    "../../src/lib/r2/client.ts",
+    "../../src/lib/r2/errors.ts"
   ]
 }

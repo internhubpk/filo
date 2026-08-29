@@ -203,6 +203,22 @@ export function classifyR2Error(error: unknown): R2ErrorInfo {
     }
   }
 
+  // ---- 5c. Client-side request SERIALIZATION errors (deterministic) --------
+  // The SDK could not even BUILD the HTTP request — e.g.
+  // "TypeError: Invalid character in header content" when a non-ASCII
+  // filename reached x-amz-meta-* headers. Retrying the identical request
+  // fails identically FOREVER: this exact loop previously stalled every
+  // CJK-titled artifact at 97% with an eternal retry chain. (Deliberately
+  // AFTER the NETWORK bucket: "TypeError: fetch failed" is a genuine
+  // transient network error and must stay retryable.)
+  if (/invalid character in header|invalid header (name|value|content)|header content/.test(haystack)) {
+    return {
+      kind: 'UNKNOWN',
+      retryable: false,
+      detail: `Request could not be serialized (${scrubbedMessage(message).slice(0, 160)}) — non-retryable client-side error`,
+    }
+  }
+
   // ---- 6. Everything else ----------------------------------------------------
   return {
     kind: 'UNKNOWN',

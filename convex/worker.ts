@@ -138,27 +138,62 @@ export const processJob = internalAction({
           useTables: designPlan.useTables,
           useMetrics: designPlan.useMetrics,
         });
-        const planResponse = await aiRouter.generate(
-          {
-            messages: [
-              { role: "system", content: planPrompt },
-              { role: "user", content: planUserPrompt(job) },
-            ],
-            options: {
-              temperature: 0.7,
-              maxTokens: 4096,
-              responseFormat: { type: "json" as const },
-            },
-          },
-          { task: "reasoning" }
-        );
 
-        const blueprint = parsePlanResponse(
-          planResponse.content || "{}",
-          artifactType,
-          outputFormat,
-          { design }
-        );
+        // 8192 (was 4096): Gemini 3.x thinking consumes the SAME
+        // maxOutputTokens budget, so a 4096 cap truncated large PPTX/XLSX
+        // blueprints mid-JSON → "Failed to parse AI planning response" →
+        // an otherwise-successful job died before rendering.
+        const PLAN_MAX_TOKENS = 8192;
+
+        // ONE planning retry on a malformed blueprint: a fresh sample (or a
+        // different model after provider rotation) resolves a transient
+        // malformed-JSON response. Failing a paid job while every downstream
+        // stage is still recoverable is the worst possible outcome.
+        let blueprint: ReturnType<typeof parsePlanResponse> | null = null;
+        let lastPlanError: unknown = null;
+        for (let planAttempt = 1; planAttempt <= 2 && !blueprint; planAttempt++) {
+          const planResponse = await aiRouter.generate(
+            {
+              messages: [
+                { role: "system", content: planPrompt },
+                {
+                  role: "user",
+                  content:
+                    planUserPrompt(job) +
+                    (planAttempt > 1
+                      ? "\n\nIMPORTANT: Your previous response could not be parsed as JSON. Respond with EXACTLY ONE raw JSON object and nothing else — no prose, no markdown fences, no trailing text."
+                      : ""),
+                },
+              ],
+              options: {
+                temperature: planAttempt > 1 ? 0.3 : 0.7,
+                maxTokens: PLAN_MAX_TOKENS,
+                responseFormat: { type: "json" as const },
+              },
+            },
+            { task: "reasoning" }
+          );
+          try {
+            blueprint = parsePlanResponse(
+              planResponse.content || "{}",
+              artifactType,
+              outputFormat,
+              { design }
+            );
+          } catch (parseErr) {
+            lastPlanError = parseErr;
+            console.warn(
+              `[WORKER] job ${jobId}: planning parse failed (attempt ${planAttempt}/2): ${
+                parseErr instanceof Error ? parseErr.message.slice(0, 220) : String(parseErr)
+              }`
+            );
+          }
+        }
+        if (!blueprint) {
+          throw lastPlanError instanceof Error
+            ? lastPlanError
+            : new Error("Failed to parse AI planning response after 2 attempts");
+        }
 
         await ctx.runMutation(internal.generation.initializeUnits, {
           jobId,
@@ -415,6 +450,41 @@ async function callRenderEndpoint(ctx: any, jobId: string, retryAttempt = 0) {
     console.error(
       `[WORKER] render endpoint ${res.status} for job ${jobId}: ${bodyText.slice(0, 300)}`
     );
+
+    // The endpoint returns a structured body for known failures:
+    //   { success:false, error, code, kind, retryable, s3ErrorName, detail }
+    // HONOR the `retryable` contract: a deterministic failure (broken
+    // credentials, request the storage API will always refuse) retried on
+    // backoff fails identically forever — that exact loop previously stalled
+    // every such job at 97% ("Creating your file") with no resolution. Fail
+    // the job NOW with the actionable reason instead.
+    let errBody: {
+      error?: string;
+      code?: string;
+      detail?: string;
+      retryable?: boolean;
+    } | null = null;
+    try {
+      const parsed = JSON.parse(bodyText);
+      if (parsed && typeof parsed === "object") errBody = parsed;
+    } catch {
+      // non-JSON body (proxy error page, empty body) → default retry path
+    }
+
+    if (errBody && errBody.retryable === false && res.status !== 429) {
+      const reason =
+        errBody.error ||
+        errBody.detail ||
+        errBody.code ||
+        `render endpoint HTTP ${res.status} (non-retryable)`;
+      await ctx.runMutation(internal.generation.failJobFromRender, {
+        serverToken,
+        jobId,
+        error: `File creation failed permanently: ${String(reason).slice(0, 350)}`,
+      });
+      return;
+    }
+
     throw new Error(`render endpoint HTTP ${res.status}`);
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);

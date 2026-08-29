@@ -171,17 +171,133 @@ Generate the actual content now. Be thorough and professional.`
 
 // ==================== PARSING ====================
 
-/** Extract a JSON object from an AI response (raw JSON or fenced code block). */
+/**
+ * Extract a JSON object from an AI response — BULLETPROOF edition.
+ *
+ * Models wrap JSON in prose ("Here is your plan:"), fence it with ```json,
+ * emit trailing commas, leak raw control characters into strings, and —
+ * when maxTokens or thinking eats the budget — TRUNCATE the output mid-object.
+ * Every one of those used to throw "Failed to parse AI planning response"
+ * and FAIL a fully-paid job after all content had already been generated.
+ *
+ * Strategy (first match wins):
+ *   1. strip BOM/zero-width, direct JSON.parse
+ *   2. try every ```json fenced block
+ *   3. brace-balanced scan (string/escape aware) for the outermost {...}
+ *   4. deterministic repairs on the extracted text: remove trailing commas,
+ *      strip raw control chars inside strings
+ *   5. truncation rescue: auto-close an unterminated object/string and parse
+ */
 export function extractJsonObject(aiContent: string): Record<string, unknown> {
-  try {
-    return JSON.parse(aiContent)
-  } catch {
-    const jsonMatch = aiContent.match(/```(?:json)?\s*([\s\S]*?)```/)
-    if (jsonMatch) {
-      return JSON.parse(jsonMatch[1])
+  const text = String(aiContent ?? '')
+    .replace(/^\uFEFF/, '')
+    .replace(/[\u200B-\u200D\uFEFF]/g, '')
+    .trim()
+
+  const tryParse = (s: string): Record<string, unknown> | null => {
+    try {
+      const v = JSON.parse(s)
+      return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+    } catch {
+      return null
     }
-    throw new Error('Failed to parse AI planning response')
   }
+
+  const repairCommon = (s: string): string =>
+    s
+      // trailing commas before } or ]
+      .replace(/,\s*([}\]])/g, '$1')
+      // Raw C0 control characters (including \n \r \t) are INVALID inside
+      // JSON strings and must be escaped — models leak them constantly.
+      // Folding ALL of them to spaces is always JSON-safe: outside strings
+      // whitespace is legal anyway, inside strings it repairs the leak.
+      .replace(/[\u0000-\u001F]+/g, ' ')
+
+  // ---- 1. direct parse -----------------------------------------------------
+  const direct = tryParse(text) ?? tryParse(repairCommon(text))
+  if (direct) return direct
+
+  // ---- 2. fenced blocks (all of them, longest first) -----------------------
+  const fences = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/g)]
+    .map((m) => m[1].trim())
+    .sort((a, b) => b.length - a.length)
+  for (const block of fences) {
+    const parsed = tryParse(block) ?? tryParse(repairCommon(block))
+    if (parsed) return parsed
+  }
+
+  // ---- 3+4. brace-balanced scan from the first '{' --------------------------
+  const start = text.indexOf('{')
+  if (start >= 0) {
+    let depth = 0
+    let inString = false
+    let escaped = false
+    let end = -1
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]
+      if (inString) {
+        if (escaped) escaped = false
+        else if (ch === '\\') escaped = true
+        else if (ch === '"') inString = false
+        continue
+      }
+      if (ch === '"') inString = true
+      else if (ch === '{') depth++
+      else if (ch === '}') {
+        depth--
+        if (depth === 0) {
+          end = i + 1
+          break
+        }
+      }
+    }
+
+    const candidates: string[] = []
+    if (end > start) candidates.push(text.slice(start, end))
+    else if (depth > 0) candidates.push(text.slice(start)) // truncated — repaired below
+    for (const cand of candidates) {
+      const parsed = tryParse(cand) ?? tryParse(repairCommon(cand))
+      if (parsed) return parsed
+    }
+
+    // ---- 5. truncation rescue (output hit maxTokens mid-object) -----------
+    // Close an unterminated string, then close every open { / [ in order.
+    // Re-scan from scratch (string state must NOT be inherited from the
+    // balanced scan above — that scan already consumed the entire text, so
+    // its final state says nothing about the start of the buffer).
+    const raw = end > start ? text.slice(start, end) : text.slice(start)
+    if (end < 0 || depth > 0) {
+      const stack: string[] = []
+      let s = false
+      let e = false
+      for (const ch of raw) {
+        if (s) {
+          if (e) e = false
+          else if (ch === '\\') e = true
+          else if (ch === '"') s = false
+          continue
+        }
+        if (ch === '"') s = true
+        else if (ch === '{') stack.push('}')
+        else if (ch === '[') stack.push(']')
+        else if (ch === '}' || ch === ']') stack.pop()
+      }
+      let repaired = repairCommon(raw)
+      if (s) repaired += '"'
+      // Drop a dangling partial token so we don't glue garbage to a closer.
+      repaired = repaired.replace(/,\s*$/, '').replace(/:\s*$/, ': null')
+      while (stack.length > 0) repaired += stack.pop()
+      const rescued = tryParse(repaired)
+      if (rescued) return rescued
+    }
+  }
+
+  // ---- give up, but DIAGNOSE instead of a blind throw ----------------------
+  const snippet = text.slice(0, 160).replace(/\s+/g, ' ')
+  throw new Error(
+    `Failed to parse AI planning response (length=${text.length}, ` +
+      `starts with: "${snippet}")`
+  )
 }
 
 function uuid(): string {

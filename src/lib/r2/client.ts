@@ -47,6 +47,53 @@ const r2Client = new S3Client({
 
 const BUCKET_NAME = process.env.R2_BUCKET_NAME || "filo-uploads";
 
+// ==================== S3 METADATA HEADER SAFETY (root cause of the 97% stall) ====================
+// S3 object metadata is transmitted as `x-amz-meta-*` HTTP request headers.
+// Node's HTTP stack REJECTS header values containing characters outside the
+// latin1 range (TypeError: "Invalid character in header content") — and every
+// non-ASCII character in an artifact title or an uploaded filename (CJK,
+// Arabic, emoji, …) used to crash the PutObject call DETERMINISTICALLY. The
+// render route classified that as a retryable storage failure → HTTP 503 →
+// the worker retried forever → jobs stuck at 97% ("Creating your file").
+//
+// Fix at the ONE choke point every upload passes through: percent-encode
+// anything outside printable ASCII so the header is always valid, and
+// decodeURIComponent() recovers the exact original value. Control characters
+// (newlines, tabs, NUL) are folded to spaces — they are header-invalid too
+// and are also an injection vector.
+const S3_METADATA_MAX_VALUE_LENGTH = 900; // keep total x-amz-meta overhead well under S3's 2 KB limit
+
+function sanitizeS3MetadataValue(raw: string): string {
+  let out = "";
+  for (const ch of String(raw ?? "")) {
+    const code = ch.codePointAt(0) ?? 0;
+    if (code >= 0x20 && code <= 0x7e) {
+      out += ch;
+    } else if (code === 0x09 || code === 0x0a || code === 0x0d) {
+      out += " "; // control chars → space
+    } else {
+      out += encodeURIComponent(ch); // CJK / latin-1 supplement / emoji → %XX%XX
+    }
+  }
+  return out.slice(0, S3_METADATA_MAX_VALUE_LENGTH);
+}
+
+function sanitizeS3Metadata(
+  metadata?: Record<string, string>
+): Record<string, string> | undefined {
+  if (!metadata) return undefined;
+  const safe: Record<string, string> = {};
+  for (const [rawKey, rawValue] of Object.entries(metadata)) {
+    // Metadata keys become header names: keep [A-Za-z0-9._-] only.
+    const key = String(rawKey ?? "")
+      .replace(/[^A-Za-z0-9._-]/g, "_")
+      .slice(0, 100);
+    if (!key) continue;
+    safe[key] = sanitizeS3MetadataValue(rawValue);
+  }
+  return Object.keys(safe).length > 0 ? safe : undefined;
+}
+
 // Generate presigned URL for upload
 export async function generateUploadUrl(
   key: string,
@@ -94,7 +141,10 @@ export async function uploadToR2(
     Key: key,
     Body: body,
     ContentType: contentType,
-    Metadata: metadata,
+    // Metadata values are derived from artifact titles / user filenames and
+    // are frequently non-ASCII — unsanitized values crash the request inside
+    // Node's HTTP client (see the header-safety block above).
+    Metadata: sanitizeS3Metadata(metadata),
   });
 
   await r2Client.send(command);
