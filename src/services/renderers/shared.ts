@@ -231,11 +231,19 @@ export async function renderComponentImage(
       colors: theme.colors,
     })
     if (!chart) return null
-    return { png: chart.png, width: chart.width, height: chart.height, caption: spec.note }
+    // Caption carries the chart TITLE (not just the note): the title is the
+    // identity of the figure in the document text layer — it must be
+    // selectable/searchable text, not pixels inside the PNG.
+    const caption = [spec.title?.trim(), spec.note?.trim()].filter(Boolean).join(' — ') || undefined
+    return { png: chart.png, width: chart.width, height: chart.height, caption }
   }
   if (component.type === 'timeline') {
-    const content = component.content && typeof component.content === 'object' ? (component.content as Record<string, unknown>) : {}
-    const spec = normalizeDiagramSpec({ kind: 'timeline', ...content })
+    const content = component.content
+    // A bare array is the AI-canonical timeline shape (planning rule 10) —
+    // do NOT spread it into an object (spread loses array elements).
+    const spec = normalizeDiagramSpec(
+      Array.isArray(content) ? { kind: 'timeline', steps: content } : { kind: 'timeline', ...(content && typeof content === 'object' ? (content as Record<string, unknown>) : {}) }
+    )
     if (!spec) return null
     const diagram = await renderDiagram(spec, { width: opts?.width ?? (opts?.pptx ? 600 : 620), colors: theme.colors })
     if (!diagram) return null

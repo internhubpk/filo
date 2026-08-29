@@ -336,6 +336,122 @@ export const processJob = internalAction({
 });
 
 /**
+ * POST the app's render endpoint. On success the endpoint completes the job.
+ *
+ * Response handling matters here: the endpoint is idempotent and can answer
+ * 200 without actually rendering (claim bounced as IN_FLIGHT, job already
+ * completed by another caller, etc.). Treating every 200 as "done" used to
+ * silently end the server-side chain and leave the job hanging at 97%
+ * "Creating your file" forever — the browser fallback was the only remaining
+ * trigger, and it never runs when the tab is closed. Now:
+ *   • completed/alreadyCompleted → done;
+ *   • 200 but still "rendering" (claim not ours) → schedule a renderRetry so
+ *     the SERVER-side chain keeps driving toward completion;
+ *   • HTTP/network failure → schedule a renderRetry (as before).
+ */
+async function callRenderEndpoint(ctx: any, jobId: string, retryAttempt = 0) {
+  const job = await ctx.runQuery(internal.generation.internalGetJob, { jobId });
+  const base = (job?.appBaseUrl || process.env.FILO_APP_URL || "").replace(/\/+$/, "");
+  const serverToken = process.env.FILO_SERVER_SECRET;
+
+  // A Convex CLOUD worker can never reach a dev machine. If the job was
+  // enqueued from localhost (or any private address), skip the pointless
+  // POST + retry storm entirely — the browser fallback trigger in the UI
+  // (ActiveGenerations) calls the SAME idempotent endpoint from the user's
+  // machine, which is exactly what can reach it.
+  //
+  // Exception: self-hosted / local Convex backends (and CI) CAN reach a
+  // localhost app origin. Setting FILO_ALLOW_LOCAL_RENDER_ORIGIN=1 in the
+  // Convex environment opts in to server-to-server rendering for private
+  // origins, so the server-side chain works without a browser.
+  const allowLocalOrigin = process.env.FILO_ALLOW_LOCAL_RENDER_ORIGIN === "1";
+  if (
+    base &&
+    !allowLocalOrigin &&
+    /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[a-z0-9-]+\.local)\b/i.test(
+      base
+    )
+  ) {
+    console.warn(
+      `[WORKER] job ${jobId}: render origin ${base} is not reachable from Convex cloud — deferring to the browser render trigger`
+    );
+    return;
+  }
+
+  if (!base || !serverToken) {
+    // Cannot render server-to-server right now. Leave the job in
+    // "rendering": the client triggers the SAME idempotent endpoint as soon
+    // as it notices (works even without FILO_APP_URL configured).
+    await ctx.runMutation(internal.generation.setJobStatus, {
+      jobId,
+      status: "rendering",
+      currentStage: "Finishing up",
+      error: base ? undefined : "Render endpoint origin unknown; waiting for app trigger",
+    });
+    return;
+  }
+
+  try {
+    const res = await fetch(`${base}/api/generation/render`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ serverToken, jobId }),
+    });
+    const bodyText = await res.text().catch(() => "");
+    if (res.ok) {
+      // The endpoint completes/fails the job authoritatively — but a 200 does
+      // NOT guarantee a render happened (idempotent/claim semantics). Re-read
+      // the job: if it is STILL "rendering", drive the retry chain ourselves
+      // instead of waiting on a browser that may never come.
+      const after = await ctx.runQuery(internal.generation.internalGetJob, { jobId });
+      if (after && after.status === "rendering") {
+        console.warn(
+          `[WORKER] job ${jobId}: render endpoint answered 200 but job is still rendering (body: ${bodyText.slice(0, 120)}) — scheduling render retry`
+        );
+        await scheduleRenderRetry(ctx, jobId, retryAttempt + 1);
+      }
+      return;
+    }
+    console.error(
+      `[WORKER] render endpoint ${res.status} for job ${jobId}: ${bodyText.slice(0, 300)}`
+    );
+    throw new Error(`render endpoint HTTP ${res.status}`);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`[WORKER] render call failed for job ${jobId}:`, msg);
+    await scheduleRenderRetry(ctx, jobId, retryAttempt + 1);
+  }
+}
+
+/**
+ * Schedule a delayed renderRetry. After the retry budget is exhausted the
+ * job FAILS with a clear, actionable error instead of hanging at 97% forever
+ * — an honest, retryable failure (resumeUserJob can re-enter rendering)
+ * always beats an eternal silent stall.
+ */
+async function scheduleRenderRetry(ctx: any, jobId: string, nextAttempt: number) {
+  if (nextAttempt > 5) {
+    const job = await ctx.runQuery(internal.generation.internalGetJob, { jobId });
+    if (job && job.status === "rendering") {
+      const lastErr =
+        typeof job.error === "string" && job.error.trim()
+          ? job.error
+          : "the file could not be rendered or uploaded";
+      await ctx.runMutation(internal.generation.failJobFromRender, {
+        jobId,
+        error: `File creation did not complete after 5 automatic attempts: ${lastErr}`.slice(0, 400),
+      });
+    }
+    return;
+  }
+  const delaySec = Math.min(30 * nextAttempt, 120);
+  await ctx.scheduler.runAfter(delaySec * 1000, internal.worker.renderRetry, {
+    jobId,
+    attempt: nextAttempt,
+  });
+}
+
+/**
  * Delayed render retry. Only acts while the job is still "rendering"
  * (i.e. the render endpoint hasn't completed the job yet).
  */
@@ -350,12 +466,6 @@ export const renderRetry = internalAction({
       jobId: args.jobId,
     });
     if (!job || job.status !== "rendering") return; // done or moved on
-    if (args.attempt > 5) {
-      console.error(
-        `[WORKER] render retry limit reached for job ${args.jobId}; leaving job for client fallback`
-      );
-      return;
-    }
     applyAiKeys(args.aiKeys as AiKeys | undefined);
     await callRenderEndpoint(ctx, args.jobId, args.attempt);
   },
@@ -593,72 +703,6 @@ async function scheduleNext(
     jobId,
     aiKeys: aiKeys ?? undefined,
   });
-}
-
-/**
- * POST the app's render endpoint. On success the endpoint completes the job.
- * On failure schedules a delayed renderRetry (up to 5 attempts).
- */
-async function callRenderEndpoint(ctx: any, jobId: string, retryAttempt = 0) {
-  const job = await ctx.runQuery(internal.generation.internalGetJob, { jobId });
-  const base = (job?.appBaseUrl || process.env.FILO_APP_URL || "").replace(/\/+$/, "");
-  const serverToken = process.env.FILO_SERVER_SECRET;
-
-  // A Convex CLOUD worker can never reach a dev machine. If the job was
-  // enqueued from localhost (or any private address), skip the pointless
-  // POST + retry storm entirely — the browser fallback trigger in the UI
-  // (ActiveGenerations) calls the SAME idempotent endpoint from the user's
-  // machine, which is exactly what can reach it.
-  if (
-    base &&
-    /^(https?:\/\/)?(localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1\]|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|[a-z0-9-]+\.local)\b/i.test(
-      base
-    )
-  ) {
-    console.warn(
-      `[WORKER] job ${jobId}: render origin ${base} is not reachable from Convex cloud — deferring to the browser render trigger`
-    );
-    return;
-  }
-
-  if (!base || !serverToken) {
-    // Cannot render server-to-server right now. Leave the job in
-    // "rendering": the client triggers the SAME idempotent endpoint as soon
-    // as it notices (works even without FILO_APP_URL configured).
-    await ctx.runMutation(internal.generation.setJobStatus, {
-      jobId,
-      status: "rendering",
-      currentStage: "Finishing up",
-      error: base ? undefined : "Render endpoint origin unknown; waiting for app trigger",
-    });
-    return;
-  }
-
-  try {
-    const res = await fetch(`${base}/api/generation/render`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ serverToken, jobId }),
-    });
-    if (res.ok) {
-      // The endpoint completes/fails the job authoritatively.
-      return;
-    }
-    const bodyText = await res.text().catch(() => "");
-    console.error(
-      `[WORKER] render endpoint ${res.status} for job ${jobId}: ${bodyText.slice(0, 300)}`
-    );
-    throw new Error(`render endpoint HTTP ${res.status}`);
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    console.error(`[WORKER] render call failed for job ${jobId}:`, msg);
-    const nextAttempt = retryAttempt + 1;
-    const delaySec = Math.min(60 * nextAttempt, 300);
-    await ctx.scheduler.runAfter(delaySec * 1000, internal.worker.renderRetry, {
-      jobId,
-      attempt: nextAttempt,
-    });
-  }
 }
 
 function normalizeFormat(outputFormat: unknown, artifactType: string): DocumentFormat {

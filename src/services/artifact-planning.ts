@@ -58,6 +58,8 @@ Use metric_grid in the opening section of business/report documents. Use charts 
 
   return `You are Filo's document architect. Create a detailed structural plan for a ${type} document.
 
+OUTPUT FORMAT (authoritative — every downstream prompt, renderer and section plan depends on this exact value): ${format}
+
 ${formatHints[format] || formatHints.DOCX}${designContext}${componentVocabulary}
 
 CRITICAL RULES:

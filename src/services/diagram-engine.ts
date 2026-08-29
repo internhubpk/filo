@@ -25,7 +25,14 @@ export interface DiagramSpec {
 /** Validate + normalize AI diagram content; null when unusable. */
 export function normalizeDiagramSpec(content: unknown): DiagramSpec | null {
   if (!content || typeof content !== 'object') return null
-  const c = content as Record<string, unknown>
+  let c = content as Record<string, unknown>
+  // AI-canonical shape (planning prompt rule 10): a BARE ARRAY of
+  // {label, description} steps. Spread-properting an array into an object
+  // produces indexed keys ("0","1",...) and loses the steps entirely, which
+  // silently dropped every AI-generated timeline from the rendered document.
+  if (Array.isArray(content)) {
+    c = { kind: 'timeline', steps: content }
+  }
   let kind: DiagramKind = 'flowchart'
   const rawKind = String(c.kind || c.diagramType || c.type || 'flowchart').toLowerCase()
   if (rawKind === 'process' || rawKind === 'timeline' || rawKind === 'hierarchy' || rawKind === 'flowchart') {

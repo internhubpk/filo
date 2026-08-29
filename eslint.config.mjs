@@ -55,6 +55,9 @@ const eslintConfig = [...nextCoreWebVitals, ...nextTypescript, {
     "convex/_generated/**",
     // Compiled engine output for the unit-test harness (tests/unit/phase8).
     "tests/.build/**",
+    // Standalone CommonJS Node harnesses (E2E pipeline + mock servers) —
+    // intentionally plain require()-based scripts run directly with node.
+    "tests/artifact-e2e/**",
   ]
 }];
 

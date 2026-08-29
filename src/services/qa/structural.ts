@@ -243,13 +243,17 @@ export function autoRepair(
   const out: QaComponent[] = []
 
   for (const c of components) {
-    // Split overly long paragraphs.
+    // Split overly long paragraphs. The chunk target is intentionally well
+    // below the MAX_PARAGRAPH_CHARS limit: a ~5800-char chunk is ~940pt tall
+    // when typeset, which exceeds a single A4/Letter text column — the PDF
+    // renderer would then rely on pdfkit's internal page-splitting and lose
+    // header/footer + page-number fidelity. ~1800 chars ≈ 300pt fits any page.
     if (
       (c.type === 'PARAGRAPH' || c.type === 'paragraph') &&
       typeof c.content === 'string' &&
       c.content.length > MAX_PARAGRAPH_CHARS
     ) {
-      const chunks = splitParagraph(c.content, MAX_PARAGRAPH_CHARS - 200)
+      const chunks = splitParagraph(c.content, 1800)
       chunks.forEach((chunk, i) => {
         out.push({ ...c, index: c.index + i * 0.001, content: chunk })
       })
@@ -334,17 +338,33 @@ function splitParagraph(text: string, chunkSize: number): string[] {
   return chunks
 }
 
-/** Validate rendered artifact bytes (post-render sanity — spec §31). */
+/**
+ * Validate rendered artifact bytes (post-render sanity — spec §31).
+ * Layer 1: cheap signature/size checks (no dependencies).
+ */
 export function validateRenderedOutput(
   buffer: Buffer,
   format: string,
   mimeType: string
 ): { ok: boolean; issues: QaIssue[] } {
   const issues: QaIssue[] = []
-  const MIN_BYTES = 512
 
-  if (!buffer || buffer.length < MIN_BYTES) {
-    issues.push({ type: 'RENDER_TOO_SMALL', severity: 'error', message: `Rendered file is only ${buffer?.length ?? 0} bytes.` })
+  // Per-format minimums. A 512-byte floor used to FALSELY REJECT small but
+  // perfectly valid CSV/TXT exports (a header + a few rows is often < 512 B),
+  // which failed otherwise-good jobs at the render gate.
+  const MIN_BYTES: Record<string, number> = {
+    DOCX: 1024,
+    XLSX: 1024,
+    PPTX: 1024,
+    PDF: 512,
+    CSV: 32,
+    TXT: 32,
+    HTML: 64,
+  }
+  const min = MIN_BYTES[format.toUpperCase()] ?? 512
+
+  if (!buffer || buffer.length < min) {
+    issues.push({ type: 'RENDER_TOO_SMALL', severity: 'error', message: `Rendered file is only ${buffer?.length ?? 0} bytes (minimum ${min}).` })
   }
 
   const sig: Record<string, (b: Buffer) => boolean> = {
@@ -365,4 +385,111 @@ export function validateRenderedOutput(
   }
 
   return { ok: issues.every((i) => i.severity !== 'error'), issues }
+}
+
+/**
+ * Layer 2: STRUCTURAL validation of the rendered bytes. A job may only be
+ * marked completed when the artifact is genuinely readable, so we re-open
+ * the container exactly the way a consumer would:
+ *   • DOCX/XLSX/PPTX → the ZIP must decompress and contain the mandatory
+ *     OOXML part (word/document.xml / xl/workbook.xml / ppt/presentation.xml)
+ *   • PDF → header + trailer + at least one /Page object
+ *   • CSV → RFC4180-parseable with a consistent column count
+ * Any failure here is a hard error: the bytes exist but are unusable, which
+ * must never be presented to the user as a finished document.
+ */
+export async function validateRenderedOutputDeep(
+  buffer: Buffer,
+  format: string
+): Promise<{ ok: boolean; issues: QaIssue[] }> {
+  const issues: QaIssue[] = []
+  const fmt = format.toUpperCase()
+
+  if (fmt === 'DOCX' || fmt === 'XLSX' || fmt === 'PPTX') {
+    try {
+      const JSZip = (await import('jszip')).default
+      const zip = await JSZip.loadAsync(buffer)
+      const required =
+        fmt === 'DOCX'
+          ? ['word/document.xml', '[Content_Types].xml']
+          : fmt === 'XLSX'
+            ? ['xl/workbook.xml', '[Content_Types].xml']
+            : ['ppt/presentation.xml', '[Content_Types].xml']
+      for (const part of required) {
+        if (!zip.files[part]) {
+          issues.push({ type: 'RENDER_MISSING_PART', severity: 'error', message: `Rendered ${fmt} is missing required part ${part}.` })
+        }
+      }
+      // The main part must also be non-trivial — an empty document.xml shell
+      // technically unzips but is not a usable document.
+      const mainPart = required[0]
+      if (zip.files[mainPart]) {
+        const xml = await zip.files[mainPart].async('string')
+        if (xml.length < 200) {
+          issues.push({ type: 'RENDER_EMPTY_DOCUMENT', severity: 'error', message: `Rendered ${fmt} main part is suspiciously empty (${xml.length} chars).` })
+        }
+      }
+    } catch (err) {
+      issues.push({ type: 'RENDER_UNREADABLE_CONTAINER', severity: 'error', message: `Rendered ${fmt} container could not be opened: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}` })
+    }
+  }
+
+  if (fmt === 'PDF') {
+    const text = buffer.toString('latin1')
+    if (!text.includes('%%EOF')) {
+      issues.push({ type: 'RENDER_BAD_PDF_TRAILER', severity: 'error', message: 'Rendered PDF has no %%EOF trailer — the file is truncated.' })
+    }
+    if (!/\/Type\s*\/Page[^s]/.test(text)) {
+      issues.push({ type: 'RENDER_NO_PAGES', severity: 'error', message: 'Rendered PDF contains no page objects.' })
+    }
+  }
+
+  if (fmt === 'CSV') {
+    const text = buffer.toString('utf-8').replace(/^\uFEFF/, '')
+    // RFC4180-aware record scan: quoted fields may contain commas, quotes
+    // and NEWLINES, so records must be counted with quote state — a naive
+    // line split would falsely reject valid multi-line cells as ragged rows.
+    const widths = rfc4180ColumnWidths(text)
+    if (widths.length === 0) {
+      issues.push({ type: 'RENDER_EMPTY_CSV', severity: 'error', message: 'Rendered CSV is empty.' })
+    } else {
+      const ragged = widths.filter((w) => w !== widths[0]).length
+      if (ragged > 0) {
+        issues.push({ type: 'RENDER_RAGGED_CSV', severity: 'error', message: `Rendered CSV has ${ragged} rows with a different column count than the header.` })
+      }
+    }
+  }
+
+  return { ok: issues.every((i) => i.severity !== 'error'), issues }
+}
+
+/**
+ * RFC4180-aware column count per record (bounded to the first 500 records).
+ * Handles quoted fields containing commas, escaped quotes and newlines.
+ */
+function rfc4180ColumnWidths(text: string): number[] {
+  const widths: number[] = []
+  let cols = 1
+  let inQ = false
+  let scanned = 0
+  let recordHasContent = false
+  for (let i = 0; i < text.length && scanned < 500; i++) {
+    const ch = text[i]
+    if (inQ) {
+      if (ch === '"' && text[i + 1] === '"') i++
+      else if (ch === '"') inQ = false
+    } else if (ch === '"') inQ = true
+    else if (ch === ',') { cols++; recordHasContent = true }
+    else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i++
+      widths.push(cols)
+      scanned++
+      cols = 1
+      recordHasContent = false
+    } else recordHasContent = true
+  }
+  // A final record not terminated by a newline still counts when non-empty
+  // (a newline-terminated file resets recordHasContent on the last newline).
+  if (recordHasContent) widths.push(cols)
+  return widths
 }

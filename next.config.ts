@@ -18,6 +18,12 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: false,
   },
   reactStrictMode: false,
+  // pdfkit resolves its .afm font-metric files at runtime via __dirname
+  // (node_modules/pdfkit/js/data/*.afm). When the bundler inlines pdfkit,
+  // those paths become /ROOT/node_modules/... and every PDF render crashes
+  // with ENOENT. Marking it external keeps the real package on disk so the
+  // metrics load — this is what made every PDF job fail in the render step.
+  serverExternalPackages: ["pdfkit"],
 };
 
 export default nextConfig;

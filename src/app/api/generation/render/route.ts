@@ -34,6 +34,7 @@ import {
   autoRepair,
   validateDocument,
   validateRenderedOutput,
+  validateRenderedOutputDeep,
   type QaComponent,
 } from '@/services/qa/structural'
 import { classifyR2Error, isR2Configured, r2S3ErrorName, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
@@ -280,6 +281,23 @@ export async function POST(request: NextRequest) {
         error: `Rendered file failed validation: ${reasons.slice(0, 250)}`,
       })
       return bad(`Rendered file failed validation: ${reasons}`, 'DOCUMENT_VALIDATION_FAILED', 500)
+    }
+
+    // Layer 2: STRUCTURAL re-open of the rendered bytes (unzip the OOXML
+    // container / parse the PDF / RFC4180-check the CSV). A job may only be
+    // marked completed when the artifact is genuinely readable by a consumer
+    // — not merely non-empty. Failure releases the claim so the retry chain
+    // can attempt a fresh render.
+    const deepCheck = await validateRenderedOutputDeep(buffer, format)
+    if (!deepCheck.ok) {
+      const reasons = deepCheck.issues.map((i) => i.message).join('; ')
+      console.error(`[GENERATION-RENDER] job ${jobId} deep validation failed: ${reasons}`)
+      await convexClient.mutation(api.generation.releaseRenderClaim, {
+        serverToken,
+        jobId: jobId as any,
+        error: `Rendered file failed structural validation: ${reasons.slice(0, 250)}`,
+      })
+      return bad(`Rendered file failed structural validation: ${reasons}`, 'DOCUMENT_VALIDATION_FAILED', 500)
     }
 
     // ==================== TARGET ARTIFACT (spec §27 versioning) ===========

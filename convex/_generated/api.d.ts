@@ -9,6 +9,7 @@
  */
 
 import type * as admin from "../admin.js";
+import type * as aiDiagnostics from "../aiDiagnostics.js";
 import type * as artifacts from "../artifacts.js";
 import type * as auth from "../auth.js";
 import type * as billing from "../billing.js";
@@ -30,6 +31,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   admin: typeof admin;
+  aiDiagnostics: typeof aiDiagnostics;
   artifacts: typeof artifacts;
   auth: typeof auth;
   billing: typeof billing;

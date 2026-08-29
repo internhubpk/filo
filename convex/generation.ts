@@ -377,7 +377,19 @@ export const setJobStatus = internalMutation({
   },
 });
 
-/** Enter the rendering state (records renderStartedAt for the render guard). */
+/**
+ * Enter the rendering state.
+ *
+ * NOTE: renderStartedAt is deliberately NOT set here. That field is the
+ * single-flight render claim owned exclusively by claimRender() below. It
+ * used to be set here, which poisoned the very first render attempt: the
+ * worker entered "rendering" and immediately POSTed /api/generation/render,
+ * whose claimRender() saw a claim timestamp younger than the claim window
+ * and bounced the request as IN_FLIGHT. The endpoint answered 200
+ * {claimed:false}, the worker treated that as success, and the job hung at
+ * 97% forever unless the user's browser happened to nudge it after the
+ * claim expired — the root cause of the "stuck at 97%" bug.
+ */
 export const markRendering = internalMutation({
   args: {
     jobId: v.id("generationJobs"),
@@ -394,7 +406,6 @@ export const markRendering = internalMutation({
       status: "rendering",
       currentStage: args.currentStage ?? "Creating your file",
       progress: args.progress ?? 97,
-      renderStartedAt: now,
       startedAt: job.startedAt ?? now,
       updatedAt: now,
     });
@@ -679,7 +690,11 @@ export const claimRender = mutation({
     if (job.status === "cancelled") return { claimed: false as const, reason: "CANCELLED" as const };
     if (job.status !== "rendering") return { claimed: false as const, reason: "NOT_RENDERING" as const };
     const now = Date.now();
-    if (job.renderStartedAt && now - job.renderStartedAt < 100_000) {
+    // The claim window must cover the render endpoint's own maxDuration (300s)
+    // so a genuinely long render is never double-rendered by the client
+    // fallback. Claims older than this are abandoned (crashed render) and may
+    // be re-claimed.
+    if (job.renderStartedAt && now - job.renderStartedAt < 240_000) {
       return { claimed: false as const, reason: "IN_FLIGHT" as const };
     }
     await ctx.db.patch(args.jobId, { renderStartedAt: now, updatedAt: now });

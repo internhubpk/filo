@@ -76,3 +76,5 @@ playwright-report/
 
 # Compiled engine output for the unit-test harness (phase8)
 /tests/.build/
+.local-backend/
+tests/artifact-e2e/.storage/
