@@ -505,6 +505,36 @@ export const saveArtifactVersion = mutation({
       return { success: false as const, error: "Forbidden: not your artifact" };
     }
 
+    // IDEMPOTENCY PER JOB: a retried render attempt (claim released after a
+    // partial failure — e.g. completeJobRendered failed) re-runs this
+    // mutation with the SAME jobId. Without this guard every retry appended
+    // ANOTHER version row for the same attempt. Upsert instead: refresh the
+    // existing row's file pointer and return its version number.
+    if (args.jobId) {
+      const sameJob = await ctx.db
+        .query("artifactVersions")
+        .withIndex("by_artifactId", (q) => q.eq("artifactId", args.artifactId))
+        .order("desc")
+        .take(50)
+        .then((rows) => rows.find((r) => r.jobId === args.jobId));
+      if (sameJob) {
+        const now = Date.now();
+        await ctx.db.patch(sameJob._id, {
+          fileId: args.fileId,
+          r2Key: args.r2Key,
+          size: args.size,
+          filename: args.filename,
+        });
+        await ctx.db.patch(args.artifactId, {
+          versionCount: Math.max(artifact.versionCount ?? sameJob.version, sameJob.version),
+          fileId: args.fileId,
+          format: args.format,
+          updatedAt: now,
+        });
+        return { success: true as const, version: sameJob.version };
+      }
+    }
+
     // Next version number = max(existing) + 1 (append-only, race-safe enough
     // for single-user flows; the render claim already single-flights renders).
     const existing = await ctx.db

@@ -723,6 +723,35 @@ export const releaseRenderClaim = mutation({
 });
 
 /**
+ * RENDER-RETRY IDEMPOTENCY: remember the artifact record this job's render
+ * created, so a retried render attempt REUSES it (appends a new version)
+ * instead of inserting a duplicate artifact row. The production incident
+ * showed saveArtifactRecord firing every ~11s while storage 503s looped —
+ * each retry created ANOTHER artifact record for the same document.
+ * Idempotent by construction: once set, the value is never changed.
+ */
+export const recordRenderArtifact = mutation({
+  args: {
+    serverToken: v.string(),
+    jobId: v.id("generationJobs"),
+    artifactId: v.id("artifacts"),
+  },
+  handler: async (ctx, args) => {
+    assertServerToken(args.serverToken);
+    const job = await ctx.db.get(args.jobId);
+    if (!job) return { success: false as const, error: "Job not found" };
+    if (job.renderArtifactId) {
+      return { success: true as const, artifactId: job.renderArtifactId, reused: true };
+    }
+    await ctx.db.patch(args.jobId, {
+      renderArtifactId: args.artifactId,
+      updatedAt: Date.now(),
+    });
+    return { success: true as const, artifactId: args.artifactId, reused: false };
+  },
+});
+
+/**
  * Called by POST /api/generation/render after the file has been rendered,
  * uploaded to R2 and the artifact record created. The ONLY path that marks
  * a job completed, and the only place usage is recorded for job jobs.

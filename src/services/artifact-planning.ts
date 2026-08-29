@@ -29,11 +29,11 @@ export function buildPlanningSystemPrompt(
   design?: { theme: string; audience: string; tone: string; density: string; visualPriority: string[]; useCharts: boolean; useTables: boolean; useMetrics: boolean }
 ): string {
   const formatHints: Record<string, string> = {
-    DOCX: 'This will be rendered as a Word document (.docx). Plan sections that work well in a document format with headings, paragraphs, lists, tables, charts, metric highlights, callouts, and a cover page.',
-    PDF: 'This will be rendered as a PDF. Plan sections that work well in a paginated format with clear hierarchy, a designed cover page, and visually distinct blocks (metrics, callouts, charts).',
-    XLSX: 'This will be rendered as an Excel spreadsheet. Plan sections as logical data groups, each becoming a worksheet. Include table data with headers, computed columns with formulas, and a summary sheet first.',
+    DOCX: 'This will be rendered as a Word document (.docx). Plan sections that work well in a document format with headings, paragraphs, lists, tables, charts, diagrams, equations, metric highlights, callouts, and a cover page.',
+    PDF: 'This will be rendered as a PDF. Plan sections that work well in a paginated format with clear hierarchy, a designed cover page, and visually distinct blocks (metrics, callouts, charts, diagrams, equations).',
+    XLSX: 'This will be rendered as an Excel spreadsheet. Plan sections as logical data groups, each becoming a worksheet. Include table data with headers, computed columns with formulas, and a summary sheet first. Charts become real native Excel charts driven by the table data.',
     PPTX: 'This will be rendered as a PowerPoint presentation. Plan each section as a slide. The first section should be the title/cover slide, the last a closing slide. Keep text concise - slides must not be text-heavy.',
-    CSV: 'This will be rendered as CSV. Plan sections as data tables with consistent columns.',
+    CSV: 'This will be rendered as CSV. Plan sections as data tables with consistent columns. Exactly one primary data table should dominate the document.',
   }
 
   const designContext = design
@@ -51,10 +51,12 @@ COMPONENT VOCABULARY (use these types in section components):
 - callout: highlighted note/insight (string) — use for key takeaways, warnings, insights
 - chart: data visualization (object {chartType: "bar|line|pie|donut|area", title, categories: string[], series: [{name, data: number[]}], note?})
 - timeline: chronological steps (array of {label, description})
+- diagram: structural visual (object {kind: "flowchart|process|hierarchy", title?, steps: [{label, description?}]}) — use for workflows, decision flows, org structures, architectures
+- equation: real mathematical formula (object {latex: "LaTeX source", display: true}) — use for scientific/mathematical/financial content: fractions, powers, roots, summations, integrals, Greek symbols
 - key_takeaways: executive summary bullets (array of strings)
 - two_column: side-by-side comparison (object {leftTitle, leftPoints: string[], rightTitle, rightPoints: string[]})
 
-Use metric_grid in the opening section of business/report documents. Use charts when data relationships matter. Use callout sparingly for emphasis. For XLSX prefer table-heavy sections; for PPTX prefer list/metric_grid/chart with minimal paragraph text.`
+Use metric_grid in the opening section of business/report documents. Use charts when data relationships matter. Use diagrams when structure/flow matters (processes, hierarchies, decision flows). Use equations when the content is mathematical — never write formulas as plain text. Use callout sparingly for emphasis. For XLSX prefer table-heavy sections; for PPTX prefer list/metric_grid/chart with minimal paragraph text.`
 
   return `You are Filo's document architect. Create a detailed structural plan for a ${type} document.
 
@@ -85,7 +87,7 @@ You must respond with a JSON object:
       "components": [
         {
           "id": "comp-id-1",
-          "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|key_takeaways|two_column",
+          "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|diagram|equation|key_takeaways|two_column",
           "order": 0,
           "content": null,
           "note": "Brief note about what content should go here"
@@ -132,19 +134,22 @@ RULES:
 8. For callout type: return a string — one high-impact insight or note
 9. For chart type: return an object {"chartType": "bar|line|pie|donut|area", "title": "Chart title", "categories": ["Q1","Q2","Q3","Q4"], "series": [{"name": "Revenue", "data": [120, 135, 150, 180]}], "note": "optional caption"}
 10. For timeline type: return an array of {"label": "Phase name", "description": "what happens"}
-11. For key_takeaways type: return an array of 3-5 concise strings
-12. For two_column type: return {"leftTitle": "...", "leftPoints": ["..."], "rightTitle": "...", "rightPoints": ["..."]}
-13. Keep content substantial - each paragraph should be 3-5 sentences minimum
-14. Tables should have at least 3 rows of data
-15. Lists should have at least 3 items
-16. Chart data must be NUMERICALLY CONSISTENT with any table data in the same document
-17. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones
+11. For diagram type: return an object {"kind": "flowchart|process|hierarchy", "title": "Diagram title", "steps": [{"label": "Step", "description": "details"}]} — minimum 2 steps
+12. For equation type: return an object {"latex": "x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}", "display": true} — VALID LaTeX; fractions as \\frac{}{}, powers as ^, subscripts as _, summation as \\sum_{}^{}, Greek as \\alpha etc. NEVER write math as plain text
+13. For key_takeaways type: return an array of 3-5 concise strings
+14. For two_column type: return {"leftTitle": "...", "leftPoints": ["..."], "rightTitle": "...", "rightPoints": ["..."]}
+15. Keep content substantial - each paragraph should be 3-5 sentences minimum
+16. Tables should have at least 3 rows of data
+17. Lists should have at least 3 items
+18. Chart data must be NUMERICALLY CONSISTENT with any table data in the same document
+19. In XLSX tables, cells in computed columns may be formula strings like "=SUM(B2:B10)" or "=C2*D2" using your OWN table's coordinates (row 1 = header). Keep formulas simple: SUM/AVERAGE/MIN/MAX/COUNT and +-*/ arithmetic over the table's real cells
+20. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones
 
 RESPOND WITH JSON:
 {
   "components": [
     {
-      "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|key_takeaways|two_column",
+      "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|diagram|equation|key_takeaways|two_column",
       "content": "the actual content here"
     }
   ]
@@ -394,6 +399,8 @@ export const COMPONENT_TYPES = [
   'CALLOUT',
   'CHART',
   'TIMELINE',
+  'DIAGRAM',
+  'EQUATION',
   'KEY_TAKEAWAYS',
   'TWO_COLUMN',
 ] as const
@@ -414,6 +421,15 @@ export function normalizeComponentType(type: string): string {
     'callout': 'CALLOUT',
     'chart': 'CHART',
     'timeline': 'TIMELINE',
+    'diagram': 'DIAGRAM',
+    'flowchart': 'DIAGRAM',
+    'process': 'DIAGRAM',
+    'hierarchy': 'DIAGRAM',
+    'org_chart': 'DIAGRAM',
+    'equation': 'EQUATION',
+    'math': 'EQUATION',
+    'formula': 'EQUATION',
+    'latex': 'EQUATION',
     'key_takeaways': 'KEY_TAKEAWAYS',
     'keytakeaways': 'KEY_TAKEAWAYS',
     'two_column': 'TWO_COLUMN',

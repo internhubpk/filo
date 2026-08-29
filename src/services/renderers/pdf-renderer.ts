@@ -20,11 +20,14 @@ import {
   asTable,
   asTwoColumn,
   deriveTheme,
+  equationLatexOf,
   hex6,
   renderComponentImage,
   tint,
   withHash,
 } from './shared'
+import { evaluateFormula } from '@/services/formula-evaluator'
+import type { CellMatrix } from '@/services/formula-evaluator'
 import { existsSync } from 'node:fs'
 
 const PAGE_SIZES: Record<string, [number, number]> = {
@@ -74,6 +77,8 @@ function resolveUnicodeFonts(): FontPair | null {
 
 export class PdfRenderer implements DocumentRenderer {
   format = 'PDF' as const
+
+  private figureNo = 0
 
   async render(document: RenderableDocument): Promise<RendererOutput> {
     const pdfkit = (await import('pdfkit')).default
@@ -202,6 +207,7 @@ export class PdfRenderer implements DocumentRenderer {
 
     const contentBottom = pageH - 64
     let cursorY = margin + 8
+    this.figureNo = 0
 
     // Returns the y at which drawing may continue given the component's OWN
     // current y — components advance their local y independently (lists,
@@ -414,12 +420,30 @@ export class PdfRenderer implements DocumentRenderer {
         if (rows.length === 0) return y
         const [header, ...data] = rows
         const cols = Math.max(header.length, 1)
-        const colW = width / cols
+
+        // CONTENT-AWARE column widths: weight each column by its longest
+        // cell (bounded), with a floor so narrow numeric columns stay legible.
+        const rawW = header.map((_h, i) => {
+          let maxLen = String(header[i] ?? '').length
+          for (const row of data) maxLen = Math.max(maxLen, String(row[i] ?? '').length)
+          return Math.min(maxLen, 28)
+        })
+        const totalRaw = rawW.reduce((s, v) => s + v, 0) || 1
+        const minColW = Math.min(52, width / cols)
+        const colWidths = rawW.map((w) => Math.max(minColW, (w / totalRaw) * width))
+        // Normalize back to the exact content width.
+        const scaleW = width / colWidths.reduce((s, v) => s + v, 0)
+        for (let i = 0; i < colWidths.length; i++) colWidths[i] *= scaleW
+
         const drawHeaderBand = (bandY: number) => {
           doc.rect(margin, bandY, width, 24).fill(primary)
           doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
+          let hx = margin
           header.forEach((cell, i) => {
-            doc.text(String(cell ?? ''), margin + 6 + i * colW, bandY + 8, { width: colW - 12, lineBreak: false })
+            // WRAPPED header cells: lineBreak:false overflowed the column into
+            // the neighbor whenever a header was longer than its column.
+            doc.text(String(cell ?? ''), hx + 5, bandY + 8, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            hx += colWidths[i]
           })
           doc.font(bodyFont).fontSize(9)
         }
@@ -429,11 +453,26 @@ export class PdfRenderer implements DocumentRenderer {
         drawHeaderBand(y)
         let ry = y + 24
 
+        // Column x positions (prefix sums over the content-aware widths).
+        const colXs: number[] = [margin]
+        for (let i = 0; i < colWidths.length - 1; i++) colXs.push(colXs[i] + colWidths[i])
+
+        // Formula-aware cells: computed against the table itself (same
+        // contract as the DOCX renderer — unevaluable formulas stay visible).
+        const matrix = rows as CellMatrix
+        const cellText = (cell: string | number | null): string => {
+          if (typeof cell === 'string' && /^=/.test(cell.trim())) {
+            const computed = evaluateFormula(cell.trim(), matrix)
+            return computed !== null ? formatNumberForPdf(computed) : cell.trim()
+          }
+          return String(cell ?? '')
+        }
+
         doc.font(bodyFont).fontSize(9)
         data.forEach((row, rIdx) => {
           const rowH = Math.max(
             20,
-            ...row.map((cell) => doc.heightOfString(String(cell ?? ''), { width: colW - 12, lineGap: 1 }) + 10)
+            ...row.map((cell, i) => doc.heightOfString(cellText(cell), { width: colWidths[i] - 12, lineGap: 1 }) + 10)
           )
           if (ry + rowH > opts.contentBottom) {
             // Page break INSIDE the table: repeat the header band on the new
@@ -447,15 +486,38 @@ export class PdfRenderer implements DocumentRenderer {
           }
           doc.rect(margin, ry, width, rowH).stroke(borderCol)
           row.forEach((cell, i) => {
-            doc.fillColor(fg).text(String(cell ?? ''), margin + 6 + i * colW, ry + 5, { width: colW - 12, lineGap: 1 })
+            doc.fillColor(fg).text(cellText(cell), colXs[i] + 6, ry + 5, { width: colWidths[i] - 12, lineGap: 1 })
           })
           ry += rowH
         })
         return ry + 16
       }
 
+      case 'equation': {
+        // Rendered as a crisp MathJax PNG (2x). Unparseable LaTeX falls back
+        // to the raw source rendered visibly — never a silent corruption.
+        const image = await renderComponentImage(component, theme)
+        if (image) {
+          const eqScale = Math.min(1, (width * 0.8) / image.width)
+          const w = image.width * eqScale
+          const h = image.height * eqScale
+          y = ensureSpace(y, h + 16)
+          doc.image(image.png, margin + (width - w) / 2, y, { width: w, height: h })
+          return y + h + 14
+        }
+        const latexRaw = equationLatexOf(component.content)
+        if (!latexRaw) return y
+        doc.font('Courier').fontSize(10).fillColor(fg)
+        const h2 = doc.heightOfString(latexRaw, { width: width - 24 })
+        y = ensureSpace(y, h2 + 16)
+        doc.rect(margin, y, width, h2 + 12).fillAndStroke('#F8FAFC', borderCol)
+        doc.fillColor(fg).text(latexRaw, margin + 12, y + 6, { width: width - 24 })
+        return y + h2 + 16
+      }
+
       case 'chart':
-      case 'timeline': {
+      case 'timeline':
+      case 'diagram': {
         const image = await renderComponentImage(component, theme, { width: 620 })
         if (!image) return y
         const maxW = width
@@ -466,8 +528,9 @@ export class PdfRenderer implements DocumentRenderer {
         y = ensureSpace(y, h + 24)
         doc.image(image.png, margin + (width - w) / 2, y, { width: w, height: h })
         if (image.caption) {
+          this.figureNo += 1
           doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
-          doc.text(image.caption, margin, y + h + 4, { width, align: 'center' })
+          doc.text(`Figure ${this.figureNo} — ${image.caption}`, margin, y + h + 4, { width, align: 'center' })
           return y + h + 24
         }
         return y + h + 14
@@ -494,4 +557,10 @@ function slugify(title: string): string {
       .replace(/\s+/g, '_')
       .slice(0, 80) || 'Generated_Document'
   )
+}
+
+/** Compact, locale-stable number rendering for computed table cells. */
+function formatNumberForPdf(n: number): string {
+  if (Number.isInteger(n)) return n.toLocaleString('en-US')
+  return n.toLocaleString('en-US', { maximumFractionDigits: 2 })
 }

@@ -24,6 +24,26 @@ export const registerFile = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+
+    // RENDER-RETRY IDEMPOTENCY: a retried render attempt re-registers the
+    // SAME (userId, r2Key) after re-uploading the file. Without this guard
+    // every retry inserted ANOTHER files row (and another usage record) for
+    // an object that was overwritten in place. Dedupe: refresh the existing
+    // row and return its id.
+    const existing = await ctx.db
+      .query("files")
+      .filter((q) => q.eq(q.field("userId"), args.userId) && q.eq(q.field("r2Key"), args.r2Key))
+      .first();
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        originalName: args.originalName,
+        mimeType: args.mimeType,
+        size: args.size,
+        artifactId: args.artifactId ?? existing.artifactId,
+      });
+      return existing._id;
+    }
+
     const fileId = await ctx.db.insert("files", {
       userId: args.userId,
       artifactId: args.artifactId,

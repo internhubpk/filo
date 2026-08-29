@@ -38,6 +38,7 @@ import {
   type QaComponent,
 } from '@/services/qa/structural'
 import { classifyR2Error, isR2Configured, r2S3ErrorName, R2_STORAGE_UNAVAILABLE_MESSAGE } from '@/lib/r2/errors'
+import { resolveRenderTarget } from '@/services/render-target'
 import type { ArtifactSpecification, OutputFormat } from '@/types'
 
 // Rendering is CPU-bound and typically takes a few seconds; allow up to 5
@@ -247,7 +248,7 @@ export async function POST(request: NextRequest) {
       repaired: qaReport.repaired,
       issueCount: qaReport.issues.length,
       issues: qaReport.issues.slice(0, 12).map((i) => ({ type: i.type, severity: i.severity, sectionId: i.sectionId, repaired: i.repaired ?? false })),
-    }
+    } as Record<string, unknown>
     if (!qaReport.passed) {
       console.warn(`[GENERATION-RENDER] job ${jobId} QA score ${qaReport.score}: ${qaReport.issues.filter((i) => i.severity === 'error').map((i) => i.type).join(', ')}`)
     }
@@ -271,6 +272,11 @@ export async function POST(request: NextRequest) {
 
     // ==================== POST-RENDER VALIDATION (spec §31) ================
     const buffer = Buffer.from(rendered.buffer)
+    // Renderer-level findings (formula fallbacks, CSV relationship
+    // corrections, chart placements) — mechanical repairs are never silent.
+    if (rendered.qa && Object.keys(rendered.qa).length > 0) {
+      qaSummary.renderer = rendered.qa
+    }
     const outputCheck = validateRenderedOutput(buffer, format, rendered.mimeType || '')
     if (!outputCheck.ok) {
       const reasons = outputCheck.issues.map((i) => i.message).join('; ')
@@ -301,40 +307,39 @@ export async function POST(request: NextRequest) {
     }
 
     // ==================== TARGET ARTIFACT (spec §27 versioning) ===========
-    // Regeneration of an existing artifact → new VERSION on the SAME artifact.
-    // Fresh generation → new artifact record, version 1.
+    // RENDER-RETRY IDEMPOTENCY: resolution is delegated to the pure
+    // resolveRenderTarget contract (see src/services/render-target.ts):
+    //   1. job.renderArtifactId (set by the FIRST attempt) → reuse it;
+    //   2. job.sourceArtifactId → new VERSION of the existing artifact;
+    //   3. otherwise → create fresh.
+    // This is what stops the "one artifact row per 11s retry" incident.
     const operation = job.sourceArtifactId ? 'ai_edit' : 'generate'
     let artifactId: string
     let baseVersionCount = 0
 
-    if (job.sourceArtifactId) {
-      const existing = (await convexClient.query(api.artifacts.getArtifactForUser, {
-        artifactId: job.sourceArtifactId as any,
+    const jobView = {
+      renderArtifactId: ((job as any).renderArtifactId as string | undefined) ?? null,
+      sourceArtifactId: job.sourceArtifactId ?? null,
+    }
+    const wantedId = jobView.renderArtifactId ?? jobView.sourceArtifactId
+    const existingArtifact = wantedId
+      ? ((await convexClient.query(api.artifacts.getArtifactForUser, {
+          artifactId: wantedId as any,
+          userId: job.userId as any,
+        }).catch(() => null)) as { _id: string; versionCount?: number } | null)
+      : null
+    const decision = resolveRenderTarget(jobView, existingArtifact)
+
+    if (decision.action === 'reuse_render_artifact' || decision.action === 'version_existing') {
+      artifactId = decision.artifactId
+      baseVersionCount = decision.baseVersionCount
+      // Title/format track the latest revision.
+      await convexClient.mutation(api.artifacts.updateArtifactMeta, {
+        artifactId: artifactId as any,
         userId: job.userId as any,
-      })) as { _id: string; versionCount?: number } | null
-      if (existing) {
-        artifactId = existing._id
-        baseVersionCount = existing.versionCount ?? 1
-        // Title/format track the latest revision.
-        await convexClient.mutation(api.artifacts.updateArtifactMeta, {
-          artifactId: artifactId as any,
-          userId: job.userId as any,
-          title: blueprint.title || 'Untitled document',
-          format,
-        }).catch(() => {})
-      } else {
-        // Source artifact was deleted mid-flight — create a fresh one.
-        const fresh = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
-          userId: job.userId as any,
-          title: blueprint.title || 'Untitled document',
-          type: (job.artifactType || blueprint.type || 'document').toLowerCase(),
-          format,
-          prompt: job.prompt,
-          status: 'completed',
-        })) as { saved: boolean; dbId?: string } | null
-        artifactId = fresh?.dbId ?? ''
-        baseVersionCount = 0
-      }
+        title: blueprint.title || 'Untitled document',
+        format,
+      }).catch(() => {})
     } else {
       const saved = (await convexClient.mutation(api.artifacts.saveArtifactRecord, {
         userId: job.userId as any,
@@ -354,6 +359,16 @@ export async function POST(request: NextRequest) {
         return bad('Could not save artifact record', 'SAVE_FAILED', 500)
       }
       artifactId = saved.dbId
+      // Pin the artifact to the job BEFORE uploading/writing versions, so a
+      // retry after any later failure reuses THIS artifact instead of
+      // creating a duplicate row.
+      await convexClient.mutation(api.generation.recordRenderArtifact, {
+        serverToken,
+        jobId: jobId as any,
+        artifactId: artifactId as any,
+      }).catch((recErr: unknown) => {
+        console.error('[GENERATION-RENDER] recordRenderArtifact failed:', recErr)
+      })
     }
 
     // ==================== PROFESSIONAL FILENAME (spec §44) =================

@@ -5,9 +5,11 @@
 //   • cover slide with accent geometry + title/subtitle/date
 //   • section dividers, bullet layouts, metric slides (big numbers),
 //     chart slides (PNG from the chart engine), table slides, two-column,
-//     timeline slides, quote slides, closing slide
+//     timeline slides, diagram slides (flowchart/hierarchy), quote slides,
+//     equation slides (MathJax PNG), closing slide
 //   • overflow guards: per-slide text budget, bullet caps, height tracking
-//     with break-to-next-slide, min font sizes
+//     with break-to-next-slide, min font sizes, long tables SPLIT across
+//     slides with a repeated header row
 // =============================================================================
 
 import type { RendererOutput, DocumentRenderer, RenderableDocument, CanonicalComponent } from './shared'
@@ -18,6 +20,7 @@ import {
   asTable,
   asTwoColumn,
   deriveTheme,
+  equationLatexOf,
   hex6,
   renderComponentImage,
 } from './shared'
@@ -261,7 +264,10 @@ export class PptxRenderer implements DocumentRenderer {
     switch (c.type) {
       case 'chart':
       case 'timeline':
+      case 'diagram':
         return 3.1
+      case 'equation':
+        return 1.2
       case 'table': {
         const rows = asTable(c.content).length
         return Math.min(4, 0.4 + rows * 0.28)
@@ -455,8 +461,45 @@ export class PptxRenderer implements DocumentRenderer {
         return h + 0.2
       }
 
+      case 'equation': {
+        const image = await renderComponentImage(component, ctx.theme, { pptx: true })
+        if (!image) {
+          // Honest fallback: the raw LaTeX, visibly rendered.
+          const latexRaw = equationLatexOf(component.content)
+          if (!latexRaw) return 0
+          const h = Math.min(0.6, availH)
+          slide.addText(latexRaw.slice(0, 120), {
+            x: MARGIN,
+            y,
+            w: CONTENT_W,
+            h,
+            fontSize: Math.max(MIN_BODY_PT, 14),
+            italic: true,
+            fontFace: 'Cambria Math',
+            color: colors.dark ? 'E2E8F0' : colors.fg,
+            align: 'center',
+            valign: 'middle',
+          })
+          return h + 0.15
+        }
+        const maxW = CONTENT_W * 0.86
+        const maxH = Math.min(availH, 1.9)
+        const scale = Math.min(maxW / image.width, maxH / image.height)
+        const w = image.width * scale
+        const h = image.height * scale
+        slide.addImage({
+          data: `image/png;base64,${image.png.toString('base64')}`,
+          x: (SLIDE_W - w) / 2,
+          y,
+          w,
+          h,
+        })
+        return h + 0.2
+      }
+
       case 'chart':
-      case 'timeline': {
+      case 'timeline':
+      case 'diagram': {
         const image = await renderComponentImage(component, ctx.theme, { pptx: true })
         if (!image) return 0
         const maxW = CONTENT_W
@@ -487,9 +530,15 @@ export class PptxRenderer implements DocumentRenderer {
       }
 
       case 'table': {
-        const rows = asTable(component.content).slice(0, 7)
+        // Long tables SPLIT across slides (previous behavior truncated rows >7
+        // silently — real data loss on a data slide). The caller guarantees
+        // vertical budget; each chunk repeats the header row.
+        const rows = asTable(component.content)
         if (rows.length === 0) return 0
-        const tableRows = rows.map((r, ri) =>
+        const [header, ...dataRows] = rows
+        const maxDataRows = Math.max(3, Math.min(6, Math.floor((availH - 0.4) / 0.3)))
+        const chunk = dataRows.slice(0, maxDataRows)
+        const tableRows = [header, ...chunk].map((r, ri) =>
           r.slice(0, 6).map((cell) => ({
             text: String(cell ?? ''),
             options: ri === 0
@@ -497,7 +546,7 @@ export class PptxRenderer implements DocumentRenderer {
               : { color: colors.dark ? 'E2E8F0' : colors.fg, fontSize: Math.max(MIN_BODY_PT, 11) },
           }))
         )
-        const h = Math.min(availH, 0.4 + rows.length * 0.3)
+        const h = Math.min(availH, 0.4 + (chunk.length + 1) * 0.3)
         slide.addTable(tableRows, {
           x: MARGIN,
           y,
@@ -506,6 +555,18 @@ export class PptxRenderer implements DocumentRenderer {
           rowH: 0.3,
           valign: 'middle',
         })
+        if (dataRows.length > chunk.length) {
+          slide.addText(`… ${dataRows.length - chunk.length} more rows in the source data`, {
+            x: MARGIN,
+            y: y + h + 0.02,
+            w: CONTENT_W,
+            h: 0.25,
+            fontSize: 9,
+            italic: true,
+            color: colors.muted,
+          })
+          return h + 0.32
+        }
         return h + 0.2
       }
 

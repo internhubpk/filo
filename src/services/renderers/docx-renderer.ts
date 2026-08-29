@@ -5,8 +5,9 @@
 //   • themed cover page with accent bar, subtitle, date, company
 //   • table of contents (Word field — updates natively in Word)
 //   • themed headings/paragraphs/tables (header fill, zebra rows, borders)
-//   • metric grids, callouts, quotes, key takeaways, two-column comparisons
-//   • charts + timelines embedded as crisp PNG images
+//   • metric grids, callouts, quotes, key-takeaway boxes, two-column comparisons
+//   • charts + diagrams embedded as crisp PNG images with numbered captions
+//   • NATIVE Word equations (OMML math zone) with PNG fallback for exotic LaTeX
 //   • headers/footers with page numbers, page breaks between sections
 // =============================================================================
 
@@ -30,6 +31,7 @@ import {
   TableRow,
   TextRun,
   WidthType,
+  Math as MathElement,
 } from 'docx'
 import type { ISectionOptions } from 'docx'
 import type { RendererOutput, DocumentRenderer } from './shared'
@@ -41,10 +43,14 @@ import {
   asTable,
   asTwoColumn,
   deriveTheme,
+  equationLatexOf,
   hex6,
+  latexToOmml,
   renderComponentImage,
   tint,
 } from './shared'
+import { evaluateFormula } from '@/services/formula-evaluator'
+import type { CellMatrix } from '@/services/formula-evaluator'
 
 const TWIPS_PER_INCH = 1440
 
@@ -104,6 +110,7 @@ export class DocxRenderer implements DocumentRenderer {
 
     // ---------------- SECTIONS ----------------
     const sectionsToRender = spec.sections[0]?.type === 'cover' ? spec.sections.slice(1) : spec.sections
+    let figureNo = 0
 
     for (const section of sectionsToRender) {
       const components = (document.sections.find((s) => s.id === section.id)?.components ?? [])
@@ -123,7 +130,9 @@ export class DocxRenderer implements DocumentRenderer {
       )
 
       for (const component of components) {
-        const rendered = await this.renderComponent(component, theme, headingFont, bodyFont)
+        const rendered = await this.renderComponent(component, theme, headingFont, bodyFont, {
+          figureNo: () => ++figureNo,
+        })
         children.push(...rendered)
       }
 
@@ -278,7 +287,8 @@ export class DocxRenderer implements DocumentRenderer {
     component: CanonicalComponent,
     theme: ReturnType<typeof deriveTheme>,
     headingFont: string,
-    bodyFont: string
+    bodyFont: string,
+    ctx?: { figureNo?: () => number }
   ): Promise<(Paragraph | Table)[]> {
     const colors = theme.colors
     const out: (Paragraph | Table)[] = []
@@ -307,8 +317,7 @@ export class DocxRenderer implements DocumentRenderer {
         }
         break
       }
-      case 'list':
-      case 'key_takeaways': {
+      case 'list': {
         const items = asStringArray(component.content)
         items.forEach((item) => {
           out.push(
@@ -319,10 +328,16 @@ export class DocxRenderer implements DocumentRenderer {
             })
           )
         })
-        if (component.type === 'key_takeaways' && items.length > 0) {
-          // re-render as a shaded box for emphasis
-          const last = out[out.length - 1]
-          if (last) out[out.length - 1] = new Paragraph({ text: '', spacing: { after: 120 } })
+        break
+      }
+      case 'key_takeaways': {
+        // Emphasis box: shaded single-cell table carrying the takeaways —
+        // the previous implementation rendered plain bullets and then
+        // REPLACED the last one with an empty paragraph (a defect).
+        const items = asStringArray(component.content)
+        if (items.length > 0) {
+          out.push(this.takeawaysBox(items, colors.accent))
+          out.push(new Paragraph({ text: '', spacing: { after: 120 } }))
         }
         break
       }
@@ -372,8 +387,53 @@ export class DocxRenderer implements DocumentRenderer {
         }
         break
       }
+      case 'equation': {
+        // NATIVE Word math zone (editable OMML) when the LaTeX is inside the
+        // supported subset; otherwise a crisp PNG of the exact expression;
+        // otherwise the raw LaTeX shown visibly (never silently corrupted).
+        const latex = equationLatexOf(component.content)
+        if (!latex) break
+        const omml = latexToOmml(latex)
+        if (omml) {
+          out.push(
+            new Paragraph({
+              alignment: AlignmentType.CENTER,
+              spacing: { before: 160, after: 160 },
+              children: [new MathElement({ children: omml })],
+            })
+          )
+        } else {
+          const image = await renderComponentImage(component, theme)
+          if (image) {
+            const eqScale = Math.min(1, 460 / image.width)
+            out.push(
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                spacing: { before: 160, after: 60 },
+                children: [
+                  new ImageRun({
+                    data: image.png,
+                    transformation: { width: Math.round(image.width * eqScale), height: Math.round(image.height * eqScale) },
+                    type: 'png',
+                  }),
+                ],
+              })
+            )
+          } else {
+            out.push(
+              new Paragraph({
+                alignment: AlignmentType.CENTER,
+                spacing: { before: 120, after: 120 },
+                children: [new TextRun({ text: latex, font: 'Cambria Math', size: 24, italics: true, color: hex6(colors.foreground, '1F2937') })],
+              })
+            )
+          }
+        }
+        break
+      }
       case 'chart':
-      case 'timeline': {
+      case 'timeline':
+      case 'diagram': {
         const image = await renderComponentImage(component, theme)
         if (image) {
           const maxW = 600
@@ -392,10 +452,11 @@ export class DocxRenderer implements DocumentRenderer {
             })
           )
           if (image.caption) {
+            const no = ctx?.figureNo?.() ?? 1
             out.push(
               new Paragraph({
                 alignment: AlignmentType.CENTER,
-                children: [new TextRun({ text: image.caption, italics: true, size: 18, color: hex6(colors.mutedForeground, '64748B') })],
+                children: [new TextRun({ text: `Figure ${no} — ${image.caption}`, italics: true, size: 18, color: hex6(colors.mutedForeground, '64748B') })],
               })
             )
           }
@@ -432,6 +493,43 @@ export class DocxRenderer implements DocumentRenderer {
               },
               margins: { top: 160, bottom: 160, left: 240, right: 240 },
               children: [new Paragraph({ children: [new TextRun({ text, size: 22, bold: true })] })],
+            }),
+          ],
+        }),
+      ],
+    })
+  }
+
+  /** Shaded key-takeaways emphasis box (title + bullets). */
+  private takeawaysBox(items: string[], accent: string): Table {
+    const fill = tint(accent, 0.9).slice(1).toUpperCase()
+    return new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        new TableRow({
+          children: [
+            new TableCell({
+              shading: { type: ShadingType.CLEAR, fill },
+              borders: {
+                left: { style: BorderStyle.SINGLE, size: 24, color: hex6(accent, '3B82F6') },
+                top: { style: BorderStyle.SINGLE, size: 4, color: fill },
+                bottom: { style: BorderStyle.SINGLE, size: 4, color: fill },
+                right: { style: BorderStyle.SINGLE, size: 4, color: fill },
+              },
+              margins: { top: 160, bottom: 160, left: 240, right: 240 },
+              children: [
+                new Paragraph({
+                  children: [new TextRun({ text: 'Key Takeaways', bold: true, size: 22, color: hex6(accent, '3B82F6') })],
+                  spacing: { after: 100 },
+                }),
+                ...items.map(
+                  (item, i) =>
+                    new Paragraph({
+                      children: [new TextRun({ text: `${i + 1}.  ${item}`, size: 22 })],
+                      spacing: { after: i === items.length - 1 ? 0 : 60 },
+                    })
+                ),
+              ],
             }),
           ],
         }),
@@ -537,6 +635,11 @@ export class DocxRenderer implements DocumentRenderer {
     const width = Math.max(header?.length ?? 1, 1)
     const colWidth = Math.floor(9000 / width)
 
+    // Page-safety: ≥7 columns needs a smaller body font to stay inside the
+    // printable width; the QA validator caps columns at 12.
+    const bodySize = width >= 9 ? 16 : width >= 7 ? 18 : 20
+    const headSize = width >= 9 ? 16 : width >= 7 ? 18 : 20
+
     const tableStyle = themeTableStyle(colors, 'banded')
 
     const headerRow = new TableRow({
@@ -547,35 +650,47 @@ export class DocxRenderer implements DocumentRenderer {
             new TableCell({
               width: { size: colWidth, type: WidthType.DXA },
               shading: { type: ShadingType.CLEAR, fill: hex6(tableStyle.headerFill, '1E3A5F') },
-              margins: { top: 80, bottom: 80, left: 120, right: 120 },
+              margins: { top: 80, bottom: 80, left: 100, right: 100 },
               children: [
                 new Paragraph({
-                  children: [new TextRun({ text: String(cell ?? ''), bold: true, size: 20, color: 'FFFFFF' })],
+                  children: [new TextRun({ text: String(cell ?? ''), bold: true, size: headSize, color: 'FFFFFF' })],
                 }),
               ],
             })
         ) ?? [],
     })
 
-    const dataRows = data.map((row, idx) =>
-      new TableRow({
+    // Formula-aware data rows: table cells may carry spreadsheet formulas
+    // ("=SUM(B2:B5)") for numeric columns. DOCX has no formula engine, so we
+    // COMPUTE the value against the table itself — a formula we cannot
+    // evaluate stays visible as its formula text (honest), never a wrong
+    // number and never a silent drop.
+    const matrix = rows as CellMatrix
+    const dataRows = data.map((row, idx) => {
+      return new TableRow({
         children: Array.from({ length: width }, (_, i) => {
           const cell = row[i] ?? ''
+          let displayText: string
+          if (typeof cell === 'string' && /^=/.test(cell.trim())) {
+            const computed = evaluateFormula(cell.trim(), matrix)
+            displayText = computed !== null ? formatNumberForDoc(computed) : cell.trim()
+          } else {
+            displayText = String(cell)
+          }
           return new TableCell({
             width: { size: colWidth, type: WidthType.DXA },
             shading:
               tableStyle.zebra && idx % 2 === 1
                 ? { type: ShadingType.CLEAR, fill: tint(tableStyle.headerFill, 0.94).slice(1).toUpperCase() }
                 : undefined,
-            margins: { top: 60, bottom: 60, left: 120, right: 120 },
+            margins: { top: 60, bottom: 60, left: 100, right: 100 },
             children: [
               new Paragraph({
                 children: [
                   new TextRun({
-                    text: String(cell),
-                    size: 20,
+                    text: displayText,
+                    size: bodySize,
                     color: hex6(colors.foreground, '1F2937'),
-                    bold: typeof cell === 'number' ? false : false,
                   }),
                 ],
               }),
@@ -583,7 +698,7 @@ export class DocxRenderer implements DocumentRenderer {
           })
         }),
       })
-    )
+    })
 
     return new Table({
       width: { size: 100, type: WidthType.PERCENTAGE },
@@ -595,6 +710,12 @@ export class DocxRenderer implements DocumentRenderer {
 /** Table styling hints derived from theme tokens. */
 export function themeTableStyle(colors: ReturnType<typeof deriveTheme>['colors'], fallback: string): { headerFill: string; zebra: boolean } {
   return { headerFill: colors.primary, zebra: fallback === 'banded' || fallback === 'dark-header' || fallback === 'boxed' }
+}
+
+/** Compact, locale-stable number rendering for computed table cells. */
+function formatNumberForDoc(n: number): string {
+  if (Number.isInteger(n)) return n.toLocaleString('en-US')
+  return n.toLocaleString('en-US', { maximumFractionDigits: 2 })
 }
 
 function slugify(title: string): string {

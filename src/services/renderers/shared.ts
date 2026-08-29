@@ -10,6 +10,14 @@ import type { ArtifactSpecification, BrandingConfig, ColorPalette } from '@/type
 import { THEMES, getTheme, chartPaletteFor, type ThemeTokens } from '@/services/themes'
 import { normalizeChartSpec, renderChart, type NormalizedChart } from '@/services/chart-engine'
 import { normalizeDiagramSpec, renderDiagram, type DiagramSpec } from '@/services/diagram-engine'
+import { renderEquation, equationLatexOf } from '@/services/math-engine'
+import type { RenderedEquation } from '@/services/math-engine'
+import type { MathComponent } from 'docx'
+import { latexToOmml } from '@/services/math-omml'
+
+export type { RenderedEquation }
+export { renderEquation, equationLatexOf, latexToOmml }
+export type { MathComponent }
 
 // ==================== RENDERER CONTRACT ====================
 
@@ -18,6 +26,12 @@ export interface RendererOutput {
   filename: string
   mimeType: string
   size: number
+  /**
+   * Renderer-level QA findings (formula fallbacks, data-relationship
+   * corrections, chart placements). Surfaced in the job's QA summary so a
+   * mechanical repair is never silent.
+   */
+  qa?: Record<string, unknown>
 }
 
 export interface DocumentRenderer {
@@ -39,6 +53,8 @@ export type CanonicalComponentType =
   | 'timeline'
   | 'key_takeaways'
   | 'two_column'
+  | 'equation'
+  | 'diagram'
 
 export interface CanonicalComponent {
   sectionId: string
@@ -75,6 +91,16 @@ const LOWER_MAP: Record<string, CanonicalComponentType> = {
   timeline: 'timeline',
   key_takeaways: 'key_takeaways',
   two_column: 'two_column',
+  equation: 'equation',
+  math: 'equation',
+  formula: 'equation',
+  latex: 'equation',
+  diagram: 'diagram',
+  flowchart: 'diagram',
+  process: 'diagram',
+  hierarchy: 'diagram',
+  org_chart: 'diagram',
+  orgchart: 'diagram',
 }
 
 export function canonicalType(raw: string): CanonicalComponentType {
@@ -215,12 +241,53 @@ export interface RenderedImage {
   caption?: string
 }
 
-/** Rasterize a CHART or TIMELINE component to an embeddable PNG. */
+/**
+ * Normalize a DIAGRAM component (flowchart/process/hierarchy) into a
+ * DiagramSpec. Bare arrays become timelines (AI-canonical shape); objects
+ * carry an explicit kind. Returns null when fewer than 2 usable steps.
+ */
+export function asDiagram(content: unknown): DiagramSpec | null {
+  return normalizeDiagramSpec(content)
+}
+
+/** Rasterize a CHART, TIMELINE, DIAGRAM or EQUATION component to a PNG. */
 export async function renderComponentImage(
   component: CanonicalComponent,
   theme: DerivedTheme,
-  opts?: { width?: number; pptx?: boolean }
+  opts?: { width?: number; pptx?: boolean; display?: boolean }
 ): Promise<RenderedImage | null> {
+  if (component.type === 'equation') {
+    const eq = await renderEquation(component.content, {
+      color: withHash(theme.colors.foreground, '#1F2937'),
+      display: opts?.display ?? true,
+    })
+    if (eq) {
+      return {
+        png: eq.png,
+        width: eq.width,
+        height: eq.height,
+        caption: undefined,
+      }
+    }
+    // MathJax refused the expression — the renderer renders the raw LaTeX
+    // visibly (honest fallback), never a silent drop.
+    return null
+  }
+  if (component.type === 'diagram') {
+    const spec = asDiagram(component.content)
+    if (!spec) return null
+    const diagram = await renderDiagram(spec, {
+      width: opts?.width ?? (opts?.pptx ? 600 : 620),
+      colors: theme.colors,
+    })
+    if (!diagram) return null
+    return {
+      png: diagram.png,
+      width: diagram.width,
+      height: diagram.height,
+      caption: spec.title?.trim() || undefined,
+    }
+  }
   if (component.type === 'chart') {
     const spec = asChart(component.content)
     if (!spec) return null

@@ -209,6 +209,43 @@ export function validateDocument(
   }
   checks.push({ id: 'chart-data', label: 'Charts carry numeric data', passed: chartIssues === 0 })
 
+  // --- Check 10: equation validity (math must be renderable, never broken) --
+  let eqIssues = 0
+  for (const c of components) {
+    if (c.type !== 'EQUATION' && c.type !== 'equation') continue
+    const o = (c.content && typeof c.content === 'object' ? c.content : {}) as Record<string, unknown>
+    const latex = typeof o.latex === 'string' ? o.latex.trim() : typeof c.content === 'string' ? c.content.trim() : ''
+    if (!latex) {
+      eqIssues++
+      issues.push({ type: 'EMPTY_EQUATION', sectionId: c.sectionId, componentIndex: c.index, severity: 'error', message: 'Equation component has no LaTeX source.' })
+    } else if (latex.length > 2000) {
+      eqIssues++
+      issues.push({ type: 'EQUATION_TOO_LONG', sectionId: c.sectionId, componentIndex: c.index, severity: 'warning', message: 'Equation LaTeX source exceeds 2000 characters.' })
+    }
+  }
+  checks.push({ id: 'equations-valid', label: 'Equations carry LaTeX source', passed: eqIssues === 0 })
+
+  // --- Check 11: diagram step validity --------------------------------------
+  let diagIssues = 0
+  for (const c of components) {
+    if (c.type !== 'DIAGRAM' && c.type !== 'diagram') continue
+    const o = (c.content && typeof c.content === 'object' ? c.content : {}) as Record<string, unknown>
+    const steps = Array.isArray(o.steps) ? o.steps : Array.isArray(o.nodes) ? o.nodes : Array.isArray(c.content) ? (c.content as unknown[]) : []
+    const usable = steps.filter((s) => {
+      if (typeof s === 'string') return s.trim().length > 0
+      if (s && typeof s === 'object') {
+        const so = s as Record<string, unknown>
+        return typeof so.label === 'string' && so.label.trim().length > 0
+      }
+      return false
+    }).length
+    if (usable < 2) {
+      diagIssues++
+      issues.push({ type: 'DIAGRAM_TOO_FEW_STEPS', sectionId: c.sectionId, componentIndex: c.index, severity: 'error', message: 'Diagram needs at least 2 labeled steps.' })
+    }
+  }
+  checks.push({ id: 'diagrams-valid', label: 'Diagrams carry labeled steps', passed: diagIssues === 0 })
+
   const errors = issues.filter((i) => i.severity === 'error').length
   const warnings = issues.filter((i) => i.severity === 'warning').length
   const score = Math.max(0, 100 - errors * 15 - warnings * 5)
@@ -427,6 +464,120 @@ export async function validateRenderedOutputDeep(
         const xml = await zip.files[mainPart].async('string')
         if (xml.length < 200) {
           issues.push({ type: 'RENDER_EMPTY_DOCUMENT', severity: 'error', message: `Rendered ${fmt} main part is suspiciously empty (${xml.length} chars).` })
+        }
+
+        // ---- format-specific structural probes (part 2) ----
+        if (fmt === 'DOCX') {
+          // A usable document carries at least one paragraph with text.
+          const hasText = /<w:t[ >][^<]*\S/.test(xml)
+          if (!hasText) {
+            issues.push({ type: 'RENDER_DOCX_NO_TEXT', severity: 'error', message: 'Rendered DOCX document.xml contains no visible text runs.' })
+          }
+        }
+        if (fmt === 'PPTX') {
+          const slideParts = Object.keys(zip.files).filter((p) => /^ppt\/slides\/slide\d+\.xml$/.test(p))
+          if (slideParts.length < 2) {
+            issues.push({ type: 'RENDER_PPTX_TOO_FEW_SLIDES', severity: 'error', message: `Rendered PPTX has ${slideParts.length} slide(s) — a deck needs at least a cover and a content slide.` })
+          }
+          for (const part of slideParts.slice(0, 50)) {
+            const slideXml = await zip.files[part].async('string')
+            if (!slideXml.includes('<p:sp>') && !slideXml.includes('<p:pic>') && !slideXml.includes('<p:graphicFrame>')) {
+              issues.push({ type: 'RENDER_PPTX_EMPTY_SLIDE', severity: 'warning', message: `Slide part ${part} carries no shapes/pictures.` })
+            }
+          }
+        }
+      }
+
+      // ---- XLSX: re-open with ExcelJS + scan cells for error values + chart XML ----
+      if (fmt === 'XLSX') {
+        try {
+          const ExcelJS = (await import('exceljs')).default
+          const wb = new ExcelJS.Workbook()
+          await wb.xlsx.load(buffer as unknown as Parameters<typeof wb.xlsx.load>[0])
+          if (wb.worksheets.length === 0) {
+            issues.push({ type: 'RENDER_XLSX_NO_SHEETS', severity: 'error', message: 'Rendered XLSX contains no worksheets.' })
+          } else {
+            let errorCells = 0
+            let formulaCells = 0
+            let emptyFormula = 0
+            const ERROR_VALUES = /^#(REF!|VALUE!|DIV\/0!|NAME\?|N\/A|NULL|NUM!|SPILL!|CALC!)/
+            outer: for (const ws of wb.worksheets) {
+              for (const row of ws.getRows(1, Math.min(ws.rowCount, 500)) ?? []) {
+                const cellValues = (row.values as unknown[] | Record<string, unknown>) ?? []
+                const cellList: unknown[] = Array.isArray(cellValues) ? cellValues : Object.values(cellValues)
+                for (const cell of cellList) {
+                  if (cell === null || cell === undefined) continue
+                  if (typeof cell === 'string') {
+                    // literal error value stored as text
+                    if (ERROR_VALUES.test(cell.trim())) errorCells++
+                    continue
+                  }
+                  if (typeof cell === 'object') {
+                    const cv = cell as { formula?: unknown; result?: unknown; toString?: () => string }
+                    if (cv.formula !== undefined && cv.formula !== null) {
+                      formulaCells++
+                      if (String(cv.formula).trim() === '') emptyFormula++
+                    }
+                    if (typeof cv.result === 'string' && ERROR_VALUES.test(cv.result.trim())) {
+                      errorCells++
+                    }
+                  }
+                  if (errorCells + emptyFormula > 20) break outer
+                }
+              }
+            }
+            if (emptyFormula > 0) {
+              issues.push({ type: 'RENDER_XLSX_EMPTY_FORMULA', severity: 'error', message: `Rendered XLSX has ${emptyFormula} empty formula cell(s).` })
+            }
+            if (errorCells > 0) {
+              issues.push({ type: 'RENDER_XLSX_ERROR_CELLS', severity: 'error', message: `Rendered XLSX contains ${errorCells} cell(s) with #REF!/#VALUE!-style error values.` })
+            }
+          }
+        } catch (err) {
+          issues.push({ type: 'RENDER_XLSX_UNREADABLE', severity: 'error', message: `ExcelJS could not re-open the workbook: ${err instanceof Error ? err.message.slice(0, 120) : String(err)}` })
+        }
+
+        // Native chart parts (when present) must be well-formed XML with a
+        // valid chart type element and consistent relationships.
+        try {
+          const { XMLParser } = await import('fast-xml-parser')
+          const parser = new XMLParser()
+          const chartParts = Object.keys(zip.files).filter((p) => /^xl\/charts\/chart\d+\.xml$/.test(p))
+          for (const part of chartParts.slice(0, 30)) {
+            const xml = await zip.files[part].async('string')
+            try {
+              const parsed = parser.parse(xml) as Record<string, unknown>
+              const chartSpace = parsed?.['c:chartSpace']
+              if (!chartSpace || typeof chartSpace !== 'object') {
+                issues.push({ type: 'RENDER_XLSX_BAD_CHART', severity: 'error', message: `Chart part ${part} is not a c:chartSpace document.` })
+                continue
+              }
+              const chart = (chartSpace as Record<string, unknown>)['c:chart']
+              const plotArea = chart && typeof chart === 'object' ? (chart as Record<string, unknown>)['c:plotArea'] : null
+              const hasChartType = plotArea && typeof plotArea === 'object'
+                ? Object.keys(plotArea as Record<string, unknown>).some((k) => /Chart$/.test(k) && k !== 'c:chart')
+                : false
+              if (!hasChartType) {
+                issues.push({ type: 'RENDER_XLSX_BAD_CHART', severity: 'error', message: `Chart part ${part} has no chart-type element (barChart/lineChart/pieChart/…).` })
+              }
+            } catch {
+              issues.push({ type: 'RENDER_XLSX_BAD_CHART', severity: 'error', message: `Chart part ${part} is not well-formed XML.` })
+            }
+          }
+          // every drawing reference in a sheet must have a rels entry
+          const sheetRels = Object.keys(zip.files).filter((p) => /^xl\/worksheets\/_rels\/sheet\d+\.xml\.rels$/.test(p))
+          for (const relsPath of sheetRels.slice(0, 40)) {
+            const rels = await zip.files[relsPath].async('string')
+            const sheetPath = relsPath.replace('_rels/', '').replace('.rels', '')
+            const sheetXml = await zip.files[sheetPath]?.async('string')
+            if (!sheetXml) continue
+            const drawingRef = /<drawing r:id="([^"]+)"/.exec(sheetXml)
+            if (drawingRef && !rels.includes(`Id="${drawingRef[1]}"`)) {
+              issues.push({ type: 'RENDER_XLSX_BROKEN_DRAWING_REL', severity: 'error', message: `Sheet ${sheetPath} references drawing ${drawingRef[1]} without a relationship entry.` })
+            }
+          }
+        } catch {
+          // fast-xml-parser unavailable — zip-level checks above still ran
         }
       }
     } catch (err) {

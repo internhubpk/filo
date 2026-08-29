@@ -289,6 +289,14 @@ export default defineSchema({
     // bumps versionCount on the SAME artifact instead of creating a new one.
     sourceArtifactId: v.optional(v.id("artifacts")),
 
+    // RENDER-RETRY IDEMPOTENCY (root cause of the "15 different artifact DB
+    // IDs every 11s" incident): the artifact record created by the FIRST
+    // successful saveArtifactRecord during rendering. A retried render
+    // attempt REUSES this artifact (appending a new version) instead of
+    // inserting a duplicate row. Set by recordRenderArtifact immediately
+    // after the artifact is created; never overwritten.
+    renderArtifactId: v.optional(v.id("artifacts")),
+
     // Original app origin (e.g. "https://filo-ailab99.vercel.app") captured
     // at enqueue time. The worker calls this origin's /api/generation/render
     // to render + persist the file, so rendering survives tab close/logout.
