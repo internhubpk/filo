@@ -1,15 +1,20 @@
 // =============================================================================
 // PDF RENDERER (spec §13) — pdfkit with a professional design system
 // =============================================================================
-// Visually coherent, paginated PDF output:
-//   • themed cover page (title block, accent rules, date/company)
-//   • running header + footer with page numbers
-//   • themed section headings with accent rules
-//   • paragraphs, lists, quotes, callouts, metric bands, two-column,
-//     styled tables (dark header band, zebra rows, column width fitting)
-//   • charts + timelines embedded as PNG
-//   • completion promise bounded by a 120s guard — pdfkit streams can hang
-//     silently on malformed content, so the render can never block a job.
+// v2 — THEME-DIALECT + LONG-DOCUMENT edition:
+//   • TWO-PASS rendering: pass 1 lays out the body and records every section's
+//     start page; pass 2 emits cover → real TABLE OF CONTENTS (dotted leaders,
+//     accurate page numbers) → body. A 100-page document finally ships with a
+//     navigable TOC instead of a blind guess.
+//   • 5 cover layouts (banner | centered | sidebar | minimal | gradient-bar)
+//   • 6 heading ornaments (rule | kicker | band | left-bar | underline | none)
+//   • hierarchical headings: Part (large) / chapter / sub-section, numbers
+//     from the blueprint outline
+//   • 4 footer styles (page | page-of | brand-page | minimal) — "of Y" made
+//     possible by the two-pass total
+//   • themed tables (banded | boxed | minimal | dark-header | editorial),
+//     running header + page numbers stamped on every auto-flowed page
+//   • charts/timelines/diagrams as PNG, MathJax equations, metric cards
 // =============================================================================
 
 import type { RendererOutput, DocumentRenderer, RenderableDocument, CanonicalComponent } from './shared'
@@ -21,10 +26,10 @@ import {
   asTwoColumn,
   deriveTheme,
   equationLatexOf,
-  hex6,
   renderComponentImage,
   tint,
   withHash,
+  type DerivedTheme,
 } from './shared'
 import { evaluateFormula } from '@/services/formula-evaluator'
 import type { CellMatrix } from '@/services/formula-evaluator'
@@ -75,6 +80,14 @@ function resolveUnicodeFonts(): FontPair | null {
   return { regular, bold }
 }
 
+interface PdfThemeColors {
+  fg: string
+  primary: string
+  accent: string
+  mutedFg: string
+  borderCol: string
+}
+
 export class PdfRenderer implements DocumentRenderer {
   format = 'PDF' as const
 
@@ -89,23 +102,94 @@ export class PdfRenderer implements DocumentRenderer {
     const sizeKey = (layout?.pageSize ?? 'A4').toUpperCase()
     const [pageW, pageH] = PAGE_SIZES[sizeKey] ?? PAGE_SIZES.A4
     const margin = 56
-    // The footer is drawn at pageH - 40. pdfkit auto-paginates any text whose
-    // baseline would land beyond maxY (pageH - bottomMargin), so the bottom
-    // margin MUST be smaller than the footer inset — with a symmetric 56pt
-    // bottom margin every footer stamp silently created a BLANK page holding
-    // only the page number (the classic "extra blank pages" PDF defect).
     const bottomMargin = 24
 
+    const sections = spec.sections
+    const coverSection = sections[0]?.type === 'cover' ? sections[0] : null
+    const hasCover = Boolean(coverSection) || sections.length >= 3
+    const contentSections = coverSection ? sections.slice(1) : sections
+    const hasParts = contentSections.some((s) => (s.level || 'chapter') === 'part')
+
+    // ---------------- PASS 1: layout probe ----------------
+    // Render the body into a throwaway document to learn where every section
+    // lands and how many pages the body needs. Deterministic because pass 2
+    // repeats the identical layout from an identical starting state.
+    const probe = new pdfkit({
+      size: sizeKey === 'LEGAL' ? 'LEGAL' : sizeKey === 'LETTER' ? 'LETTER' : 'A4',
+      margins: { top: margin, bottom: bottomMargin, left: margin, right: margin },
+      info: { Title: spec.title, Producer: 'Filo' },
+    })
+    probe.info = probe.info // keep TS shape
+    const probeChunks: Buffer[] = []
+    probe.on('data', (c: Buffer) => probeChunks.push(c))
+    const probeDone = new Promise<Buffer>((resolve) => {
+      probe.on('end', () => resolve(Buffer.concat(probeChunks)))
+      probe.on('error', () => resolve(Buffer.concat(probeChunks)))
+    })
+    const sectionStartPages: number[] = []
+    let bodyPagesTotal = 0
+    const registerFonts = (doc: any): { bodyFont: string; headingFont: string } => {
+      let bodyFont = 'Helvetica'
+      let headingFont = 'Helvetica-Bold'
+      const unicodeFonts = resolveUnicodeFonts()
+      if (unicodeFonts) {
+        try {
+          doc.registerFont('FiloBody', unicodeFonts.regular)
+          doc.registerFont('FiloHeading', unicodeFonts.bold)
+          bodyFont = 'FiloBody'
+          headingFont = 'FiloHeading'
+        } catch {
+          // fall back to base-14
+        }
+      }
+      return { bodyFont, headingFont }
+    }
+    {
+      const { bodyFont, headingFont } = registerFonts(probe)
+      await this.renderBody(probe, document, contentSections, {
+        theme,
+        pageW,
+        pageH,
+        margin,
+        contentBottom: pageH - 64,
+        bodyFont,
+        headingFont,
+        recordSectionPage: (idx: number) => sectionStartPages.push(probe.bufferedPageRange().count),
+      })
+      bodyPagesTotal = probe.bufferedPageRange().count
+      probe.end()
+      await probeDone
+    }
+    void sectionStartPages
+
+    // ---------------- TOC ENTRY LIST ----------------
+    interface TocEntry {
+      level: string
+      number?: string
+      title: string
+      page: number // body-relative (1-based)
+    }
+    const tocEntries: TocEntry[] = contentSections
+      .map((s: any, i: number) => ({
+        level: (s.level || 'chapter').toLowerCase(),
+        number: s.number as string | undefined,
+        title: String(s.title ?? ''),
+        page: sectionStartPages[i] ?? 0,
+      }))
+      .filter((e: TocEntry) => e.title && e.page > 0 && e.level !== 'subsection')
+    // drop the auto-cover placeholder from the TOC
+    if (coverSection && tocEntries.length > 0) tocEntries.shift()
+
+    // ---------------- PASS 2: final document ----------------
     const doc = new pdfkit({
       size: sizeKey === 'LEGAL' ? 'LEGAL' : sizeKey === 'LETTER' ? 'LETTER' : 'A4',
       margins: { top: margin, bottom: bottomMargin, left: margin, right: margin },
       info: { Title: spec.title, Author: 'Filo' },
     })
-
     const chunks: Buffer[] = []
     doc.on('data', (c: Buffer) => chunks.push(c))
     const done = new Promise<Buffer>((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('PDF render timed out after 120s')), 120_000)
+      const timeout = setTimeout(() => reject(new Error('PDF render timed out after 240s')), 240_000)
       doc.on('end', () => {
         clearTimeout(timeout)
         resolve(Buffer.concat(chunks))
@@ -116,154 +200,115 @@ export class PdfRenderer implements DocumentRenderer {
       })
     })
 
+    const { bodyFont, headingFont } = registerFonts(doc)
     const fg = withHash(colors.foreground, '#1F2937')
     const primary = withHash(colors.primary, '#1E3A5F')
     const accent = withHash(colors.accent, '#3B82F6')
     const mutedFg = withHash(colors.mutedForeground, '#64748B')
     const borderCol = withHash(colors.border, '#E2E8F0')
+    const themeColors: PdfThemeColors = { fg, primary, accent, mutedFg, borderCol }
 
-    // ---------------- FONT REGISTRATION (Unicode support) ----------------
-    // pdfkit's built-in base-14 fonts (Helvetica et al.) cover Latin-1 only —
-    // any CJK/most unicode content silently renders as mojibake. Register a
-    // real Unicode TTF when one is available on the host (pdfkit SUBSETS the
-    // embedded font, so output size stays proportional to the glyphs used).
-    // Deployment note: point FILO_PDF_FONT_PATH at any TTF/TTC on hosts
-    // without system fonts; without a font we degrade to Helvetica.
-    let bodyFont = 'Helvetica'
-    let headingFont = 'Helvetica-Bold'
-    const unicodeFonts = resolveUnicodeFonts()
-    if (unicodeFonts) {
-      try {
-        doc.registerFont('FiloBody', unicodeFonts.regular)
-        doc.registerFont('FiloHeading', unicodeFonts.bold)
-        bodyFont = 'FiloBody'
-        headingFont = 'FiloHeading'
-      } catch (fontErr) {
-        console.warn('[PDF-RENDER] Unicode font registration failed — falling back to Helvetica:', fontErr instanceof Error ? fontErr.message : fontErr)
-      }
-    }
-
-    // ---------------- COVER PAGE ----------------
-    const sections = spec.sections
-    const coverSection = sections[0]?.type === 'cover' ? sections[0] : null
-    const hasCover = Boolean(coverSection) || sections.length >= 3
+    // ---- cover (offset 0: body starts at page coverPages+1) ----
+    let coverPages = 0
     if (hasCover) {
-      // accent top band
-      doc.rect(0, 0, pageW, 16).fill(primary)
-      doc.rect(margin, pageH * 0.34, 72, 4).fill(accent)
-
-      const title = coverSection?.title ?? spec.title ?? 'Untitled Document'
-      doc.font(headingFont).fontSize(30).fillColor(primary)
-      doc.text(title, margin, pageH * 0.38, { width: pageW - margin * 2, align: 'center' })
-
-      const subtitle =
-        asString(
-          (document.sections.find((s) => s.id === coverSection?.id)?.components ?? []).find((c) => c.type === 'paragraph')?.content
-        ) || spec.description
-      if (subtitle) {
-        doc.moveDown(0.6)
-        doc.font(bodyFont).fontSize(13).fillColor(mutedFg)
-        doc.text(subtitle.slice(0, 300), margin, doc.y, { width: pageW - margin * 2, align: 'center' })
-      }
-      doc.moveDown(1.2)
-      const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
-      doc.font(bodyFont).fontSize(10).fillColor(mutedFg)
-      doc.text([document.branding?.companyName, date].filter(Boolean).join('  ·  '), margin, doc.y, {
-        width: pageW - margin * 2,
-        align: 'center',
+      coverPages = this.drawCover(doc, document, theme, themeColors, {
+        pageW,
+        pageH,
+        margin,
+        bodyFont,
+        headingFont,
+        coverSectionTitle: coverSection?.title ?? spec.title ?? 'Untitled Document',
+        coverSubtitle:
+          asString(
+            (document.sections.find((s) => s.id === coverSection?.id)?.components ?? []).find((c) => c.type === 'paragraph')?.content
+          ) || spec.description,
       })
-      doc.addPage()
     }
 
-    // ---------------- RUNNING HEADER / FOOTER ----------------
-    // Stamping is driven by pdfkit's pageAdded event and is idempotent per
-    // page. This covers pages WE add (section breaks, ensureSpace) AND pages
-    // pdfkit creates internally when auto-flowing an overlong paragraph —
-    // explicit-only stamping left auto-flowed pages blank and desynced the
-    // page numbers.
-    const stampHeaderFooter = () => {
-      if ((doc as any).__filoStamped === doc.page) return // this page already stamped
-      ;(doc as any).__filoStamped = doc.page
+    // ---- TOC pages ----
+    let tocPages = 0
+    if (tocEntries.length >= 4) {
+      // Precompute how many pages the TOC will consume using the exact same
+      // layout constants drawToc uses, so body page numbers printed in the
+      // TOC are correct even when the TOC itself spans multiple pages.
+      const usable = pageH - margin - 60
+      const entryH = 19
+      const firstPageCap = Math.floor((usable - 44) / entryH)
+      const laterPageCap = Math.floor(usable / entryH)
+      tocPages =
+        tocEntries.length <= firstPageCap
+          ? 1
+          : 1 + Math.ceil((tocEntries.length - firstPageCap) / laterPageCap)
+      this.drawToc(doc, tocEntries, {
+        pageW,
+        pageH,
+        margin,
+        bodyFont,
+        headingFont,
+        colors: themeColors,
+        // printed page = body page + cover + toc pages (absolute, 1-based)
+        offset: coverPages + tocPages,
+        // pdfkit can only draw on the CURRENT page — TOC pages must be
+        // stamped exactly as they are created.
+        stamp: (pageNo: number) => {
+          if (spec.design?.layout?.headerEnabled !== false) {
+            doc.font(bodyFont).fontSize(8).fillColor(mutedFg)
+            doc.text(spec.title, margin, 28, { width: pageW - margin * 2, align: 'right', lineBreak: false })
+          }
+          if (spec.design?.layout?.footerEnabled !== false) {
+            doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
+            doc.text(`${pageNo}`, margin, pageH - 40, { width: pageW - margin * 2, align: 'center', lineBreak: false })
+          }
+        },
+      })
+    }
+    const pageOffset = coverPages + tocPages
+    void pageOffset
+
+    // ---- running header/footer ----
+    const totalPagesEstimate = coverPages + tocPages + Math.max(bodyPagesTotal, 1)
+    const stampHeaderFooter = (pageNo: number) => {
       if (spec.design?.layout?.headerEnabled !== false) {
         doc.font(bodyFont).fontSize(8).fillColor(mutedFg)
         doc.text(spec.title, margin, 28, { width: pageW - margin * 2, align: 'right', lineBreak: false })
       }
       if (spec.design?.layout?.footerEnabled !== false) {
-        // True 1-based page index (cover included) — never drifts from the
-        // real page count, even with internal auto-pagination.
-        const label = String(doc.bufferedPageRange().count)
-        doc.font(bodyFont).fontSize(9).fillColor(mutedFg)
-        doc.text(label, margin, pageH - 40, { width: pageW - margin * 2, align: 'center', lineBreak: false })
+        doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
+        const label =
+          theme.footer === 'page-of'
+            ? `Page ${pageNo} of ${totalPagesEstimate}`
+            : theme.footer === 'brand-page'
+              ? `${theme.tokens.label}`
+              : `${pageNo}`
+        if (theme.footer === 'brand-page') {
+          doc.text(label, margin, pageH - 40, { width: pageW - margin * 2, align: 'left', lineBreak: false })
+          doc.text(`${pageNo}`, margin, pageH - 40, { width: pageW - margin * 2, align: 'right', lineBreak: false })
+        } else {
+          doc.text(label, margin, pageH - 40, { width: pageW - margin * 2, align: 'center', lineBreak: false })
+        }
       }
     }
-    let skipNextStamp = hasCover // the cover page itself carries no running header/footer
-    doc.on('pageAdded', () => {
-      if (skipNextStamp) {
-        skipNextStamp = false
-        return
-      }
-      stampHeaderFooter()
-    })
 
-    const contentBottom = pageH - 64
-    let cursorY = margin + 8
+    // Stamp cover-adjacent front matter is handled inside drawToc (pdfkit
+    // can only draw on the current page — retroactive stamping is impossible).
+
     this.figureNo = 0
-
-    // Returns the y at which drawing may continue given the component's OWN
-    // current y — components advance their local y independently (lists,
-    // flowed paragraphs), so the pagination decision MUST use that position,
-    // never the section-level cursor. The previous versions had two variants
-    // of this bug: checking a stale section cursor (long lists overflowed the
-    // page bottom) or overwriting the component's position with the cursor
-    // (list items stacked on top of each other).
-    const ensureSpaceAt = (currentY: number, needed: number): number => {
-      if (currentY + needed > contentBottom) {
-        doc.addPage() // pageAdded event stamps + numbers the fresh page
-        cursorY = margin + 8
-        return margin + 8
-      }
-      return currentY
-    }
-
-    // ---------------- SECTIONS ----------------
-    const contentSections = coverSection ? sections.slice(1) : sections
-    let sectionIdx = 0
-    for (const section of contentSections) {
-      sectionIdx++
-      // Section heading (new page for each section — clean pagination).
-      // The outgoing page was already stamped when it was created (pageAdded);
-      // stamp it again only if content somehow skipped the event path.
-      if (sectionIdx > 1) {
-        stampHeaderFooter()
-        doc.addPage()
-      }
-      cursorY = margin + 8
-      doc.font(headingFont).fontSize(20).fillColor(primary)
-      doc.text(section.title, margin, cursorY, { width: pageW - margin * 2 })
-      cursorY = doc.y + 6
-      doc.moveTo(margin, cursorY).lineTo(margin + 64, cursorY).lineWidth(2.5).stroke(accent)
-      cursorY += 18
-
-      const components = (document.sections.find((s) => s.id === section.id)?.components ?? [])
-        .slice()
-        .sort((a, b) => a.order - b.order)
-
-      for (const component of components) {
-        cursorY = await this.renderComponent(doc, component, {
-          theme,
-          y: cursorY,
-          ensureSpace: ensureSpaceAt,
-          contentBottom,
-          ctx: { pageW, margin, fg, primary, accent, mutedFg, borderCol, bodyFont, headingFont },
-          document,
-        })
-      }
-    }
-
-    // Stamp the final page (idempotent — skipped if already stamped) so a
-    // document whose last page never triggered addPage still gets its
-    // header/footer + page number.
-    stampHeaderFooter()
+    // The body MUST start on a fresh page after cover/TOC front matter —
+    // otherwise the first chapter would render on top of the TOC page.
+    if (coverPages + tocPages > 0) doc.addPage() // pageAdded stamps this page
+    await this.renderBody(doc, document, contentSections, {
+      theme,
+      pageW,
+      pageH,
+      margin,
+      contentBottom: pageH - 64,
+      bodyFont,
+      headingFont,
+      recordSectionPage: () => {},
+      onPageStart: (pageNo: number) => stampHeaderFooter(pageNo),
+      pageOffset,
+    })
+    stampHeaderFooter(coverPages + tocPages + Math.max(bodyPagesTotal, 1))
     doc.end()
     const buffer = await done
 
@@ -275,11 +320,337 @@ export class PdfRenderer implements DocumentRenderer {
     }
   }
 
+  // ==================== BODY LAYOUT (shared by both passes) ====================
+
+  private async renderBody(
+    doc: any,
+    document: RenderableDocument,
+    contentSections: any[],
+    opts: {
+      theme: DerivedTheme
+      pageW: number
+      pageH: number
+      margin: number
+      contentBottom: number
+      bodyFont: string
+      headingFont: string
+      recordSectionPage: (idx: number) => void
+      onPageStart?: (pageNo: number) => void
+      pageOffset?: number
+    }
+  ): Promise<void> {
+    const { theme, margin, contentBottom, bodyFont, headingFont } = opts
+    const colors = theme.colors
+    const width = opts.pageW - margin * 2
+    const fg = withHash(colors.foreground, '#1F2937')
+
+    let cursorY = margin + 8
+    this.figureNo = 0
+    let renderedIdx = 0
+
+    const ensureSpaceAt = (currentY: number, needed: number): number => {
+      if (currentY + needed > contentBottom) {
+        doc.addPage()
+        cursorY = margin + 8
+        return margin + 8
+      }
+      return currentY
+    }
+
+    let lastPageSeen = doc.bufferedPageRange().count
+    doc.on('pageAdded', () => {
+      lastPageSeen = doc.bufferedPageRange().count
+      if (!opts.onPageStart) return
+      // CRITICAL: pdfkit fires pageAdded from INSIDE a flowed paragraph's
+      // line loop. The header/footer stamp moves doc.y (footer lands below
+      // maxY), so without saving/restoring the flow state pdfkit resumes the
+      // paragraph at the footer position — every subsequent line overflows
+      // the page, addPage fires per line, and the document explodes to
+      // thousands of near-blank pages.
+      const savedY = doc.y
+      const savedX = doc.x
+      opts.onPageStart(lastPageSeen)
+      doc.y = savedY
+      doc.x = savedX
+    })
+
+    for (let i = 0; i < contentSections.length; i++) {
+      const section = contentSections[i]
+      const components = (document.sections.find((s) => s.id === section.id)?.components ?? [])
+        .slice()
+        .sort((a: CanonicalComponent, b: CanonicalComponent) => a.order - b.order)
+      const level = String(section.level || 'chapter').toLowerCase()
+      const num = section.number as string | undefined
+      const isPart = level === 'part'
+      const isSub = level === 'section' || level === 'subsection'
+
+      opts.recordSectionPage(i)
+
+      // Pagination: parts + chapters start on a fresh page (professional
+      // reports/notes); sub-sections flow.
+      if (renderedIdx > 0 && !isSub) {
+        doc.addPage()
+        cursorY = margin + 8
+      } else if (renderedIdx > 0) {
+        cursorY += 18
+      }
+
+      // ---- heading (ornament-driven) ----
+      const headingText = isPart
+        ? num
+          ? `Part ${num} — ${section.title}`
+          : section.title
+        : isSub
+          ? num
+            ? `${num}  ${section.title}`
+            : section.title
+          : num
+            ? `${num}.  ${section.title}`
+            : section.title
+      cursorY = this.drawSectionHeading(doc, headingText, { isPart, isSub, theme, y: cursorY, margin, width, headingFont, colors: { primary: withHash(colors.primary, '#1E3A5F'), accent: withHash(colors.accent, '#3B82F6'), fg } })
+
+      for (const component of components) {
+        cursorY = await this.renderComponent(doc, component, {
+          theme,
+          y: cursorY,
+          ensureSpace: ensureSpaceAt,
+          contentBottom,
+          ctx: { pageW: opts.pageW, margin, fg, primary: withHash(colors.primary, '#1E3A5F'), accent: withHash(colors.accent, '#3B82F6'), mutedFg: withHash(colors.mutedForeground, '#64748B'), borderCol: withHash(colors.border, '#E2E8F0'), bodyFont, headingFont },
+          document,
+          subFontScale: isPart ? 0.95 : 1,
+        })
+      }
+      renderedIdx++
+    }
+  }
+
+  // ==================== COVER (5 layouts) ====================
+
+  private drawCover(
+    doc: any,
+    document: RenderableDocument,
+    theme: DerivedTheme,
+    c: PdfThemeColors,
+    opts: { pageW: number; pageH: number; margin: number; bodyFont: string; headingFont: string; coverSectionTitle: string; coverSubtitle?: string }
+  ): number {
+    const { pageW, pageH, margin, bodyFont, headingFont } = opts
+    const title = opts.coverSectionTitle
+    const subtitle = (opts.coverSubtitle || '').slice(0, 300)
+    const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+    const meta = [document.branding?.companyName, date].filter(Boolean).join('  ·  ')
+
+    switch (theme.cover) {
+      case 'sidebar': {
+        const sidebarW = pageW * 0.36
+        doc.rect(0, 0, sidebarW, pageH).fill(c.primary)
+        doc.fillColor('#FFFFFF').font(headingFont).fontSize(11)
+        doc.text(theme.tokens.label.toUpperCase(), 28, pageH - 120, { width: sidebarW - 48 })
+        doc.font(bodyFont).fontSize(9).fillOpacity(0.75)
+        doc.text(document.branding?.companyName ?? '', 28, pageH - 92, { width: sidebarW - 48 })
+        doc.fillOpacity(1)
+        doc.fillColor(c.primary).font(headingFont)
+        doc.fontSize(32)
+        doc.text(title, sidebarW + 40, pageH * 0.32, { width: pageW - sidebarW - 80 })
+        if (subtitle) {
+          doc.font(bodyFont).fontSize(12).fillColor(c.mutedFg)
+          doc.text(subtitle, sidebarW + 40, doc.y + 18, { width: pageW - sidebarW - 80 })
+        }
+        doc.rect(sidebarW + 40, pageH * 0.26, 64, 4).fill(c.accent)
+        doc.font(bodyFont).fontSize(10).fillColor(c.accent)
+        doc.text(date, sidebarW + 40, pageH * 0.27, { width: 200 })
+        doc.addPage()
+        return 1
+      }
+      case 'centered': {
+        doc.rect(margin, pageH * 0.3, pageW - margin * 2, 1.2).fill(c.primary)
+        doc.font(headingFont).fontSize(30).fillColor(c.primary)
+        doc.text(title, margin, pageH * 0.36, { width: pageW - margin * 2, align: 'center' })
+        if (subtitle) {
+          doc.moveDown(0.7)
+          doc.font(bodyFont).fontSize(12.5).fillColor(c.mutedFg)
+          doc.text(subtitle, margin, doc.y, { width: pageW - margin * 2, align: 'center' })
+        }
+        doc.moveDown(1.4)
+        doc.rect(margin, doc.y + 4, pageW - margin * 2, 1.2).fill(c.primary)
+        doc.font(bodyFont).fontSize(10).fillColor(c.mutedFg)
+        doc.text(meta, margin, doc.y + 14, { width: pageW - margin * 2, align: 'center' })
+        doc.addPage()
+        return 1
+      }
+      case 'minimal': {
+        doc.font(bodyFont).fontSize(10).fillColor(c.mutedFg)
+        doc.text(theme.tokens.label.toUpperCase(), margin, pageH * 0.3, { width: pageW - margin * 2, align: 'center', characterSpacing: 3 })
+        doc.font(headingFont).fontSize(34).fillColor(c.fg)
+        doc.text(title, margin, pageH * 0.36, { width: pageW - margin * 2, align: 'center' })
+        const ruleY = doc.y + 16
+        doc.rect(pageW / 2 - 36, ruleY, 72, 2.4).fill(c.accent)
+        if (subtitle) {
+          doc.font(bodyFont).fontSize(11.5).fillColor(c.mutedFg)
+          doc.text(subtitle, margin, ruleY + 22, { width: pageW - margin * 2, align: 'center' })
+        }
+        doc.font(bodyFont).fontSize(9.5).fillColor(c.mutedFg)
+        doc.text(meta, margin, pageH * 0.82, { width: pageW - margin * 2, align: 'center' })
+        doc.addPage()
+        return 1
+      }
+      case 'gradient-bar': {
+        const seg = pageW / 3
+        doc.rect(0, 0, seg, 14).fill(c.primary)
+        doc.rect(seg, 0, seg, 14).fill(c.accent)
+        doc.rect(seg * 2, 0, seg, 14).fill(tint(c.accent, 0.55))
+        doc.font(bodyFont).fontSize(10).fillColor(c.accent)
+        doc.text(theme.tokens.label.toUpperCase(), margin, pageH * 0.3, { width: pageW - margin * 2, characterSpacing: 2 })
+        doc.font(headingFont).fontSize(32).fillColor(c.fg)
+        doc.text(title, margin, pageH * 0.35, { width: pageW - margin * 2 })
+        if (subtitle) {
+          doc.moveDown(0.6)
+          doc.font(bodyFont).fontSize(12).fillColor(c.mutedFg)
+          doc.text(subtitle, margin, doc.y, { width: pageW - margin * 2 })
+        }
+        doc.font(bodyFont).fontSize(9.5).fillColor(c.mutedFg)
+        doc.text(meta, margin, pageH * 0.85, { width: pageW - margin * 2 })
+        doc.addPage()
+        return 1
+      }
+      case 'banner':
+      default: {
+        doc.rect(0, 0, pageW, 150).fill(c.primary)
+        doc.font(headingFont).fontSize(27).fillColor('#FFFFFF')
+        doc.text(title, margin + 4, 52, { width: pageW - (margin + 8) * 2 })
+        if (subtitle) {
+          doc.font(bodyFont).fontSize(11).fillColor('#E6EBF2')
+          doc.text(subtitle.slice(0, 180), margin + 4, doc.y + 8, { width: pageW - (margin + 8) * 2 })
+        }
+        doc.rect(margin, pageH * 0.5, 72, 4).fill(c.accent)
+        doc.font(bodyFont).fontSize(10).fillColor(c.mutedFg)
+        doc.text(meta, margin, pageH * 0.52 + 12, { width: pageW - margin * 2 })
+        doc.addPage()
+        return 1
+      }
+    }
+  }
+
+  // ==================== TABLE OF CONTENTS ====================
+
+  private drawToc(
+    doc: any,
+    entries: Array<{ level: string; number?: string; title: string; page: number }>,
+    opts: { pageW: number; pageH: number; margin: number; bodyFont: string; headingFont: string; colors: PdfThemeColors; offset: number; stamp: (pageNo: number) => void }
+  ): number {
+    const { pageW, pageH, margin, bodyFont, headingFont, colors } = opts
+    const width = pageW - margin * 2
+    const usable = pageH - margin - 60
+    const entryH = 19
+
+    opts.stamp(doc.bufferedPageRange().count)
+    doc.font(headingFont).fontSize(21).fillColor(colors.primary)
+    doc.text('Table of Contents', margin, margin + 6, { width })
+    doc.rect(margin, doc.y + 4, 64, 2.6).fill(colors.accent)
+    let y = doc.y + 24
+
+    let pages = 1
+    for (const e of entries) {
+      if (y + entryH > margin + usable) {
+        doc.addPage()
+        pages++
+        opts.stamp(doc.bufferedPageRange().count)
+        y = margin + 8
+      }
+      const isPart = e.level === 'part'
+      const isSub = e.level === 'section' || e.level === 'subsection'
+      const indent = isPart ? 0 : isSub ? 32 : 16
+      const label = e.number ? (isPart ? `Part ${e.number} — ${e.title}` : isSub ? `${e.number}  ${e.title}` : `${e.number}.  ${e.title}`) : e.title
+      const printedPage = e.page + opts.offset + 1 // body-relative → absolute (1-based)
+      doc.font(headingFont).fontSize(isPart ? 11.5 : 10).fillColor(isPart ? colors.primary : colors.fg)
+      const labelW = doc.widthOfString(label)
+      const pageLabelW = doc.widthOfString(String(printedPage))
+      const dotsStart = margin + indent + labelW + 6
+      const dotsEnd = margin + width - pageLabelW - 8
+      doc.text(label, margin + indent, y, { width: width - indent - 40, lineBreak: false, ellipsis: true })
+      doc.font(bodyFont).fontSize(9).fillColor(colors.mutedFg)
+      if (dotsEnd > dotsStart) {
+        const dot = ' .'
+        const dotW = doc.widthOfString(dot)
+        let dx = dotsStart
+        while (dx + dotW < dotsEnd) {
+          doc.text(dot, dx, y + 1.5, { lineBreak: false })
+          dx += dotW
+        }
+      }
+      doc.font(bodyFont).fontSize(10).fillColor(colors.fg)
+      doc.text(String(printedPage), margin + width - pageLabelW, y, { lineBreak: false, align: 'right' })
+      y += entryH
+    }
+    return pages
+  }
+
+  // ==================== SECTION HEADINGS (ornaments) ====================
+
+  private drawSectionHeading(
+    doc: any,
+    text: string,
+    o: { isPart: boolean; isSub: boolean; theme: DerivedTheme; y: number; margin: number; width: number; headingFont: string; colors: { primary: string; accent: string; fg: string } }
+  ): number {
+    const { y, margin, width, headingFont, colors, theme } = o
+    let cy = y
+    const size = o.isPart ? 24 : o.isSub ? 13.5 : 18
+    switch (theme.ornament) {
+      case 'band': {
+        if (o.isPart) {
+          const h = size + 26
+          doc.rect(margin, cy, width, h).fill(colors.primary)
+          doc.font(headingFont).fontSize(size).fillColor('#FFFFFF')
+          doc.text(text, margin + 14, cy + 12, { width: width - 28, lineBreak: false, ellipsis: true })
+          return cy + h + 20
+        }
+        const h = size + 16
+        doc.rect(margin, cy, width, h).fill(tint(colors.primary, 0.92))
+        doc.rect(margin, cy, 4, h).fill(colors.primary)
+        doc.font(headingFont).fontSize(size).fillColor(colors.primary)
+        doc.text(text, margin + 14, cy + 8, { width: width - 28, lineBreak: false, ellipsis: true })
+        return cy + h + 16
+      }
+      case 'left-bar': {
+        doc.rect(margin, cy + 2, 3.5, size + 8).fill(colors.accent)
+        doc.font(headingFont).fontSize(size).fillColor(colors.primary)
+        doc.text(text, margin + 14, cy, { width: width - 14 })
+        return doc.y + (o.isPart ? 14 : 10)
+      }
+      case 'kicker': {
+        doc.font(headingFont).fontSize(8).fillColor(colors.accent)
+        doc.text((o.isPart ? 'PART' : 'SECTION').toUpperCase(), margin, cy, { width, characterSpacing: 2.5 })
+        doc.font(headingFont).fontSize(size).fillColor(colors.fg)
+        doc.text(text, margin, cy + 14, { width })
+        return doc.y + (o.isPart ? 12 : 8)
+      }
+      case 'underline': {
+        doc.font(headingFont).fontSize(size).fillColor(colors.primary)
+        doc.text(text, margin, cy, { width })
+        doc.rect(margin, doc.y + 3, o.isPart ? width : Math.min(width, 160), o.isPart ? 2 : 1.4).fill(colors.primary)
+        return doc.y + (o.isPart ? 18 : 12)
+      }
+      case 'none': {
+        doc.font(headingFont).fontSize(size).fillColor(colors.primary)
+        doc.text(text, margin, cy, { width })
+        return doc.y + (o.isPart ? 14 : 10)
+      }
+      case 'rule':
+      default: {
+        doc.font(headingFont).fontSize(size).fillColor(colors.primary)
+        doc.text(text, margin, cy, { width })
+        doc.rect(margin, doc.y + 4, o.isPart ? width : 64, o.isPart ? 2.2 : 2).fill(colors.accent)
+        return doc.y + (o.isPart ? 18 : 14)
+      }
+    }
+  }
+
+  // ==================== COMPONENTS ====================
+
   private async renderComponent(
     doc: any,
     component: CanonicalComponent,
     opts: {
-      theme: ReturnType<typeof deriveTheme>
+      theme: DerivedTheme
       y: number
       ensureSpace: (currentY: number, needed: number) => number
       contentBottom: number
@@ -295,6 +666,7 @@ export class PdfRenderer implements DocumentRenderer {
         headingFont: string
       }
       document: RenderableDocument
+      subFontScale?: number
     }
   ): Promise<number> {
     const { theme, ensureSpace, ctx } = opts
@@ -307,7 +679,7 @@ export class PdfRenderer implements DocumentRenderer {
         const text = asString(component.content)
         if (!text) return y
         y = ensureSpace(y, 46)
-        doc.font(headingFont).fontSize(14).fillColor(primary)
+        doc.font(headingFont).fontSize(13.5).fillColor(primary)
         doc.text(text, margin, y, { width })
         return doc.y + 12
       }
@@ -317,6 +689,12 @@ export class PdfRenderer implements DocumentRenderer {
         if (!text) return y
         doc.font(bodyFont).fontSize(10.5).fillColor(fg)
         const height = doc.heightOfString(text, { width, lineGap: 3 })
+        // A paragraph taller than one page: flow it with pdfkit's own
+        // pagination instead of ensureSpace (which would loop forever).
+        if (height > opts.contentBottom - margin - 8) {
+          doc.text(text, margin, y, { width, align: 'justify', lineGap: 3 })
+          return doc.y + 10
+        }
         y = ensureSpace(y, height + 10)
         doc.text(text, margin, y, { width, align: 'justify', lineGap: 3 })
         return doc.y + 10
@@ -329,7 +707,7 @@ export class PdfRenderer implements DocumentRenderer {
         doc.font(bodyFont).fontSize(10.5).fillColor(fg)
         let iy = y
         for (const item of items) {
-          if (!item) continue // empty strings would still consume a bullet row
+          if (!item) continue
           const h = doc.heightOfString(item, { width: width - 18, lineGap: 2 })
           iy = ensureSpace(iy, h + 6)
           doc.fillColor(accent).circle(margin + 4, iy + 5, 2).fill()
@@ -418,84 +796,10 @@ export class PdfRenderer implements DocumentRenderer {
       case 'table': {
         const rows = asTable(component.content)
         if (rows.length === 0) return y
-        const [header, ...data] = rows
-        const cols = Math.max(header.length, 1)
-
-        // CONTENT-AWARE column widths: weight each column by its longest
-        // cell (bounded), with a floor so narrow numeric columns stay legible.
-        const rawW = header.map((_h, i) => {
-          let maxLen = String(header[i] ?? '').length
-          for (const row of data) maxLen = Math.max(maxLen, String(row[i] ?? '').length)
-          return Math.min(maxLen, 28)
-        })
-        const totalRaw = rawW.reduce((s, v) => s + v, 0) || 1
-        const minColW = Math.min(52, width / cols)
-        const colWidths = rawW.map((w) => Math.max(minColW, (w / totalRaw) * width))
-        // Normalize back to the exact content width.
-        const scaleW = width / colWidths.reduce((s, v) => s + v, 0)
-        for (let i = 0; i < colWidths.length; i++) colWidths[i] *= scaleW
-
-        const drawHeaderBand = (bandY: number) => {
-          doc.rect(margin, bandY, width, 24).fill(primary)
-          doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
-          let hx = margin
-          header.forEach((cell, i) => {
-            // WRAPPED header cells: lineBreak:false overflowed the column into
-            // the neighbor whenever a header was longer than its column.
-            doc.text(String(cell ?? ''), hx + 5, bandY + 8, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
-            hx += colWidths[i]
-          })
-          doc.font(bodyFont).fontSize(9)
-        }
-
-        // Header band
-        y = ensureSpace(y, 30 + 24)
-        drawHeaderBand(y)
-        let ry = y + 24
-
-        // Column x positions (prefix sums over the content-aware widths).
-        const colXs: number[] = [margin]
-        for (let i = 0; i < colWidths.length - 1; i++) colXs.push(colXs[i] + colWidths[i])
-
-        // Formula-aware cells: computed against the table itself (same
-        // contract as the DOCX renderer — unevaluable formulas stay visible).
-        const matrix = rows as CellMatrix
-        const cellText = (cell: string | number | null): string => {
-          if (typeof cell === 'string' && /^=/.test(cell.trim())) {
-            const computed = evaluateFormula(cell.trim(), matrix)
-            return computed !== null ? formatNumberForPdf(computed) : cell.trim()
-          }
-          return String(cell ?? '')
-        }
-
-        doc.font(bodyFont).fontSize(9)
-        data.forEach((row, rIdx) => {
-          const rowH = Math.max(
-            20,
-            ...row.map((cell, i) => doc.heightOfString(cellText(cell), { width: colWidths[i] - 12, lineGap: 1 }) + 10)
-          )
-          if (ry + rowH > opts.contentBottom) {
-            // Page break INSIDE the table: repeat the header band on the new
-            // page and continue from its top — never from a stale y.
-            y = ensureSpace(ry, rowH + 24 + 24)
-            drawHeaderBand(y)
-            ry = y + 24
-          }
-          if (rIdx % 2 === 1) {
-            doc.rect(margin, ry, width, rowH).fill(tint(primary, 0.96))
-          }
-          doc.rect(margin, ry, width, rowH).stroke(borderCol)
-          row.forEach((cell, i) => {
-            doc.fillColor(fg).text(cellText(cell), colXs[i] + 6, ry + 5, { width: colWidths[i] - 12, lineGap: 1 })
-          })
-          ry += rowH
-        })
-        return ry + 16
+        return this.drawTable(doc, rows, { y, ensureSpace, contentBottom: opts.contentBottom, margin, width, bodyFont, headingFont, theme, colors: { fg, primary, accent, mutedFg, borderCol } })
       }
 
       case 'equation': {
-        // Rendered as a crisp MathJax PNG (2x). Unparseable LaTeX falls back
-        // to the raw source rendered visibly — never a silent corruption.
         const image = await renderComponentImage(component, theme)
         if (image) {
           const eqScale = Math.min(1, (width * 0.8) / image.width)
@@ -545,6 +849,124 @@ export class PdfRenderer implements DocumentRenderer {
       }
     }
     void headingFont
+  }
+
+  // ==================== THEMED TABLE ====================
+
+  private drawTable(
+    doc: any,
+    rows: Array<Array<string | number | null>>,
+    o: {
+      y: number
+      ensureSpace: (currentY: number, needed: number) => number
+      contentBottom: number
+      margin: number
+      width: number
+      bodyFont: string
+      headingFont: string
+      theme: DerivedTheme
+      colors: { fg: string; primary: string; accent: string; mutedFg: string; borderCol: string }
+    }
+  ): number {
+    const { margin, width, bodyFont, headingFont, theme, colors } = o
+    let y = o.y
+    const [header, ...data] = rows
+    const cols = Math.max(header.length, 1)
+
+    const rawW = header.map((_h: unknown, i: number) => {
+      let maxLen = String(header[i] ?? '').length
+      for (const row of data) maxLen = Math.max(maxLen, String(row[i] ?? '').length)
+      return Math.min(maxLen, 28)
+    })
+    const totalRaw = rawW.reduce((s: number, v: number) => s + v, 0) || 1
+    const minColW = Math.min(52, width / cols)
+    const colWidths = rawW.map((w: number) => Math.max(minColW, (w / totalRaw) * width))
+    const scaleW = width / colWidths.reduce((s: number, v: number) => s + v, 0)
+    for (let i = 0; i < colWidths.length; i++) colWidths[i] *= scaleW
+
+    const drawHeaderBand = (bandY: number) => {
+      switch (theme.table) {
+        case 'minimal':
+        case 'editorial': {
+          doc.font(headingFont).fontSize(9).fillColor(colors.primary)
+          let hx = margin
+          header.forEach((cell: unknown, i: number) => {
+            doc.text(String(cell ?? ''), hx + 5, bandY + 6, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            hx += colWidths[i]
+          })
+          const ruleW = theme.table === 'editorial' ? width : Math.min(width, 99999)
+          doc.rect(margin, bandY + 20, ruleW, theme.table === 'editorial' ? 2 : 1.2).fill(colors.primary)
+          if (theme.table === 'editorial') doc.rect(margin, bandY, width, 1).fill(colors.primary)
+          doc.font(bodyFont).fontSize(9)
+          return bandY + 28
+        }
+        case 'dark-header': {
+          doc.rect(margin, bandY, width, 24).fill(colors.fg)
+          doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
+          let hx = margin
+          header.forEach((cell: unknown, i: number) => {
+            doc.text(String(cell ?? ''), hx + 5, bandY + 8, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            hx += colWidths[i]
+          })
+          doc.font(bodyFont).fontSize(9)
+          return bandY + 24
+        }
+        case 'boxed':
+        case 'banded':
+        default: {
+          doc.rect(margin, bandY, width, 24).fill(colors.primary)
+          doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
+          let hx = margin
+          header.forEach((cell: unknown, i: number) => {
+            doc.text(String(cell ?? ''), hx + 5, bandY + 8, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            hx += colWidths[i]
+          })
+          doc.font(bodyFont).fontSize(9)
+          return bandY + 24
+        }
+      }
+    }
+
+    y = o.ensureSpace(y, 30 + 24)
+    let ry = drawHeaderBand(y)
+
+    const colXs: number[] = [margin]
+    for (let i = 0; i < colWidths.length - 1; i++) colXs.push(colXs[i] + colWidths[i])
+
+    const matrix = rows as CellMatrix
+    const cellText = (cell: string | number | null): string => {
+      if (typeof cell === 'string' && /^=/.test(cell.trim())) {
+        const computed = evaluateFormula(cell.trim(), matrix)
+        return computed !== null ? formatNumberForPdf(computed) : cell.trim()
+      }
+      return String(cell ?? '')
+    }
+
+    doc.font(bodyFont).fontSize(9)
+    data.forEach((row: Array<string | number | null>, rIdx: number) => {
+      const rowH = Math.max(
+        20,
+        ...row.map((cell: string | number | null, i: number) => doc.heightOfString(cellText(cell), { width: colWidths[i] - 12, lineGap: 1 }) + 10)
+      )
+      if (ry + rowH > o.contentBottom) {
+        y = o.ensureSpace(ry, rowH + 24 + 24)
+        ry = drawHeaderBand(y)
+      }
+      // row backgrounds
+      if (theme.table === 'banded' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint(colors.primary, 0.96))
+      if (theme.table === 'dark-header' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint('#64748B', 0.85))
+      if (theme.table === 'editorial' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint(colors.primary, 0.95))
+      // borders
+      if (theme.table === 'boxed') doc.rect(margin, ry, width, rowH).stroke(colors.borderCol)
+      else {
+        doc.rect(margin, ry, width, rowH).lineWidth(0.4).stroke(colors.borderCol)
+      }
+      row.forEach((cell: string | number | null, i: number) => {
+        doc.fillColor(colors.fg).text(cellText(cell), colXs[i] + 6, ry + 5, { width: colWidths[i] - 12, lineGap: 1 })
+      })
+      ry += rowH
+    })
+    return ry + 16
   }
 }
 

@@ -9,7 +9,7 @@
 
 import type { ColorPalette } from '@/types'
 
-export type ChartKind = 'bar' | 'line' | 'pie' | 'donut' | 'area'
+export type ChartKind = 'bar' | 'line' | 'pie' | 'donut' | 'area' | 'hbar' | 'stacked' | 'scatter'
 
 export interface ChartSpec {
   chartType?: string
@@ -17,6 +17,8 @@ export interface ChartSpec {
   categories?: string[]
   series?: Array<{ name?: string; data: Array<number | string | null> }>
   note?: string
+  xLabel?: string
+  yLabel?: string
 }
 
 /** Normalized chart — series always present after validation. */
@@ -26,6 +28,8 @@ export interface NormalizedChart {
   categories: string[]
   series: Array<{ name: string; data: Array<number | null> }>
   note?: string
+  xLabel?: string
+  yLabel?: string
 }
 
 export interface RenderedChart {
@@ -44,6 +48,9 @@ function normalizeKind(raw: unknown): ChartKind {
   if (k === 'line' || k === 'pie' || k === 'donut' || k === 'area' || k === 'doughnut') {
     return k === 'doughnut' ? 'donut' : (k as ChartKind)
   }
+  if (k === 'hbar' || k === 'horizontal-bar' || k === 'horizontal_bar' || k === 'horizontalbar') return 'hbar'
+  if (k === 'stacked' || k === 'stacked-bar' || k === 'stackedbar') return 'stacked'
+  if (k === 'scatter' || k === 'xy') return 'scatter'
   return 'bar'
 }
 
@@ -79,7 +86,31 @@ export function normalizeChartSpec(content: unknown): NormalizedChart | null {
     // Single series required; take the first with numeric data.
     const s = series[0]
     if (s.data.filter((d) => d !== null).length < 2) return null
-    return { chartType: kind, title: typeof c.title === 'string' ? c.title : '', series: [s], categories, note: typeof c.note === 'string' ? c.note : undefined }
+    return {
+      chartType: kind,
+      title: typeof c.title === 'string' ? c.title : '',
+      series: [s],
+      categories,
+      note: typeof c.note === 'string' ? c.note : undefined,
+      xLabel: typeof c.xLabel === 'string' ? c.xLabel : undefined,
+      yLabel: typeof c.yLabel === 'string' ? c.yLabel : undefined,
+    }
+  }
+
+  if (kind === 'scatter') {
+    // Scatter: each series is a set of (x, y) points built from paired data
+    // or from categories as x. At least 3 points required for meaning.
+    const pts = series[0]?.data.filter((d) => d !== null).length ?? 0
+    if (pts < 3) return null
+    return {
+      chartType: kind,
+      title: typeof c.title === 'string' ? c.title : '',
+      series,
+      categories,
+      note: typeof c.note === 'string' ? c.note : undefined,
+      xLabel: typeof c.xLabel === 'string' ? c.xLabel : undefined,
+      yLabel: typeof c.yLabel === 'string' ? c.yLabel : undefined,
+    }
   }
 
   // Cartesian charts need at least 2 categories or 3 points.
@@ -91,6 +122,8 @@ export function normalizeChartSpec(content: unknown): NormalizedChart | null {
     series,
     categories,
     note: typeof c.note === 'string' ? c.note : undefined,
+    xLabel: typeof c.xLabel === 'string' ? c.xLabel : undefined,
+    yLabel: typeof c.yLabel === 'string' ? c.yLabel : undefined,
   }
 }
 
@@ -133,12 +166,13 @@ export async function renderChart(
             },
           ]
         : spec.series.map((s, i) => ({
-            type: kind === 'area' ? 'line' : kind,
+            type: kind === 'area' ? 'line' : kind === 'scatter' ? 'scatter' : 'bar' === kind || 'hbar' === kind || 'stacked' === kind ? 'bar' : 'line',
             name: s.name || `Series ${i + 1}`,
             smooth: kind === 'line' || kind === 'area',
             areaStyle: kind === 'area' ? { opacity: 0.25 } : undefined,
+            stack: kind === 'stacked' ? 'total' : undefined,
             barMaxWidth: 42,
-            itemStyle: undefined,
+            symbolSize: kind === 'scatter' ? 9 : undefined,
             data: s.data,
           }))
 
@@ -159,20 +193,55 @@ export async function renderChart(
         kind !== 'pie' && kind !== 'donut' && spec.series.length > 1
           ? { bottom: 4, textStyle: { color: mutedColor, fontSize: 11 } }
           : undefined,
-      grid: { left: 56, right: 24, top: spec.title ? 52 : 24, bottom: spec.series.length > 1 && kind !== 'pie' && kind !== 'donut' ? 44 : 32 },
+      grid: {
+        left: 56,
+        right: 24,
+        top: spec.title ? 52 : 24,
+        bottom: (spec.series.length > 1 && kind !== 'pie' && kind !== 'donut' ? 44 : 32) + (spec.xLabel ? 14 : 0),
+      },
       xAxis:
         kind === 'pie' || kind === 'donut'
           ? undefined
-          : {
-              type: 'category',
-              data: spec.categories ?? [],
-              axisLine: { lineStyle: { color: borderColor } },
-              axisLabel: { color: mutedColor, fontSize: 11, interval: 0, rotate: (spec.categories?.length ?? 0) > 7 ? 30 : 0 },
-            },
+          : kind === 'hbar'
+            ? {
+                type: 'value',
+                name: spec.xLabel || undefined,
+                nameTextStyle: { color: mutedColor, fontSize: 10 },
+                splitLine: { lineStyle: { color: borderColor, type: 'dashed' } },
+                axisLabel: { color: mutedColor, fontSize: 11 },
+              }
+            : {
+                type: kind === 'scatter' ? 'value' : 'category',
+                data: kind === 'scatter' ? undefined : spec.categories ?? [],
+                name: spec.xLabel || undefined,
+                nameTextStyle: { color: mutedColor, fontSize: 10 },
+                axisLine: { lineStyle: { color: borderColor } },
+                axisLabel: {
+                  color: mutedColor,
+                  fontSize: 11,
+                  interval: 0,
+                  rotate: (spec.categories?.length ?? 0) > 7 ? 30 : 0,
+                },
+              },
       yAxis:
         kind === 'pie' || kind === 'donut'
           ? undefined
-          : { type: 'value', splitLine: { lineStyle: { color: borderColor, type: 'dashed' } }, axisLabel: { color: mutedColor, fontSize: 11 } },
+          : kind === 'hbar'
+            ? {
+                type: 'category',
+                data: spec.categories ?? [],
+                name: spec.yLabel || undefined,
+                nameTextStyle: { color: mutedColor, fontSize: 10 },
+                axisLine: { lineStyle: { color: borderColor } },
+                axisLabel: { color: mutedColor, fontSize: 11 },
+              }
+            : {
+                type: 'value',
+                name: spec.yLabel || undefined,
+                nameTextStyle: { color: mutedColor, fontSize: 10 },
+                splitLine: { lineStyle: { color: borderColor, type: 'dashed' } },
+                axisLabel: { color: mutedColor, fontSize: 11 },
+              },
       series: seriesData,
     })
 

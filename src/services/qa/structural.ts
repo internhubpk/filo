@@ -246,6 +246,68 @@ export function validateDocument(
   }
   checks.push({ id: 'diagrams-valid', label: 'Diagrams carry labeled steps', passed: diagIssues === 0 })
 
+  // --- Check 12: mandatory visuals present (document-scale engine) ---------
+  // Blueprint sections may declare visuals they MUST carry. If the content
+  // stage ignored one, flag it — the document goes out with its planned
+  // charts/tables or the job says so loudly.
+  let missingVisuals = 0
+  const VISUAL_KIND_TO_TYPE: Record<string, string[]> = {
+    chart: ['chart'],
+    table: ['table'],
+    diagram: ['diagram'],
+    metrics: ['metric_grid'],
+    timeline: ['timeline'],
+    two_column: ['two_column'],
+  }
+  for (const s of spec.sections) {
+    const planned = (s as { visuals?: Array<{ kind?: string }> }).visuals ?? []
+    if (planned.length === 0) continue
+    const producedTypes = new Set(
+      (bySection.get(s.id) ?? []).map((c) => c.type.toLowerCase())
+    )
+    for (const v of planned) {
+      const wanted = VISUAL_KIND_TO_TYPE[v.kind ?? ''] ?? []
+      if (wanted.length === 0) continue
+      if (!wanted.some((t) => producedTypes.has(t))) {
+        missingVisuals++
+        issues.push({
+          sectionId: s.id,
+          type: 'PLANNED_VISUAL_MISSING',
+          severity: 'warning',
+          message: `Section "${s.title}" was planned to include a ${v.kind} but none was generated.`,
+        })
+      }
+    }
+  }
+  checks.push({ id: 'planned-visuals', label: 'Planned visuals present', passed: missingVisuals === 0 })
+
+  // --- Check 13: thin-section depth gate -----------------------------------
+  // Catches the classic "2-3 thin paragraphs" defect: a body section whose
+  // total paragraph word count is far below any publishable floor. Info-level
+  // (depth is a gradient), but visible in every QA report.
+  let thinSections = 0
+  const THIN_WORD_FLOOR = 60
+  const isDocLike = spec.outputFormat === 'DOCX' || spec.outputFormat === 'PDF'
+  if (isDocLike) {
+    for (const s of spec.sections) {
+      const level = (s as { level?: string }).level || 'chapter'
+      if (level === 'part') continue // part dividers are intentionally short
+      const words = (bySection.get(s.id) ?? [])
+        .filter((c) => c.type === 'PARAGRAPH' || c.type === 'paragraph')
+        .reduce((acc, c) => acc + (typeof c.content === 'string' ? c.content.split(/\s+/).filter(Boolean).length : 0), 0)
+      if (words > 0 && words < THIN_WORD_FLOOR) {
+        thinSections++
+        issues.push({
+          sectionId: s.id,
+          type: 'THIN_SECTION',
+          severity: 'info',
+          message: `Section "${s.title}" body is only ${words} words — below the ${THIN_WORD_FLOOR}-word publishable floor.`,
+        })
+      }
+    }
+    checks.push({ id: 'section-depth', label: 'Sections meet the depth floor', passed: thinSections === 0 })
+  }
+
   const errors = issues.filter((i) => i.severity === 'error').length
   const warnings = issues.filter((i) => i.severity === 'warning').length
   const score = Math.max(0, 100 - errors * 15 - warnings * 5)

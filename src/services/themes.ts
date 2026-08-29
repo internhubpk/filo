@@ -42,6 +42,74 @@ export interface ThemeTokens {
   headingCase: 'title' | 'upper'
 }
 
+// ==================== PER-THEME DESIGN DIALECTS ====================
+// The tokens above define colors/fonts; the dialects below define HOW the
+// design is expressed structurally. Renderers MUST consume these — they are
+// what makes 18 themes render as 18 visibly different designs instead of one
+// blue template with palette swaps.
+
+/** How a top-level (H1/part) heading is ornamented. */
+export type HeadingOrnament =
+  | 'rule'        // thin accent rule under the heading (executive, corporate)
+  | 'kicker'      // small caps kicker line above the heading (editorial, startup)
+  | 'band'        // full-width filled band behind the heading (government, financial)
+  | 'left-bar'    // solid accent bar on the left (modern-tech, research)
+  | 'underline'   // heavy underline only, no fill (academic, legal)
+  | 'none'        // pure typography (minimal, luxury)
+
+/** Footer composition for paginated formats. */
+export type FooterStyle = 'page' | 'page-of' | 'brand-page' | 'minimal'
+
+const HEADING_ORNAMENTS: Record<string, HeadingOrnament> = {
+  executive: 'rule',
+  corporate: 'rule',
+  academic: 'underline',
+  research: 'left-bar',
+  'modern-tech': 'left-bar',
+  startup: 'kicker',
+  minimal: 'none',
+  editorial: 'kicker',
+  luxury: 'none',
+  financial: 'band',
+  medical: 'rule',
+  legal: 'underline',
+  government: 'band',
+  education: 'left-bar',
+  creative: 'kicker',
+  'professional-dark': 'left-bar',
+  portfolio: 'left-bar',
+  marketing: 'kicker',
+}
+
+const FOOTER_STYLES: Record<string, FooterStyle> = {
+  executive: 'brand-page',
+  corporate: 'page-of',
+  academic: 'minimal',
+  research: 'page-of',
+  'modern-tech': 'page',
+  startup: 'page',
+  minimal: 'page',
+  editorial: 'brand-page',
+  luxury: 'minimal',
+  financial: 'brand-page',
+  medical: 'page-of',
+  legal: 'minimal',
+  government: 'page-of',
+  education: 'page',
+  creative: 'page',
+  'professional-dark': 'page',
+  portfolio: 'page-of',
+  marketing: 'page',
+}
+
+export function headingOrnamentFor(tokens: ThemeTokens): HeadingOrnament {
+  return HEADING_ORNAMENTS[tokens.id] ?? 'rule'
+}
+
+export function footerStyleFor(tokens: ThemeTokens): FooterStyle {
+  return FOOTER_STYLES[tokens.id] ?? 'page'
+}
+
 const BASE_LAYOUT: LayoutConfig = {
   pageSize: 'A4',
   orientation: 'portrait',

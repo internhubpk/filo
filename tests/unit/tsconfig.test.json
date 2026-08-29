@@ -24,6 +24,7 @@
   "include": [
     "../../src/types/index.ts",
     "../../src/services/themes.ts",
+    "../../src/services/doc-scale.ts",
     "../../src/services/design-planning.ts",
     "../../src/services/artifact-planning.ts",
     "../../src/services/ingestion/types.ts",

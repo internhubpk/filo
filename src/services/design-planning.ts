@@ -18,6 +18,7 @@ import { resolveTheme, themeCatalogForPrompt, themeExists } from './themes'
 import type { DesignSpecification } from '@/types'
 import type { DocumentFormat } from '@/services/artifact-planning'
 import { extractJsonObject } from '@/services/artifact-planning'
+import { resolveDocumentScale, type DocumentScale } from './doc-scale'
 
 // ==================== DESIGN PLAN MODEL ====================
 
@@ -38,6 +39,27 @@ export interface DesignPlan {
   useCharts: boolean
   useTables: boolean
   useMetrics: boolean
+}
+
+/**
+ * The full generation brief: design direction + resolved document scale.
+ * The scale combines the designer's contentDepth with EXPLICIT evidence in
+ * the user's request ("100 pages notes" always wins) — see doc-scale.ts.
+ */
+export interface GenerationBrief {
+  plan: DesignPlan
+  scale: DocumentScale
+}
+
+/** Resolve design + scale in one step (used by the worker's planning stage). */
+export function buildGenerationBrief(
+  plan: DesignPlan,
+  userRequest: string
+): GenerationBrief {
+  return {
+    plan,
+    scale: resolveDocumentScale(userRequest, plan.contentDepth),
+  }
 }
 
 // ==================== PROMPT ====================

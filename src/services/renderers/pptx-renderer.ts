@@ -1,15 +1,16 @@
 // =============================================================================
 // PPTX RENDERER (spec §14) — presentation-grade slides via pptxgenjs
 // =============================================================================
-// Layout-first slide construction with consistent theme tokens:
-//   • cover slide with accent geometry + title/subtitle/date
-//   • section dividers, bullet layouts, metric slides (big numbers),
-//     chart slides (PNG from the chart engine), table slides, two-column,
-//     timeline slides, diagram slides (flowchart/hierarchy), quote slides,
-//     equation slides (MathJax PNG), closing slide
-//   • overflow guards: per-slide text budget, bullet caps, height tracking
-//     with break-to-next-slide, min font sizes, long tables SPLIT across
-//     slides with a repeated header row
+// v2 — DECK DESIGN SYSTEM:
+//   • cover → AGENDA slide (decks with ≥5 content sections) → part dividers
+//     with outline numbers → content slides → closing slide
+//   • theme-dialect styling: headingCase, dark mode, accent geometry, footer
+//     with deck title + slide number on every content slide
+//   • layout variety driven by component mix: chart-focus, table-focus,
+//     big-number KPI, two-column, quote, callout — never "bullets again"
+//   • overflow guards: per-slide vertical budget, bullet caps, tables SPLIT
+//     across continuation slides (rows AND columns — nothing is silently
+//     dropped), repeated header row on every chunk
 // =============================================================================
 
 import type { RendererOutput, DocumentRenderer, RenderableDocument, CanonicalComponent } from './shared'
@@ -31,6 +32,7 @@ const MARGIN = 0.5
 const CONTENT_W = SLIDE_W - MARGIN * 2
 const MIN_BODY_PT = 12
 const MAX_BULLETS = 6
+const MAX_TABLE_COLS = 6
 
 export class PptxRenderer implements DocumentRenderer {
   format = 'PPTX' as const
@@ -55,7 +57,8 @@ export class PptxRenderer implements DocumentRenderer {
     const muted = hex6(colors.mutedForeground, '64748B')
     const headingFont = spec.design?.typography?.headingFont || 'Calibri'
     const bodyFont = spec.design?.typography?.bodyFont || 'Calibri'
-    const upperHeadings = theme.tokens.headingCase === 'upper'
+    const upperHeadings = theme.headingCase === 'upper'
+    const titleCase = (t: string) => (upperHeadings ? t.toUpperCase() : t)
 
     const sections = spec.sections
     const coverSection = sections[0]?.type === 'cover' ? sections[0] : null
@@ -64,21 +67,49 @@ export class PptxRenderer implements DocumentRenderer {
     // ---------------- COVER SLIDE ----------------
     const cover = pres.addSlide()
     cover.background = { color: dark ? '0B1220' : hex6(colors.muted, 'F8FAFC') }
-    // accent geometry
-    cover.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 0.18, fill: { color: primary } })
-    cover.addShape('rect', { x: MARGIN, y: SLIDE_H - 0.75, w: 2.2, h: 0.06, fill: { color: accent } })
-    const coverTitle = coverSection?.title ?? (spec.title || 'Untitled')
-    cover.addText(upperHeadings ? coverTitle.toUpperCase() : coverTitle, {
-      x: MARGIN,
-      y: 1.5,
-      w: CONTENT_W,
-      h: 1.6,
-      fontSize: 40,
-      bold: true,
-      color: dark ? 'F8FAFC' : primary,
-      fontFace: headingFont,
-      valign: 'middle',
-    })
+    // accent geometry per theme ornament dialect
+    if (theme.ornament === 'band') {
+      cover.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 1.6, fill: { color: primary } })
+      cover.addText(titleCase(coverSection?.title ?? (spec.title || 'Untitled')), {
+        x: MARGIN,
+        y: 0.2,
+        w: CONTENT_W,
+        h: 1.2,
+        fontSize: 36,
+        bold: true,
+        color: 'FFFFFF',
+        fontFace: headingFont,
+        valign: 'middle',
+      })
+    } else if (theme.ornament === 'left-bar') {
+      cover.addShape('rect', { x: 0, y: 0, w: 0.22, h: SLIDE_H, fill: { color: primary } })
+      cover.addShape('rect', { x: 0.22, y: 0, w: 0.06, h: SLIDE_H, fill: { color: accent } })
+      cover.addText(titleCase(coverSection?.title ?? (spec.title || 'Untitled')), {
+        x: MARGIN + 0.25,
+        y: 1.5,
+        w: CONTENT_W - 0.3,
+        h: 1.6,
+        fontSize: 40,
+        bold: true,
+        color: dark ? 'F8FAFC' : primary,
+        fontFace: headingFont,
+        valign: 'middle',
+      })
+    } else {
+      cover.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 0.18, fill: { color: primary } })
+      cover.addShape('rect', { x: MARGIN, y: SLIDE_H - 0.75, w: 2.2, h: 0.06, fill: { color: accent } })
+      cover.addText(titleCase(coverSection?.title ?? (spec.title || 'Untitled')), {
+        x: MARGIN,
+        y: 1.5,
+        w: CONTENT_W,
+        h: 1.6,
+        fontSize: 40,
+        bold: true,
+        color: dark ? 'F8FAFC' : primary,
+        fontFace: headingFont,
+        valign: 'middle',
+      })
+    }
     const coverComponents = document.sections.find((s) => s.id === coverSection?.id)?.components ?? []
     const coverSubtitle =
       asString(coverComponents.find((c) => c.type === 'paragraph')?.content) || spec.description || ''
@@ -117,19 +148,123 @@ export class PptxRenderer implements DocumentRenderer {
 
     let slideCount = 1 // cover already added
 
+    const addFooter = (slide: any) => {
+      slideCount++
+      slide.addText(spec.title?.slice(0, 48) ?? '', {
+        x: MARGIN,
+        y: SLIDE_H - 0.42,
+        w: 4.6,
+        h: 0.3,
+        fontSize: 8.5,
+        color: dark ? '475569' : '94A3B8',
+        fontFace: bodyFont,
+        align: 'left',
+      })
+      slide.addText(String(slideCount), {
+        x: SLIDE_W - 0.7,
+        y: SLIDE_H - 0.42,
+        w: 0.4,
+        h: 0.3,
+        fontSize: 10,
+        color: dark ? '64748B' : '94A3B8',
+        align: 'right',
+      })
+    }
+
+    // ---------------- AGENDA SLIDE ----------------
+    const agendaEntries = contentSections.filter(
+      (s) => (s.level || 'chapter') !== 'part'
+    )
+    if (agendaEntries.length >= 5 && agendaEntries.length <= 12) {
+      const agenda = pres.addSlide()
+      agenda.background = { color: bg }
+      agenda.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 0.1, fill: { color: accent } })
+      agenda.addText(titleCase('Agenda'), {
+        x: MARGIN,
+        y: 0.28,
+        w: CONTENT_W,
+        h: 0.55,
+        fontSize: 24,
+        bold: true,
+        color: dark ? 'F8FAFC' : primary,
+        fontFace: headingFont,
+      })
+      const half = Math.ceil(agendaEntries.length / 2)
+      const colW = (CONTENT_W - 0.4) / 2
+      const mkAgendaCol = (entries: { number?: string; title: string }[], x: number) => {
+        agenda.addText(
+          entries.map((e) => ({
+            text: e.number ? `${e.number}  ${e.title}` : e.title,
+            options: { bullet: { characterCode: '2022' }, breakLine: true },
+          })),
+          {
+            x,
+            y: 1.05,
+            w: colW,
+            h: 3.9,
+            fontSize: Math.max(MIN_BODY_PT, 13),
+            color: dark ? 'E2E8F0' : fg,
+            fontFace: bodyFont,
+            valign: 'top',
+            lineSpacingMultiple: 1.25,
+          }
+        )
+      }
+      mkAgendaCol(agendaEntries.slice(0, half).map((s: any) => ({ number: s.number, title: String(s.title) })), MARGIN)
+      mkAgendaCol(
+        agendaEntries.slice(half).map((s: any) => ({ number: s.number, title: String(s.title) })),
+        MARGIN + colW + 0.4
+      )
+      addFooter(agenda)
+    }
+
     // ---------------- CONTENT SLIDES ----------------
     for (const section of contentSections) {
       const components = (document.sections.find((s) => s.id === section.id)?.components ?? [])
         .slice()
         .sort((a, b) => a.order - b.order)
+      const level = ((section as { level?: string }).level || 'chapter').toLowerCase()
+      const num = (section as { number?: string }).number
 
-      // Section divider for 'heading'-type sections with no real content
-      if (section.type === 'heading' && components.length <= 1) {
+      // ---- PART DIVIDER ----
+      if (level === 'part' && components.length <= 1) {
         const divider = pres.addSlide()
-        divider.background = { color: dark ? '0B1220' : 'FFFFFF' }
+        divider.background = { color: dark ? '0B1220' : hex6(colors.primary, '1E3A5F') }
+        const onDark = dark || true
+        if (num) {
+          divider.addText(`PART ${num}`, {
+            x: MARGIN,
+            y: SLIDE_H / 2 - 1.15,
+            w: CONTENT_W,
+            h: 0.4,
+            fontSize: 15,
+            bold: true,
+            color: onDark ? hex6(colors.accent, '3B82F6') : accent,
+            fontFace: bodyFont,
+            charSpacing: 4,
+          })
+        }
+        divider.addText(titleCase(section.title), {
+          x: MARGIN,
+          y: SLIDE_H / 2 - 0.7,
+          w: CONTENT_W,
+          h: 1.4,
+          fontSize: 32,
+          bold: true,
+          color: 'FFFFFF',
+          fontFace: headingFont,
+          valign: 'middle',
+        })
+        divider.addShape('rect', { x: MARGIN, y: SLIDE_H / 2 + 0.85, w: 1.6, h: 0.05, fill: { color: accent } })
+        continue
+      }
+
+      // ---- Section divider for 'heading'-type sections with no real content
+      if (section.type === 'heading' && components.length <= 1 && level !== 'part') {
+        const divider = pres.addSlide()
+        divider.background = { color: bg }
         divider.addShape('rect', { x: MARGIN, y: SLIDE_H / 2 - 0.6, w: 0.08, h: 1.2, fill: { color: accent } })
-        const dividerTitle = section.title
-        divider.addText(upperHeadings ? dividerTitle.toUpperCase() : dividerTitle, {
+        divider.addText(titleCase(section.title), {
           x: MARGIN + 0.3,
           y: SLIDE_H / 2 - 0.8,
           w: CONTENT_W - 0.4,
@@ -140,18 +275,25 @@ export class PptxRenderer implements DocumentRenderer {
           fontFace: headingFont,
           valign: 'middle',
         })
+        addFooter(divider)
         continue
       }
 
       // Partition components into slide-sized groups (overflow guard).
       const groups = this.groupComponents(components)
-      for (const group of groups) {
+      for (let gi = 0; gi < groups.length; gi++) {
+        const group = groups[gi]
+        const isFirstSlice = gi === 0
+        const st = isFirstSlice ? section.title : `${section.title} (cont.)`
         const slide = pres.addSlide()
         slide.background = { color: bg }
-        // Title bar
-        slide.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 0.1, fill: { color: accent } })
-        const st = section.title
-        slide.addText(upperHeadings ? st.toUpperCase() : st, {
+        // Title bar per theme dialect
+        if (theme.ornament === 'left-bar') {
+          slide.addShape('rect', { x: 0, y: 0, w: 0.14, h: SLIDE_H, fill: { color: primary } })
+        } else {
+          slide.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 0.1, fill: { color: accent } })
+        }
+        slide.addText(titleCase(st), {
           x: MARGIN,
           y: 0.28,
           w: CONTENT_W,
@@ -166,14 +308,38 @@ export class PptxRenderer implements DocumentRenderer {
         const bottomLimit = SLIDE_H - 0.35
         let speakerNotes = ''
 
+        // Wide tables spawn chrome-identical continuation slides.
+        const addContinuationSlide = (draw: (s: any) => void, contTitle: string) => {
+          const cont = pres.addSlide()
+          cont.background = { color: bg }
+          if (theme.ornament === 'left-bar') {
+            cont.addShape('rect', { x: 0, y: 0, w: 0.14, h: SLIDE_H, fill: { color: primary } })
+          } else {
+            cont.addShape('rect', { x: 0, y: 0, w: SLIDE_W, h: 0.1, fill: { color: accent } })
+          }
+          cont.addText(titleCase(`${section.title}${contTitle}`), {
+            x: MARGIN,
+            y: 0.28,
+            w: CONTENT_W,
+            h: 0.55,
+            fontSize: 24,
+            bold: true,
+            color: dark ? 'F8FAFC' : primary,
+            fontFace: headingFont,
+          })
+          draw(cont)
+          addFooter(cont)
+        }
+
         for (const component of group) {
           if (y > bottomLimit - 0.4) break
           const consumed = await this.addComponent(slide, component, {
             y,
             bottomLimit,
-            colors: { fg, primary, accent, muted, dark },
+            colors: { fg, primary, accent, muted, dark, bg },
             fonts: { headingFont, bodyFont },
             theme,
+            addContinuationSlide,
           })
           y += consumed
           if (typeof component.content === 'string') {
@@ -181,17 +347,7 @@ export class PptxRenderer implements DocumentRenderer {
           }
         }
 
-        // Slide number
-        slideCount++
-        slide.addText(String(slideCount), {
-          x: SLIDE_W - 0.7,
-          y: SLIDE_H - 0.42,
-          w: 0.4,
-          h: 0.3,
-          fontSize: 10,
-          color: dark ? '64748B' : '94A3B8',
-          align: 'right',
-        })
+        addFooter(slide)
 
         if (speakerNotes.trim()) {
           slide.addNotes(speakerNotes.trim().slice(0, 900))
@@ -302,9 +458,11 @@ export class PptxRenderer implements DocumentRenderer {
     ctx: {
       y: number
       bottomLimit: number
-      colors: { fg: string; primary: string; accent: string; muted: string; dark: boolean }
+      colors: { fg: string; primary: string; accent: string; muted: string; dark: boolean; bg: string }
       fonts: { headingFont: string; bodyFont: string }
       theme: ReturnType<typeof deriveTheme>
+      /** Spawns a chrome-identical continuation slide (wide-table columns). */
+      addContinuationSlide?: (draw: (s: any) => void, contTitle: string) => void
     }
   ): Promise<number> {
     const { y, bottomLimit, colors, fonts, theme } = ctx
@@ -427,6 +585,8 @@ export class PptxRenderer implements DocumentRenderer {
             fill: { color: colors.dark ? '111C2E' : 'FFFFFF' },
             line: { color: colors.dark ? '334155' : 'E2E8F0', width: 1 },
           })
+          // accent top edge per card
+          slide.addShape('rect', { x, y, w: cardW, h: 0.05, fill: { color: colors.accent } })
           slide.addText(m.label, {
             x: x + 0.08,
             y: y + 0.1,
@@ -530,33 +690,52 @@ export class PptxRenderer implements DocumentRenderer {
       }
 
       case 'table': {
-        // Long tables SPLIT across slides (previous behavior truncated rows >7
-        // silently — real data loss on a data slide). The caller guarantees
-        // vertical budget; each chunk repeats the header row.
+        // Tables are NEVER silently truncated: rows AND columns split across
+        // continuation slides with the header row repeated on every chunk.
         const rows = asTable(component.content)
         if (rows.length === 0) return 0
         const [header, ...dataRows] = rows
+        const colGroups: number[][] = []
+        for (let cStart = 0; cStart < header.length; cStart += MAX_TABLE_COLS) {
+          colGroups.push(
+            Array.from({ length: Math.min(MAX_TABLE_COLS, header.length - cStart) }, (_, k) => cStart + k)
+          )
+        }
         const maxDataRows = Math.max(3, Math.min(6, Math.floor((availH - 0.4) / 0.3)))
+        const drawChunk = (target: any, cols: number[], rowSlice: Array<Array<string | number | null>>) => {
+          const tableRows = [header, ...rowSlice].map((r, ri) =>
+            cols.map((ci) => ({
+              text: String(r[ci] ?? ''),
+              options: ri === 0
+                ? { bold: true, color: 'FFFFFF', fill: { color: colors.primary }, fontSize: 11 }
+                : { color: colors.dark ? 'E2E8F0' : colors.fg, fontSize: Math.max(MIN_BODY_PT, 11) },
+            }))
+          )
+          target.addTable(tableRows, {
+            x: MARGIN,
+            y,
+            w: CONTENT_W,
+            border: { type: 'solid', color: colors.dark ? '334155' : 'E2E8F0', pt: 0.5 },
+            rowH: 0.3,
+            valign: 'middle',
+          })
+        }
         const chunk = dataRows.slice(0, maxDataRows)
-        const tableRows = [header, ...chunk].map((r, ri) =>
-          r.slice(0, 6).map((cell) => ({
-            text: String(cell ?? ''),
-            options: ri === 0
-              ? { bold: true, color: 'FFFFFF', fill: { color: colors.primary }, fontSize: 11 }
-              : { color: colors.dark ? 'E2E8F0' : colors.fg, fontSize: Math.max(MIN_BODY_PT, 11) },
-          }))
-        )
+        drawChunk(slide, colGroups[0], chunk)
         const h = Math.min(availH, 0.4 + (chunk.length + 1) * 0.3)
-        slide.addTable(tableRows, {
-          x: MARGIN,
-          y,
-          w: CONTENT_W,
-          border: { type: 'solid', color: colors.dark ? '334155' : 'E2E8F0', pt: 0.5 },
-          rowH: 0.3,
-          valign: 'middle',
-        })
-        if (dataRows.length > chunk.length) {
-          slide.addText(`… ${dataRows.length - chunk.length} more rows in the source data`, {
+        let consumed = h + 0.2
+        const moreRows = dataRows.length - chunk.length
+        // Column groups beyond the first get their own continuation slides;
+        // leftover rows get a final continuation slide.
+        if (colGroups.length > 1 && ctx.addContinuationSlide) {
+          for (let g = 1; g < colGroups.length; g++) {
+            const label = ` (columns ${colGroups[g][0] + 1}–${colGroups[g][colGroups[g].length - 1] + 1})`
+            ctx.addContinuationSlide((s) => drawChunk(s, colGroups[g], chunk), label)
+          }
+          if (moreRows > 0) {
+            ctx.addContinuationSlide((s) => drawChunk(s, colGroups[0], dataRows.slice(maxDataRows)), ' (continued)')
+          }
+          slide.addText('table continues on the following slide(s)', {
             x: MARGIN,
             y: y + h + 0.02,
             w: CONTENT_W,
@@ -565,9 +744,20 @@ export class PptxRenderer implements DocumentRenderer {
             italic: true,
             color: colors.muted,
           })
-          return h + 0.32
+          consumed = h + 0.32
+        } else if (moreRows > 0) {
+          slide.addText(`${moreRows} more rows in the source data`, {
+            x: MARGIN,
+            y: y + h + 0.02,
+            w: CONTENT_W,
+            h: 0.25,
+            fontSize: 9,
+            italic: true,
+            color: colors.muted,
+          })
+          consumed = h + 0.32
         }
-        return h + 0.2
+        return consumed
       }
 
       case 'two_column': {
@@ -583,6 +773,7 @@ export class PptxRenderer implements DocumentRenderer {
             fill: { color: colors.dark ? '111C2E' : 'FFFFFF' },
             line: { color: colors.dark ? '334155' : 'E2E8F0', width: 1 },
           })
+          slide.addShape('rect', { x, y, w: colW, h: 0.05, fill: { color: colors.accent } })
           slide.addText(title, {
             x: x + 0.12,
             y: y + 0.08,

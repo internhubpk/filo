@@ -1,14 +1,21 @@
 // =============================================================================
 // DOCX RENDERER (spec §12) — native, editable Word output via the `docx` package
 // =============================================================================
-// Professional native DOCX generation (NEVER a PDF→DOCX conversion):
-//   • themed cover page with accent bar, subtitle, date, company
-//   • table of contents (Word field — updates natively in Word)
-//   • themed headings/paragraphs/tables (header fill, zebra rows, borders)
-//   • metric grids, callouts, quotes, key-takeaway boxes, two-column comparisons
-//   • charts + diagrams embedded as crisp PNG images with numbered captions
-//   • NATIVE Word equations (OMML math zone) with PNG fallback for exotic LaTeX
-//   • headers/footers with page numbers, page breaks between sections
+// v2 — THEME-DIALECT RENDERING. Every theme now renders as a visibly different
+// document design, driven by ThemeTokens + design dialects (themes.ts):
+//   • 5 cover layouts  (banner | centered | sidebar | minimal | gradient-bar)
+//   • 6 heading ornaments (rule | kicker | band | left-bar | underline | none)
+//   • 5 table styles   (banded | boxed | minimal | dark-header | editorial)
+//   • 4 footer styles  (page | page-of | brand-page | minimal)
+// plus document-scale structure:
+//   • hierarchical headings — Part (H1) / chapter (H2|H1) / sub-section (H3)
+//     with deterministic outline numbers ("2", "2.1", "Part II") from the
+//     blueprint
+//   • real Word TOC (headingStyleRange 1-3), updateable in Word
+//   • page-break policy: parts + chapters start on a fresh page, subsections
+//     flow — no more half-empty pages from blanket per-section breaks
+//   • metric grids, callouts, quotes, takeaways, two-column, charts + diagrams
+//     as crisp PNG with numbered captions, NATIVE OMML equations
 // =============================================================================
 
 import {
@@ -28,8 +35,10 @@ import {
   Table,
   TableCell,
   TableOfContents,
+  TabStopType,
   TableRow,
   TextRun,
+  VerticalAlign,
   WidthType,
   Math as MathElement,
 } from 'docx'
@@ -45,14 +54,18 @@ import {
   deriveTheme,
   equationLatexOf,
   hex6,
+  isDarkColor,
   latexToOmml,
   renderComponentImage,
   tint,
+  type DerivedTheme,
 } from './shared'
+import type { ColorPalette } from '@/types'
 import { evaluateFormula } from '@/services/formula-evaluator'
 import type { CellMatrix } from '@/services/formula-evaluator'
 
 const TWIPS_PER_INCH = 1440
+type DocxColor = ReturnType<typeof deriveTheme>['colors']
 
 function pageMargins(layout: RenderableDocument['specification']['design']['layout']): { top: number; right: number; bottom: number; left: number } {
   const parse = (v: string | undefined, fallback: number) => {
@@ -76,6 +89,40 @@ function pageMargins(layout: RenderableDocument['specification']['design']['layo
   }
 }
 
+// ==================== TABLE DIALECTS ====================
+
+interface TableDialect {
+  headerFill?: string
+  headerColor: string
+  /** 'full' = every cell bordered, 'rows' = horizontal rules only, 'none' = no borders */
+  borders: 'full' | 'rows' | 'none'
+  /** Zebra row tint (hex WITH #), when the style uses banding. */
+  zebra?: string
+  /** Heavy rule under the header (editorial/academic look). */
+  headerRule?: boolean
+}
+
+function tableDialectFor(theme: DerivedTheme): TableDialect {
+  const c = theme.colors
+  switch (theme.table) {
+    case 'minimal':
+      return { headerColor: hex6(c.primary), borders: 'rows', headerRule: true }
+    case 'boxed':
+      return { headerFill: hex6(c.primary), headerColor: 'FFFFFF', borders: 'full' }
+    case 'dark-header': {
+      // Luminance guard: a dark-header fill that is too light for white text
+      // would render an invisible header row (dark-canvas themes on paper).
+      const fill = isDarkColor(c.foreground) ? c.foreground : isDarkColor(c.primary) ? c.primary : '#334155'
+      return { headerFill: hex6(fill), headerColor: 'FFFFFF', borders: 'rows', zebra: tint(c.muted, 0.35) }
+    }
+    case 'editorial':
+      return { headerColor: hex6(c.primary), borders: 'rows', headerRule: true, zebra: tint(c.muted, 0.5) }
+    case 'banded':
+    default:
+      return { headerFill: hex6(c.primary), headerColor: 'FFFFFF', borders: 'rows', zebra: tint(c.primary, 0.94) }
+  }
+}
+
 export class DocxRenderer implements DocumentRenderer {
   format = 'DOCX' as const
 
@@ -93,57 +140,76 @@ export class DocxRenderer implements DocumentRenderer {
 
     const children: (Paragraph | Table)[] = []
 
-    // ---------------- COVER PAGE ----------------
+    // ---------------- COVER PAGE (5 theme layouts) ----------------
     const hasCover = spec.sections[0]?.type === 'cover' || spec.sections.length >= 3
     if (hasCover) {
-      children.push(...this.coverPage(spec.title, spec.description, document))
+      children.push(...this.coverPage(document, theme, headingFont, bodyFont))
     }
 
     // ---------------- TABLE OF CONTENTS ----------------
+    const contentSectionsForToc = spec.sections[0]?.type === 'cover' ? spec.sections.slice(1) : spec.sections
+    const hasParts = contentSectionsForToc.some((s) => (s.level || 'chapter') === 'part')
     if (spec.sections.length >= 4) {
       children.push(
-        new Paragraph({ text: 'Contents', heading: HeadingLevel.HEADING_1, spacing: { before: 360, after: 240 } }),
-        new TableOfContents('Contents', { hyperlink: true, headingStyleRange: '1-2' }),
+        new Paragraph({
+          text: 'Contents',
+          heading: HeadingLevel.HEADING_1,
+          spacing: { before: 360, after: 240 },
+        }),
+        new TableOfContents('Contents', { hyperlink: true, headingStyleRange: '1-3' }),
         new Paragraph({ children: [new PageBreak()] })
       )
     }
 
-    // ---------------- SECTIONS ----------------
+    // ---------------- SECTIONS (hierarchy-aware) ----------------
     const sectionsToRender = spec.sections[0]?.type === 'cover' ? spec.sections.slice(1) : spec.sections
     let figureNo = 0
+    let renderedAnything = false
 
     for (const section of sectionsToRender) {
       const components = (document.sections.find((s) => s.id === section.id)?.components ?? [])
         .slice()
         .sort((a, b) => a.order - b.order)
+      const level = ((section as { level?: string }).level || 'chapter').toLowerCase()
+      const num = (section as { number?: string }).number
+      const isPart = level === 'part'
+      const isSub = level === 'section' || level === 'subsection'
 
-      // Section heading
-      children.push(
-        new Paragraph({
-          text: section.title,
-          heading: HeadingLevel.HEADING_1,
-          spacing: { before: 400, after: 200 },
-          border: {
-            bottom: { style: BorderStyle.SINGLE, size: 8, color: hex6(colors.accent, '3B82F6'), space: 4 },
-          },
-        })
-      )
+      // --- heading level mapping: with parts → H1 part / H2 chapter / H3 sub;
+      //     without parts → H1 chapter / H2 sub.
+      const headingLevel = isPart ? HeadingLevel.HEADING_1 : isSub ? (hasParts ? HeadingLevel.HEADING_3 : HeadingLevel.HEADING_2) : hasParts ? HeadingLevel.HEADING_2 : HeadingLevel.HEADING_1
+
+      // --- page-break policy: parts + chapters start fresh; subsections flow.
+      const needsBreak = !isSub && renderedAnything
+      if (needsBreak) {
+        children.push(new Paragraph({ children: [new PageBreak()] }))
+      }
+
+      // Heading text with deterministic outline number.
+      const headingText = isPart
+        ? num ? `Part ${num} — ${section.title}` : section.title
+        : isSub
+          ? num ? `${num}  ${section.title}` : section.title
+          : num ? `${num}.  ${section.title}` : section.title
+
+      children.push(...this.sectionHeading(headingText, headingLevel, isPart, theme, headingFont))
 
       for (const component of components) {
         const rendered = await this.renderComponent(component, theme, headingFont, bodyFont, {
           figureNo: () => ++figureNo,
+          subHeadingLevel: isSub ? HeadingLevel.HEADING_3 : HeadingLevel.HEADING_2,
+          bodyFont,
         })
         children.push(...rendered)
       }
 
-      // Page break between sections (not after the last)
-      if (section !== sectionsToRender[sectionsToRender.length - 1]) {
-        children.push(new Paragraph({ children: [new PageBreak()] }))
-      }
+      renderedAnything = true
     }
 
+    // ---------------- HEADERS / FOOTERS (4 theme dialects) ----------------
     const headerFooterEnabled = spec.design?.layout?.headerEnabled !== false
     const companyName = document.branding?.companyName
+    const contentWidthTwips = pageDims.width - margins.left - margins.right
 
     const sectionOptions: ISectionOptions = {
       properties: {
@@ -158,10 +224,13 @@ export class DocxRenderer implements DocumentRenderer {
               children: [
                 new Paragraph({
                   alignment: AlignmentType.RIGHT,
+                  border: theme.ornament === 'rule' || theme.ornament === 'band'
+                    ? { bottom: { style: BorderStyle.SINGLE, size: 4, color: hex6(colors.border, 'E2E8F0'), space: 4 } }
+                    : undefined,
                   children: [
                     new TextRun({
                       text: companyName || spec.title,
-                      italics: true,
+                      italics: theme.ornament !== 'kicker',
                       size: 18,
                       color: hex6(colors.mutedForeground, '64748B'),
                       font: bodyFont,
@@ -175,14 +244,7 @@ export class DocxRenderer implements DocumentRenderer {
       footers: spec.design?.layout?.footerEnabled !== false
         ? {
             default: new Footer({
-              children: [
-                new Paragraph({
-                  alignment: AlignmentType.CENTER,
-                  children: [
-                    new TextRun({ text: '', children: [PageNumber.CURRENT], size: 18, color: hex6(colors.mutedForeground, '64748B'), font: bodyFont }),
-                  ],
-                }),
-              ],
+              children: [this.footerParagraph(theme, colors, bodyFont, contentWidthTwips)],
             }),
           }
         : undefined,
@@ -199,12 +261,20 @@ export class DocxRenderer implements DocumentRenderer {
             run: { font: bodyFont, size: 22, color: hex6(colors.foreground, '1F2937') },
           },
           heading1: {
-            run: { font: headingFont, size: 32, bold: true, color: hex6(colors.primary, '1E3A5F') },
-            paragraph: { spacing: { before: 360, after: 180 } },
+            run: { font: headingFont, size: 34, bold: true, color: hex6(colors.primary, '1E3A5F') },
+            paragraph: { spacing: { before: 400, after: 200 } },
           },
           heading2: {
-            run: { font: headingFont, size: 26, bold: true, color: hex6(colors.primary, '1E3A5F') },
-            paragraph: { spacing: { before: 280, after: 140 } },
+            run: { font: headingFont, size: 27, bold: true, color: hex6(colors.primary, '1E3A5F') },
+            paragraph: { spacing: { before: 320, after: 160 } },
+          },
+          heading3: {
+            run: { font: headingFont, size: 23, bold: true, color: hex6(colors.accent, '3B82F6') },
+            paragraph: { spacing: { before: 260, after: 130 } },
+          },
+          heading4: {
+            run: { font: headingFont, size: 21, bold: true, color: hex6(colors.foreground, '1F2937') },
+            paragraph: { spacing: { before: 220, after: 110 } },
           },
         },
       },
@@ -220,65 +290,366 @@ export class DocxRenderer implements DocumentRenderer {
     }
   }
 
-  // ---------------- COVER ----------------
+  // ---------------- FOOTER DIALECTS ----------------
 
-  private coverPage(title: string, subtitle: string | undefined, document: RenderableDocument): (Paragraph | Table)[] {
-    const theme = deriveTheme(document.specification)
+  private footerParagraph(theme: DerivedTheme, colors: DocxColor, bodyFont: string, contentWidthTwips: number): Paragraph {
+    const muted = hex6(colors.mutedForeground, '64748B')
+    switch (theme.footer) {
+      case 'page-of':
+        return new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [
+            new TextRun({ text: 'Page ', size: 18, color: muted, font: bodyFont }),
+            new TextRun({ children: [PageNumber.CURRENT], size: 18, color: muted, font: bodyFont }),
+            new TextRun({ text: ' of ', size: 18, color: muted, font: bodyFont }),
+            new TextRun({ children: [PageNumber.TOTAL_PAGES], size: 18, color: muted, font: bodyFont }),
+          ],
+        })
+      case 'brand-page':
+        return new Paragraph({
+          tabStops: [{ type: TabStopType.RIGHT, position: contentWidthTwips }],
+          border: { top: { style: BorderStyle.SINGLE, size: 4, color: hex6(colors.border, 'E2E8F0'), space: 4 } },
+          children: [
+            new TextRun({ text: theme.tokens.label, size: 16, color: muted, font: bodyFont, smallCaps: true }),
+            new TextRun({ text: '\t', size: 18 }),
+            new TextRun({ children: [PageNumber.CURRENT], size: 18, color: muted, font: bodyFont }),
+          ],
+        })
+      case 'minimal':
+        return new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [new TextRun({ children: [PageNumber.CURRENT], size: 16, color: muted, font: bodyFont })],
+        })
+      case 'page':
+      default:
+        return new Paragraph({
+          alignment: AlignmentType.CENTER,
+          children: [new TextRun({ children: [PageNumber.CURRENT], size: 18, color: muted, font: bodyFont })],
+        })
+    }
+  }
+
+  // ---------------- SECTION HEADINGS (6 ornaments) ----------------
+
+  private sectionHeading(text: string, level: (typeof HeadingLevel)[keyof typeof HeadingLevel], isPart: boolean, theme: DerivedTheme, headingFont: string): (Paragraph | Table)[] {
+    const colors = theme.colors
+    const accent = hex6(colors.accent, '3B82F6')
+    const primary = hex6(colors.primary, '1E3A5F')
+    const muted = hex6(colors.mutedForeground, '64748B')
+
+    switch (theme.ornament) {
+      case 'band': {
+        // Full-width filled band — the heading lives inside a shaded table row.
+        if (!isPart) {
+          return [
+            new Paragraph({
+              text,
+              heading: level,
+              shading: { type: ShadingType.CLEAR, fill: tint(primary, 0.92).slice(1).toUpperCase() },
+              spacing: { before: 320, after: 180 },
+              border: { left: { style: BorderStyle.SINGLE, size: 24, color: primary, space: 8 } },
+            }),
+          ]
+        }
+        return [
+          new Paragraph({
+            heading: level,
+            shading: { type: ShadingType.CLEAR, fill: hex6(primary, '1E3A5F') },
+            spacing: { before: 360, after: 220 },
+            children: [new TextRun({ text, color: 'FFFFFF' })],
+          }),
+        ]
+      }
+      case 'left-bar':
+        return [
+          new Paragraph({
+            text,
+            heading: level,
+            border: { left: { style: BorderStyle.SINGLE, size: isPart ? 32 : 22, color: accent, space: 10 } },
+            spacing: { before: isPart ? 360 : 300, after: isPart ? 200 : 150 },
+          }),
+        ]
+      case 'kicker':
+        return [
+          new Paragraph({
+            children: [
+              new TextRun({ text: (isPart ? 'PART' : 'SECTION').toUpperCase(), bold: true, size: 16, color: accent, font: headingFont }),
+            ],
+            spacing: { before: isPart ? 360 : 260, after: 40 },
+          }),
+          new Paragraph({
+            text,
+            heading: level,
+            spacing: { after: 140 },
+          }),
+        ]
+      case 'underline':
+        return [
+          new Paragraph({
+            text,
+            heading: level,
+            border: { bottom: { style: BorderStyle.SINGLE, size: isPart ? 14 : 8, color: primary, space: 6 } },
+            spacing: { before: isPart ? 380 : 300, after: isPart ? 220 : 160 },
+          }),
+        ]
+      case 'none':
+        return [
+          new Paragraph({
+            text,
+            heading: level,
+            spacing: { before: isPart ? 400 : 300, after: isPart ? 220 : 150 },
+          }),
+        ]
+      case 'rule':
+      default:
+        return [
+          new Paragraph({
+            text,
+            heading: level,
+            border: {
+              bottom: {
+                style: BorderStyle.SINGLE,
+                size: isPart ? 12 : 6,
+                color: isPart ? primary : accent,
+                space: 4,
+              },
+            },
+            spacing: { before: isPart ? 400 : 320, after: isPart ? 220 : 160 },
+          }),
+        ]
+    }
+    void muted
+  }
+
+  // ---------------- COVER (5 layouts) ----------------
+
+  private coverPage(document: RenderableDocument, theme: DerivedTheme, headingFont: string, bodyFont: string): (Paragraph | Table)[] {
+    const spec = document.specification
     const colors = theme.colors
     const companyName = document.branding?.companyName
     const date = new Date().toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+    const title = spec.title || 'Untitled Document'
+    const subtitle = spec.description || ''
+    const meta = [companyName, date].filter(Boolean).join('  ·  ')
 
-    return [
-      // Accent bar
-      new Table({
-        width: { size: 100, type: WidthType.PERCENTAGE },
-        rows: [
-          new TableRow({
-            children: [
-              new TableCell({
-                shading: { type: ShadingType.CLEAR, fill: hex6(colors.primary, '1E3A5F') },
-                children: [new Paragraph({ text: '' })],
-                borders: {
-                  top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-                  bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-                  left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-                  right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
-                },
-              }),
-            ],
-            height: { value: 260, rule: HeightRule.EXACT },
-          }),
-        ],
-      }),
-      new Paragraph({ text: '', spacing: { after: 2400 } }),
+    const noBorders = {
+      top: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      bottom: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      left: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+      right: { style: BorderStyle.NONE, size: 0, color: 'FFFFFF' },
+    }
+    const plain = (text: string, opts: { size?: number; bold?: boolean; color?: string; italics?: boolean; smallCaps?: boolean; font?: string; after?: number; before?: number; center?: boolean }) =>
       new Paragraph({
-        alignment: AlignmentType.CENTER,
-        spacing: { after: 200 },
-        children: [
-          new TextRun({ text: title, bold: true, size: 72, font: document.specification.design?.typography?.headingFont || 'Calibri', color: hex6(colors.primary, '1E3A5F') }),
-        ],
-      }),
-      ...(subtitle
-        ? [
-            new Paragraph({
-              alignment: AlignmentType.CENTER,
-              spacing: { after: 300 },
-              children: [new TextRun({ text: subtitle, size: 28, color: hex6(colors.mutedForeground, '64748B'), italics: true })],
-            }),
-          ]
-        : []),
-      new Paragraph({
-        alignment: AlignmentType.CENTER,
+        alignment: opts.center ? AlignmentType.CENTER : undefined,
+        spacing: { after: opts.after ?? 120, before: opts.before },
         children: [
           new TextRun({
-            text: [companyName, date].filter(Boolean).join('  ·  '),
-            size: 20,
-            color: hex6(colors.mutedForeground, '64748B'),
+            text,
+            bold: opts.bold,
+            italics: opts.italics,
+            smallCaps: opts.smallCaps,
+            size: opts.size ?? 24,
+            color: opts.color ?? hex6(colors.foreground, '1F2937'),
+            font: opts.font ?? bodyFont,
           }),
         ],
-      }),
-      new Paragraph({ children: [new PageBreak()] }),
-    ]
+      })
+
+    switch (theme.cover) {
+      // ---- SIDEBAR: left color column, title block on the right ----
+      case 'sidebar': {
+        return [
+          new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [
+              new TableRow({
+                height: { value: 13200, rule: HeightRule.EXACT },
+                children: [
+                  new TableCell({
+                    width: { size: 3600, type: WidthType.DXA },
+                    shading: { type: ShadingType.CLEAR, fill: hex6(colors.primary, '1E3A5F') },
+                    verticalAlign: VerticalAlign.BOTTOM,
+                    borders: noBorders,
+                    margins: { top: 200, bottom: 200, left: 240, right: 200 },
+                    children: [
+                      new Paragraph({
+                        children: [new TextRun({ text: theme.tokens.label, bold: true, size: 22, color: 'FFFFFF', font: headingFont, smallCaps: true })],
+                      }),
+                      ...(companyName
+                        ? [new Paragraph({ spacing: { before: 80 }, children: [new TextRun({ text: companyName, size: 18, color: hex6(colors.muted, 'F4F6F9') })] })]
+                        : []),
+                    ],
+                  }),
+                  new TableCell({
+                    width: { size: 6200, type: WidthType.DXA },
+                    verticalAlign: VerticalAlign.CENTER,
+                    borders: noBorders,
+                    margins: { top: 200, bottom: 200, left: 480, right: 120 },
+                    children: [
+                      new Paragraph({
+                        spacing: { after: 200 },
+                        children: [new TextRun({ text: ' ', size: 2 })],
+                      }),
+                      new Paragraph({
+                        spacing: { after: 160 },
+                        children: [new TextRun({ text: title, bold: true, size: 60, color: hex6(colors.primary, '1E3A5F'), font: headingFont })],
+                      }),
+                      ...(subtitle
+                        ? [
+                            new Paragraph({
+                              spacing: { after: 400 },
+                              children: [new TextRun({ text: subtitle.slice(0, 220), italics: true, size: 24, color: hex6(colors.mutedForeground, '64748B') })],
+                            }),
+                          ]
+                        : []),
+                      new Paragraph({
+                        children: [new TextRun({ text: date, size: 20, color: hex6(colors.accent, '3B82F6'), bold: true })],
+                      }),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+          new Paragraph({ children: [new PageBreak()] }),
+        ]
+      }
+
+      // ---- CENTERED: formal double-rule title block ----
+      case 'centered': {
+        return [
+          plain(' ', { size: 2, after: 2600 }),
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            border: { top: { style: BorderStyle.SINGLE, size: 6, color: hex6(colors.primary, '1E3A5F'), space: 10 } },
+            spacing: { after: 300 },
+            children: [new TextRun({ text: ' ' })],
+          }),
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            spacing: { after: 240 },
+            children: [new TextRun({ text: title, bold: true, size: 68, color: hex6(colors.primary, '1E3A5F'), font: headingFont })],
+          }),
+          ...(subtitle
+            ? [
+                new Paragraph({
+                  alignment: AlignmentType.CENTER,
+                  spacing: { after: 460 },
+                  children: [new TextRun({ text: subtitle, italics: true, size: 26, color: hex6(colors.mutedForeground, '64748B') })],
+                }),
+              ]
+            : []),
+          new Paragraph({
+            alignment: AlignmentType.CENTER,
+            border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: hex6(colors.primary, '1E3A5F'), space: 10 } },
+            spacing: { after: 300 },
+            children: [new TextRun({ text: meta, smallCaps: true, size: 20, color: hex6(colors.mutedForeground, '64748B') })],
+          }),
+          new Paragraph({ children: [new PageBreak()] }),
+        ]
+      }
+
+      // ---- MINIMAL: pure typography ----
+      case 'minimal': {
+        return [
+          plain(' ', { size: 2, after: 3200 }),
+          plain(theme.tokens.label.toUpperCase(), { size: 18, smallCaps: true, color: hex6(colors.mutedForeground, '64748B'), after: 200 }),
+          plain(title, { size: 72, bold: true, color: hex6(colors.foreground, '111111'), after: 300 }),
+          new Paragraph({
+            spacing: { after: 360 },
+            border: { bottom: { style: BorderStyle.SINGLE, size: 8, color: hex6(colors.accent, '444444'), space: 1 } },
+            children: [new TextRun({ text: ' ', size: 2 })],
+          }),
+          ...(subtitle ? [plain(subtitle, { size: 24, color: hex6(colors.mutedForeground, '737373'), after: 500 })] : []),
+          plain(meta, { size: 20, color: hex6(colors.mutedForeground, '737373') }),
+          new Paragraph({ children: [new PageBreak()] }),
+        ]
+      }
+
+      // ---- GRADIENT-BAR: tri-tone progress band (no real gradients in DOCX) ----
+      case 'gradient-bar': {
+        return [
+          new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [
+              new TableRow({
+                height: { value: 160, rule: HeightRule.EXACT },
+                children: [
+                  this.bandCell(hex6(colors.primary, '6D28D9'), 4000, noBorders),
+                  this.bandCell(hex6(colors.accent, '06B6D4'), 4000, noBorders),
+                  this.bandCell(tint(colors.accent, 0.55).slice(1).toUpperCase(), 2600, noBorders),
+                ],
+              }),
+            ],
+          }),
+          plain(' ', { size: 2, after: 2600 }),
+          plain(theme.tokens.label.toUpperCase(), { size: 18, smallCaps: true, bold: true, color: hex6(colors.accent, '06B6D4'), after: 160 }),
+          plain(title, { size: 66, bold: true, color: hex6(colors.foreground, '18181B'), after: 260 }),
+          ...(subtitle ? [plain(subtitle, { size: 24, color: hex6(colors.mutedForeground, '71717A'), after: 520 })] : []),
+          plain(meta, { size: 20, color: hex6(colors.mutedForeground, '71717A') }),
+          new Paragraph({ children: [new PageBreak()] }),
+        ]
+      }
+
+      // ---- BANNER: solid top band + centered title (executive default) ----
+      case 'banner':
+      default: {
+        return [
+          new Table({
+            width: { size: 100, type: WidthType.PERCENTAGE },
+            rows: [
+              new TableRow({
+                height: { value: 2000, rule: HeightRule.EXACT },
+                children: [
+                  new TableCell({
+                    shading: { type: ShadingType.CLEAR, fill: hex6(colors.primary, '1E3A5F') },
+                    verticalAlign: VerticalAlign.CENTER,
+                    borders: noBorders,
+                    margins: { top: 100, bottom: 100, left: 400, right: 400 },
+                    children: [
+                      new Paragraph({
+                        children: [
+                          new TextRun({ text: title, bold: true, size: 52, color: 'FFFFFF', font: headingFont }),
+                        ],
+                      }),
+                      ...(subtitle
+                        ? [
+                            new Paragraph({
+                              spacing: { before: 120 },
+                              children: [new TextRun({ text: subtitle.slice(0, 200), size: 22, color: hex6(colors.muted, 'F4F6F9'), italics: true })],
+                            }),
+                          ]
+                        : []),
+                    ],
+                  }),
+                ],
+              }),
+            ],
+          }),
+          plain(' ', { size: 2, after: 2400 }),
+          new Paragraph({
+            spacing: { after: 200 },
+            children: [new TextRun({ text: ' ', size: 2 })],
+          }),
+          new Paragraph({
+            border: { top: { style: BorderStyle.SINGLE, size: 18, color: hex6(colors.accent, 'B8860B'), space: 1 } },
+            spacing: { after: 400 },
+            children: [new TextRun({ text: ' ', size: 2 })],
+          }),
+          plain(meta, { size: 22, color: hex6(colors.mutedForeground, '64748B'), center: true }),
+          new Paragraph({ children: [new PageBreak()] }),
+        ]
+      }
+    }
+  }
+
+  private bandCell(fill: string, width: number, borders: object): TableCell {
+    return new TableCell({
+      width: { size: width, type: WidthType.DXA },
+      shading: { type: ShadingType.CLEAR, fill },
+      borders: borders as never,
+      children: [new Paragraph({ text: '' })],
+    })
   }
 
   // ---------------- COMPONENTS ----------------
@@ -288,18 +659,19 @@ export class DocxRenderer implements DocumentRenderer {
     theme: ReturnType<typeof deriveTheme>,
     headingFont: string,
     bodyFont: string,
-    ctx?: { figureNo?: () => number }
+    ctx?: { figureNo?: () => number; subHeadingLevel?: (typeof HeadingLevel)[keyof typeof HeadingLevel]; bodyFont?: string }
   ): Promise<(Paragraph | Table)[]> {
     const colors = theme.colors
     const out: (Paragraph | Table)[] = []
+    const inHeadingFont = headingFont
 
     switch (component.type) {
       case 'heading': {
         out.push(
           new Paragraph({
             text: asString(component.content),
-            heading: HeadingLevel.HEADING_2,
-            spacing: { before: 280, after: 140 },
+            heading: ctx?.subHeadingLevel ?? HeadingLevel.HEADING_2,
+            spacing: { before: 260, after: 130 },
           })
         )
         break
@@ -331,9 +703,6 @@ export class DocxRenderer implements DocumentRenderer {
         break
       }
       case 'key_takeaways': {
-        // Emphasis box: shaded single-cell table carrying the takeaways —
-        // the previous implementation rendered plain bullets and then
-        // REPLACED the last one with an empty paragraph (a defect).
         const items = asStringArray(component.content)
         if (items.length > 0) {
           out.push(this.takeawaysBox(items, colors.accent))
@@ -366,7 +735,7 @@ export class DocxRenderer implements DocumentRenderer {
       case 'metric_grid': {
         const metrics = asMetrics(component.content)
         if (metrics.length > 0) {
-          out.push(this.metricTable(metrics, colors.primary, colors.accent, headingFont))
+          out.push(this.metricTable(metrics, colors.primary, colors.accent, inHeadingFont))
           out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
         }
         break
@@ -382,7 +751,7 @@ export class DocxRenderer implements DocumentRenderer {
       case 'table': {
         const rows = asTable(component.content)
         if (rows.length >= 1) {
-          out.push(this.dataTable(rows, colors))
+          out.push(this.dataTable(rows, colors, theme))
           out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
         }
         break
@@ -630,17 +999,33 @@ export class DocxRenderer implements DocumentRenderer {
     })
   }
 
-  private dataTable(rows: Array<Array<string | number | null>>, colors: ReturnType<typeof deriveTheme>['colors']): Table {
+  /**
+   * Data table with THEME DIALECT styling (banded / boxed / minimal /
+   * dark-header / editorial). Formula cells are computed against the table
+   * itself; an unevaluable formula stays visible as text — never a wrong
+   * number, never a silent drop.
+   */
+  private dataTable(rows: Array<Array<string | number | null>>, colors: DocxColor, theme: DerivedTheme): Table {
     const [header, ...data] = rows
     const width = Math.max(header?.length ?? 1, 1)
     const colWidth = Math.floor(9000 / width)
+    const dialect = tableDialectFor(theme)
 
     // Page-safety: ≥7 columns needs a smaller body font to stay inside the
     // printable width; the QA validator caps columns at 12.
     const bodySize = width >= 9 ? 16 : width >= 7 ? 18 : 20
     const headSize = width >= 9 ? 16 : width >= 7 ? 18 : 20
 
-    const tableStyle = themeTableStyle(colors, 'banded')
+    const fullBorder = { style: BorderStyle.SINGLE, size: 4, color: hex6(colors.border, 'E2E8F0') }
+    const cellBordersFor = (): object => {
+      if (dialect.borders === 'full') {
+        return { top: fullBorder, bottom: fullBorder, left: fullBorder, right: fullBorder }
+      }
+      if (dialect.borders === 'rows') {
+        return { bottom: fullBorder }
+      }
+      return {}
+    }
 
     const headerRow = new TableRow({
       tableHeader: true,
@@ -649,22 +1034,38 @@ export class DocxRenderer implements DocumentRenderer {
           (cell) =>
             new TableCell({
               width: { size: colWidth, type: WidthType.DXA },
-              shading: { type: ShadingType.CLEAR, fill: hex6(tableStyle.headerFill, '1E3A5F') },
+              shading: dialect.headerFill
+                ? { type: ShadingType.CLEAR, fill: hex6(dialect.headerFill, '1E3A5F') }
+                : undefined,
+              borders: (() => {
+                if (dialect.borders === 'full') {
+                  return { top: fullBorder, bottom: fullBorder, left: fullBorder, right: fullBorder }
+                }
+                if (dialect.borders === 'rows') {
+                  return {
+                    bottom: { style: BorderStyle.SINGLE, size: dialect.headerRule ? 16 : 6, color: hex6(colors.primary, '1E3A5F') },
+                    top: dialect.headerRule ? { style: BorderStyle.SINGLE, size: 12, color: hex6(colors.primary, '1E3A5F') } : undefined,
+                  }
+                }
+                return {}
+              })() as never,
               margins: { top: 80, bottom: 80, left: 100, right: 100 },
               children: [
                 new Paragraph({
-                  children: [new TextRun({ text: String(cell ?? ''), bold: true, size: headSize, color: 'FFFFFF' })],
+                  children: [
+                    new TextRun({
+                      text: String(cell ?? ''),
+                      bold: true,
+                      size: headSize,
+                      color: dialect.headerFill ? 'FFFFFF' : hex6(dialect.headerColor, '1E3A5F'),
+                    }),
+                  ],
                 }),
               ],
             })
         ) ?? [],
     })
 
-    // Formula-aware data rows: table cells may carry spreadsheet formulas
-    // ("=SUM(B2:B5)") for numeric columns. DOCX has no formula engine, so we
-    // COMPUTE the value against the table itself — a formula we cannot
-    // evaluate stays visible as its formula text (honest), never a wrong
-    // number and never a silent drop.
     const matrix = rows as CellMatrix
     const dataRows = data.map((row, idx) => {
       return new TableRow({
@@ -680,9 +1081,10 @@ export class DocxRenderer implements DocumentRenderer {
           return new TableCell({
             width: { size: colWidth, type: WidthType.DXA },
             shading:
-              tableStyle.zebra && idx % 2 === 1
-                ? { type: ShadingType.CLEAR, fill: tint(tableStyle.headerFill, 0.94).slice(1).toUpperCase() }
+              dialect.zebra && idx % 2 === 1
+                ? { type: ShadingType.CLEAR, fill: dialect.zebra.replace('#', '').toUpperCase() }
                 : undefined,
+            borders: cellBordersFor() as never,
             margins: { top: 60, bottom: 60, left: 100, right: 100 },
             children: [
               new Paragraph({
@@ -705,11 +1107,6 @@ export class DocxRenderer implements DocumentRenderer {
       rows: [headerRow, ...dataRows],
     })
   }
-}
-
-/** Table styling hints derived from theme tokens. */
-export function themeTableStyle(colors: ReturnType<typeof deriveTheme>['colors'], fallback: string): { headerFill: string; zebra: boolean } {
-  return { headerFill: colors.primary, zebra: fallback === 'banded' || fallback === 'dark-header' || fallback === 'boxed' }
 }
 
 /** Compact, locale-stable number rendering for computed table cells. */

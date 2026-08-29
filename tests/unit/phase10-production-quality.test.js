@@ -420,10 +420,11 @@ test('§10-X1 XLSX: native charts (LibreOffice-verified), live formulas, typed f
   assert.ok(sales.autoFilter, 'autofilter set')
   assert.ok(sales.pageSetup?.printTitlesRow, `print titles repeat the header row (${sales.pageSetup?.printTitlesRow})`)
 
-  // NATIVE chart parts injected
+  // NATIVE chart parts injected — the 2 AI-planned charts PLUS an automatic
+  // Dashboard summary chart (live cross-sheet formulas dashboard, v2).
   const zip = await JSZip.loadAsync(Buffer.from(out.buffer))
   const chartParts = Object.keys(zip.files).filter((p) => /^xl\/charts\/chart\d+\.xml$/.test(p))
-  assert.ok(chartParts.length === 2, `two native chart parts, got ${chartParts.join(', ')}`)
+  assert.ok(chartParts.length >= 2, `at least the two planned chart parts, got ${chartParts.join(', ')}`)
   const chart1 = await (await zip.file(chartParts[0])).async('string')
   assert.ok(chart1.includes('<c:barChart>'), 'chart 1 is a real bar chart')
   assert.ok(chart1.includes('<c:f>'), 'chart references live cell ranges')

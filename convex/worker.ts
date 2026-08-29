@@ -65,7 +65,9 @@ import {
   parseDesignPlan,
   applyDesignPlan,
   describeDesignPlan,
+  buildGenerationBrief,
   type DesignPlan,
+  type GenerationBrief,
 } from "../src/services/design-planning";
 
 // ==================== TYPES ====================
@@ -126,6 +128,15 @@ export const processJob = internalAction({
         const designPlan = await designStage(job, outputFormat);
         const { design } = applyDesignPlan(designPlan, outputFormat);
         const designDirection = describeDesignPlan(designPlan);
+        // Full brief = design direction + resolved DOCUMENT SCALE (page/
+        // word budgets, section bounds, visual cadence). The scale honors
+        // explicit user evidence ("100 pages notes") over the designer's
+        // opinion — see doc-scale.ts.
+        const brief: GenerationBrief = buildGenerationBrief(designPlan, job.prompt);
+        const scale = brief.scale;
+        console.log(
+          `[WORKER] job ${jobId}: scale=${scale.depth} pages≈${scale.pageTarget} sections=${scale.minSections}-${scale.maxSections} words/unit=${scale.wordsPerUnitMin}-${scale.wordsPerUnitMax} (${scale.rationale})`
+        );
 
         // ----- Stage B: architect -----
         const planPrompt = buildPlanningSystemPrompt(artifactType, outputFormat, {
@@ -137,14 +148,13 @@ export const processJob = internalAction({
           useCharts: designPlan.useCharts,
           useTables: designPlan.useTables,
           useMetrics: designPlan.useMetrics,
-        });
+        }, scale);
 
         // 8192 (was 4096): Gemini 3.x thinking consumes the SAME
         // maxOutputTokens budget, so a 4096 cap truncated large PPTX/XLSX
         // blueprints mid-JSON → "Failed to parse AI planning response" →
         // an otherwise-successful job died before rendering.
         const PLAN_MAX_TOKENS = 8192;
-
         // ONE planning retry on a malformed blueprint: a fresh sample (or a
         // different model after provider rotation) resolves a transient
         // malformed-JSON response. Failing a paid job while every downstream
@@ -167,6 +177,9 @@ export const processJob = internalAction({
               ],
               options: {
                 temperature: planAttempt > 1 ? 0.3 : 0.7,
+                // Long-document blueprints (20-30 sections with visuals +
+                // notes) need real headroom — 4096 truncated exhaustive
+                // plans mid-JSON.
                 maxTokens: PLAN_MAX_TOKENS,
                 responseFormat: { type: "json" as const },
               },
@@ -178,7 +191,7 @@ export const processJob = internalAction({
               planResponse.content || "{}",
               artifactType,
               outputFormat,
-              { design }
+              { design, scale }
             );
           } catch (parseErr) {
             lastPlanError = parseErr;
@@ -198,7 +211,7 @@ export const processJob = internalAction({
         await ctx.runMutation(internal.generation.initializeUnits, {
           jobId,
           blueprint: blueprint as unknown as Record<string, unknown>,
-          designPlan: designPlan as unknown as Record<string, unknown>,
+          designPlan: { ...designPlan, scale } as unknown as Record<string, unknown>,
           sections: blueprint.sections.map((s, i) => ({
             id: s.id,
             title: s.title,
@@ -642,6 +655,9 @@ async function generateOneUnit(
       id: string;
       title: string;
       type?: string;
+      level?: string;
+      number?: string;
+      visuals?: Array<{ kind: 'chart' | 'table' | 'diagram' | 'metrics' | 'timeline' | 'two_column'; hint?: string }>;
       components?: Array<{ data?: { note?: string } | null; type?: string }>;
     }>;
   };
@@ -654,24 +670,47 @@ async function generateOneUnit(
     return false;
   }
 
-  // Bounded continuity: summaries of the previous two completed units.
+  // Resolved document scale (persisted on the job's designPlan at planning
+  // time). Drives the per-unit word budget for EVERY unit of the document.
+  const scale = (job.designPlan as { scale?: { wordsPerUnitMin?: number; wordsPerUnitMax?: number; depth?: string } } | null | undefined)?.scale;
+  const wordTarget =
+    scale && scale.wordsPerUnitMin && scale.wordsPerUnitMax
+      ? { min: scale.wordsPerUnitMin, max: scale.wordsPerUnitMax }
+      : null;
+
+  // Document-wide continuity: titles of ALL completed units + the opening
+  // text of the two nearest predecessors. The previous "last two sections,
+  // 4000 chars" window let chapter 18 of a long document drift into
+  // repeating chapter 3; a full title map costs ~30 tokens per 20 units and
+  // keeps the whole outline in view.
   const completedBefore = allUnits
     .filter((u) => u.status === "completed" && u.sequence < unit.sequence)
-    .sort((a, b) => a.sequence - b.sequence)
-    .slice(-2);
-  const globalContext = completedBefore
+    .sort((a, b) => a.sequence - b.sequence);
+  const titleMap = completedBefore
+    .map((u) => `- ${u.title}`)
+    .join("\n")
+    .slice(0, 2400);
+  const nearestText = completedBefore
+    .slice(-2)
     .map((u) => {
       const content = u.content as
         | { components?: Array<{ type?: string; content?: unknown }> }
         | undefined;
       const bits = (content?.components || [])
         .filter((c) => c.type === "PARAGRAPH" || c.type === "HEADING")
-        .map((c) => String(c.content ?? "").slice(0, 400))
+        .map((c) => String(c.content ?? "").slice(0, 300))
         .join("\n");
       return `${u.title}\n${bits}`;
     })
     .join("\n\n")
-    .slice(0, 4000);
+    .slice(0, 2600);
+  const globalContext = [
+    titleMap ? `Sections already written (DO NOT repeat their content):\n${titleMap}` : "",
+    nearestText ? `The two sections immediately before this one (continue smoothly from them):\n${nearestText}` : "",
+  ]
+    .filter(Boolean)
+    .join("\n\n")
+    .slice(0, 5200);
 
   const { system, user } = buildSectionContentPrompt({
     sectionTitle: section.title,
@@ -689,6 +728,11 @@ async function generateOneUnit(
     sourceContext: typeof job.sourceContext === "string" ? job.sourceContext : null,
     designDirection:
       typeof designDirectionFor(job) === "string" ? designDirectionFor(job) : undefined,
+    // Scale-driven depth: numbering, level, word budget, mandatory visuals.
+    sectionNumber: section.number || null,
+    sectionLevel: section.level || "chapter",
+    wordTarget,
+    visuals: section.visuals ?? [],
   });
 
   try {
@@ -700,7 +744,10 @@ async function generateOneUnit(
         ],
         options: {
           temperature: 0.7,
-          maxTokens: 4096,
+          // Word-budgeted units (up to ~1100 words + tables/charts JSON)
+          // need more headroom than the old 4096 — truncation here produced
+          // thin sections and cut-off chart JSON.
+          maxTokens: 8192,
           responseFormat: { type: "json" as const },
         },
       },

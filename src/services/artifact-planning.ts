@@ -18,15 +18,28 @@ import type {
   ArtifactType,
   DesignSpecification,
 } from '@/types'
+import { scaleForPrompt, type DocumentScale, type VisualAssignment, assignSectionNumbers, enforceVisualCadence } from './doc-scale'
 
 export type DocumentFormat = 'DOCX' | 'PDF' | 'XLSX' | 'PPTX' | 'CSV'
 
 // ==================== PROMPTS ====================
 
+export interface PlanningDesignContext {
+  theme: string
+  audience: string
+  tone: string
+  density: string
+  visualPriority: string[]
+  useCharts: boolean
+  useTables: boolean
+  useMetrics: boolean
+}
+
 export function buildPlanningSystemPrompt(
   type: string,
   format: DocumentFormat,
-  design?: { theme: string; audience: string; tone: string; density: string; visualPriority: string[]; useCharts: boolean; useTables: boolean; useMetrics: boolean }
+  design?: PlanningDesignContext,
+  scale?: DocumentScale
 ): string {
   const formatHints: Record<string, string> = {
     DOCX: 'This will be rendered as a Word document (.docx). Plan sections that work well in a document format with headings, paragraphs, lists, tables, charts, diagrams, equations, metric highlights, callouts, and a cover page.',
@@ -40,6 +53,8 @@ export function buildPlanningSystemPrompt(
     ? `\nDESIGN DIRECTION (decided by the designer stage — follow it):\n- Theme: ${design.theme}\n- Audience: ${design.audience} · Tone: ${design.tone} · Density: ${design.density}\n- Visual priority: ${design.visualPriority.join(', ')}\n- Charts ${design.useCharts ? 'encouraged' : 'not needed'} · Tables ${design.useTables ? 'encouraged' : 'minimal'} · Metric highlights ${design.useMetrics ? 'encouraged' : 'not needed'}\n- Density guidance: light = fewer, punchier sections; medium = balanced; dense = thorough sections.\n`
     : ''
 
+  const scaleContext = scale ? `\n${scaleForPrompt(scale, format)}\n` : ''
+
   const componentVocabulary = `
 COMPONENT VOCABULARY (use these types in section components):
 - paragraph: rich text body (string, 3-5 sentences)
@@ -49,7 +64,7 @@ COMPONENT VOCABULARY (use these types in section components):
 - quote: notable quotation (string)
 - metric_grid: 2-4 headline KPIs (array of {label, value, change?, unit?} objects)
 - callout: highlighted note/insight (string) — use for key takeaways, warnings, insights
-- chart: data visualization (object {chartType: "bar|line|pie|donut|area", title, categories: string[], series: [{name, data: number[]}], note?})
+- chart: data visualization (object {chartType: "bar|line|pie|donut|area|hbar|stacked|scatter", title, categories: string[], series: [{name, data: number[]}], note?, xLabel?, yLabel?})
 - timeline: chronological steps (array of {label, description})
 - diagram: structural visual (object {kind: "flowchart|process|hierarchy", title?, steps: [{label, description?}]}) — use for workflows, decision flows, org structures, architectures
 - equation: real mathematical formula (object {latex: "LaTeX source", display: true}) — use for scientific/mathematical/financial content: fractions, powers, roots, summations, integrals, Greek symbols
@@ -58,21 +73,31 @@ COMPONENT VOCABULARY (use these types in section components):
 
 Use metric_grid in the opening section of business/report documents. Use charts when data relationships matter. Use diagrams when structure/flow matters (processes, hierarchies, decision flows). Use equations when the content is mathematical — never write formulas as plain text. Use callout sparingly for emphasis. For XLSX prefer table-heavy sections; for PPTX prefer list/metric_grid/chart with minimal paragraph text.`
 
+  const hierarchyRules = `SECTION HIERARCHY (for long documents):
+- sections[] is a FLAT ordered list; use the "level" field to express hierarchy:
+  • "part" — a major division header (for ${type === 'presentation' ? 'decks: an agenda item' : 'documents of 10+ sections; carries no body content, 1-2 sentence description only'})
+  • "chapter" — a normal content section (DEFAULT)
+  • "section" — a sub-section of the preceding chapter (for deep treatments)
+- Every section needs its own components; a "part" carries 0-1 components.`
+
   return `You are Filo's document architect. Create a detailed structural plan for a ${type} document.
 
 OUTPUT FORMAT (authoritative — every downstream prompt, renderer and section plan depends on this exact value): ${format}
 
-${formatHints[format] || formatHints.DOCX}${designContext}${componentVocabulary}
+${formatHints[format] || formatHints.DOCX}${designContext}${scaleContext}${hierarchyRules}${componentVocabulary}
 
 CRITICAL RULES:
 1. Respond ONLY with valid JSON
-2. Include 3-8 sections (more for presentations, fewer for simple docs)
+2. Respect the DOCUMENT SCALE block above — the section count bounds are mandatory, not suggestions
 3. Each section needs a unique id (uuid-style string)
 4. For XLSX: Make sections represent data categories, suggest table headers
 5. For PPTX: Each section = 1 slide. First section = cover. Keep it concise.
 6. For DOCX/PDF: Professional document structure with clear hierarchy
 7. Use creative, specific section titles - NOT generic ones like "Section 1"
 8. The type field in sections should be one of: cover, heading, content, table, list, references, appendix
+9. Attach "visuals" to sections that must carry a visual: "visuals": [{"kind": "chart|table|diagram|metrics|timeline|two_column", "hint": "what it shows, e.g. 'line: revenue trend over 6 quarters'"}]. The content generator treats these as MANDATORY.
+10. Vary chart types across the document (bar, line, area, pie) — never emit the same chart type more than twice in a row.
+11. Section titles must be information-bearing ("How Transformer Attention Replaces Recurrence", not "Attention Mechanisms Overview 1")
 
 You must respond with a JSON object:
 {
@@ -81,9 +106,11 @@ You must respond with a JSON object:
   "sections": [
     {
       "id": "unique-id-1",
+      "level": "part|chapter|section",
       "type": "cover|heading|content|table|list|references|appendix",
       "title": "Section Title",
       "order": 0,
+      "visuals": [{"kind": "chart", "hint": "line: quarterly revenue trend"}],
       "components": [
         {
           "id": "comp-id-1",
@@ -111,40 +138,93 @@ export interface SectionPromptInput {
   sourceContext?: string | null
   /** Theme/audience/tone direction from the designer stage (spec §8). */
   designDirection?: string | null
+  /** Deterministic heading number computed from the outline (e.g. "2.1"). */
+  sectionNumber?: string | null
+  /** Section level from the outline: part | chapter | section. */
+  sectionLevel?: string | null
+  /** MANDATORY word budget for this unit (from the document scale). */
+  wordTarget?: { min: number; max: number } | null
+  /** MANDATORY visual components this section must include. */
+  visuals?: VisualAssignment[] | null
 }
 
 export function buildSectionContentPrompt(input: SectionPromptInput): {
   system: string
   user: string
 } {
-  const system = `You are Filo's content generator. Generate professional, high-quality content for a document section.
+  const isDeck = input.outputFormat === 'PPTX'
+  const isSheet = input.outputFormat === 'XLSX' || input.outputFormat === 'CSV'
+  const level = (input.sectionLevel || 'chapter').toLowerCase()
+
+  // ---- word budget + mandatory visuals (the anti-thin-content core) ----
+  const budget = input.wordTarget
+  const minWords = budget?.min ?? (isDeck ? 60 : 300)
+  const maxWords = budget?.max ?? (isDeck ? 160 : 900)
+
+  const visualRules: string[] = []
+  for (const v of input.visuals || []) {
+    switch (v.kind) {
+      case 'chart':
+        visualRules.push(
+          `MANDATORY chart component — ${v.hint || 'pick the best type for the data'}. Shape: {"type":"chart","content":{"chartType":"bar|line|area|pie|hbar|stacked","title":"…","categories":["…"],"series":[{"name":"…","data":[numbers]}],"note":"source/assumption in ≤12 words"}}. Data must be realistic, internally consistent, and consistent with any table in this section.`
+        )
+        break
+      case 'table':
+        visualRules.push(
+          `MANDATORY table component — ${v.hint || 'a decision-ready data table'}. 3-6 columns × 5-8 data rows; first row = headers; numeric cells as numbers (no units inside numbers).`
+        )
+        break
+      case 'diagram':
+        visualRules.push(
+          `MANDATORY diagram component — ${v.hint || 'the structure/flow described'}. Shape: {"type":"diagram","content":{"kind":"flowchart|process|hierarchy","title":"…","steps":[{"label":"…","description":"…"}]}} (4-7 steps).`
+        )
+        break
+      case 'metrics':
+        visualRules.push(
+          `MANDATORY metric_grid component — ${v.hint || 'headline numbers'}. 3-4 objects {"label","value","change?","unit?"} with realistic values.`
+        )
+        break
+      case 'timeline':
+        visualRules.push(
+          `MANDATORY timeline component — ${v.hint || 'the phases described'}. 4-6 objects {"label","description"}.`
+        )
+        break
+      case 'two_column':
+        visualRules.push(
+          `MANDATORY two_column comparison — ${v.hint || 'the trade-off described'}. {"leftTitle","leftPoints":[3-5],"rightTitle","rightPoints":[3-5]}.`
+        )
+        break
+    }
+  }
+
+  const system = `You are Filo's content generator. Generate professional, publication-grade content for ONE section of a larger document.
 
 Document Title: ${input.documentTitle}
 Document Type: ${input.documentType}
 Output Format: ${input.outputFormat}
 ${input.designDirection ? `\nDesign direction: ${input.designDirection}\n` : ''}
-RULES:
-1. Generate COMPLETE, PROFESSIONAL content - NO placeholders, NO lorem ipsum
-2. For table type: return content as a 2D array (array of arrays) with headers as the first row. Cells may be plain values or formula strings like "=SUM(B2:B10)" when the format is XLSX and a computed column makes sense.
-3. For list type: return content as an array of strings
-4. For paragraph type: return content as a plain text string
-5. For heading type: return content as a short string (the heading text)
-6. For quote type: return content as a string with the quote text
-7. For metric_grid type: return an array of 2-4 objects, each {"label": "Revenue", "value": "$1.2M", "change": "+18% YoY", "unit": "USD"}
-8. For callout type: return a string — one high-impact insight or note
-9. For chart type: return an object {"chartType": "bar|line|pie|donut|area", "title": "Chart title", "categories": ["Q1","Q2","Q3","Q4"], "series": [{"name": "Revenue", "data": [120, 135, 150, 180]}], "note": "optional caption"}
-10. For timeline type: return an array of {"label": "Phase name", "description": "what happens"}
-11. For diagram type: return an object {"kind": "flowchart|process|hierarchy", "title": "Diagram title", "steps": [{"label": "Step", "description": "details"}]} — minimum 2 steps
-12. For equation type: return an object {"latex": "x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}", "display": true} — VALID LaTeX; fractions as \\frac{}{}, powers as ^, subscripts as _, summation as \\sum_{}^{}, Greek as \\alpha etc. NEVER write math as plain text
-13. For key_takeaways type: return an array of 3-5 concise strings
-14. For two_column type: return {"leftTitle": "...", "leftPoints": ["..."], "rightTitle": "...", "rightPoints": ["..."]}
-15. Keep content substantial - each paragraph should be 3-5 sentences minimum
-16. Tables should have at least 3 rows of data
-17. Lists should have at least 3 items
-18. Chart data must be NUMERICALLY CONSISTENT with any table data in the same document
-19. In XLSX tables, cells in computed columns may be formula strings like "=SUM(B2:B10)" or "=C2*D2" using your OWN table's coordinates (row 1 = header). Keep formulas simple: SUM/AVERAGE/MIN/MAX/COUNT and +-*/ arithmetic over the table's real cells
-20. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones
-
+ABSOLUTE CONTENT RULES:
+1. Generate COMPLETE, PROFESSIONAL content — NO placeholders, NO lorem ipsum, NO meta commentary ("as an AI", "this section will")
+2. WORD BUDGET (hard requirement): this section's paragraphs must total ${minWords}-${maxWords} words${isDeck ? ' — slides are the exception: keep bullets tight (deck brevity beats the budget)' : isSheet ? ' — spreadsheets express depth through DATA, so grow the table rows instead of prose' : '. Write 3-6 substantial paragraphs of 4-6 full sentences each; develop ONE complete idea per paragraph with concrete specifics, examples, numbers, or mechanisms'}
+3. For table type: return content as a 2D array (array of arrays) with headers as the first row. Cells may be plain values or formula strings like "=SUM(B2:B10)" when the format is XLSX and a computed column makes sense.
+4. For list type: return content as an array of strings (each item a full, information-bearing clause — never 2-word stubs)
+5. For paragraph type: return content as a plain text string
+6. For heading type: return content as a short string (the heading text)
+7. For quote type: return content as a string with the quote text
+8. For metric_grid type: return an array of 2-4 objects, each {"label": "Revenue", "value": "$1.2M", "change": "+18% YoY", "unit": "USD"}
+9. For callout type: return a string — one high-impact insight or note
+10. For chart type: return an object {"chartType": "bar|line|pie|donut|area|hbar|stacked|scatter", "title": "Chart title", "categories": ["Q1","Q2","Q3","Q4"], "series": [{"name": "Revenue", "data": [120, 135, 150, 180]}], "note": "optional caption", "xLabel": "optional", "yLabel": "optional"}. ${isDeck ? 'For decks omit xLabel/yLabel.' : 'Include xLabel/yLabel when axes carry units.'}
+11. For timeline type: return an array of {"label": "Phase name", "description": "what happens"}
+12. For diagram type: return an object {"kind": "flowchart|process|hierarchy", "title": "Diagram title", "steps": [{"label": "Step", "description": "details"}]} — minimum 3 steps, labels ≤4 words, descriptions ≤14 words
+13. For equation type: return an object {"latex": "x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}", "display": true} — VALID LaTeX; fractions as \\frac{}{}, powers as ^, subscripts as _, summation as \\sum_{}^{}, Greek as \\alpha etc. NEVER write math as plain text
+14. For key_takeaways type: return an array of 3-5 concise strings
+15. For two_column type: return {"leftTitle": "...", "leftPoints": ["..."], "rightTitle": "...", "rightPoints": ["..."]}
+16. Tables: ≥3 data rows; numeric columns carry numbers, not words; no placeholder "TBD"/"N/A" cells unless the domain genuinely requires them
+17. CHART↔TABLE CONSISTENCY: when a section has both a chart and a table covering the same metric, the numbers MUST agree
+18. In XLSX tables, cells in computed columns may be formula strings like "=SUM(B2:B10)" or "=C2*D2" using your OWN table's coordinates (row 1 = header). Keep formulas simple: SUM/AVERAGE/MIN/MAX/COUNT and +-*/ arithmetic over the table's real cells
+19. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones
+20. Do NOT repeat content from the previously-written sections listed in the context — advance the document
+${visualRules.length ? `\nMANDATORY VISUALS FOR THIS SECTION (the blueprint requires them — output each as its own component in a sensible position, usually after the first or second paragraph):\n${visualRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n` : ''}
 RESPOND WITH JSON:
 {
   "components": [
@@ -160,16 +240,19 @@ RESPOND WITH JSON:
       ? `Component Notes: ${input.componentNotes.filter(Boolean).join('; ')}`
       : ''
 
+  const numberedTitle = input.sectionNumber && level !== 'part' ? `${input.sectionNumber} ${input.sectionTitle}` : input.sectionTitle
+
   const user = `Generate content for this section:
 
-Section Title: ${input.sectionTitle}
+Section: ${numberedTitle}
+Section Level: ${level}
 Section Type: ${input.sectionType}
 ${notes}
 ${input.sourceContext ? `\nSOURCE MATERIAL EXTRACTED FROM THE USER'S FILES (ground the content in these facts where relevant — do not contradict them):\n${input.sourceContext.slice(0, 12000)}\n` : ''}
 ${input.globalContext ? `\nPreviously written content (for continuity, do not repeat):\n${input.globalContext}\n` : ''}
 Original Request: ${input.originalPrompt}
 
-Generate the actual content now. Be thorough and professional.`
+Generate the actual content now. ${level === 'part' ? 'This is a PART divider — write exactly one short orienting paragraph (2-3 sentences) that frames the part; do not add lists, tables or charts.' : isDeck ? 'Keep each bullet ≤16 words; slides must not carry prose paragraphs.' : 'Meet the word budget with substantive, specific, well-developed prose.'}`
 
   return { system, user }
 }
@@ -322,6 +405,8 @@ export function parsePlanResponse(
     design?: DesignSpecification
     sourceContext?: string | null
     metadata?: Record<string, unknown>
+    /** Document scale — drives numbering + visual cadence normalization. */
+    scale?: import('./doc-scale').DocumentScale
   }
 ): ArtifactSpecification {
   // Parsed loosely (same as the legacy pipeline) — AI JSON is normalized
@@ -332,19 +417,42 @@ export function parsePlanResponse(
     sections?: Array<Record<string, any>>
   }
 
-  const sections: ArtifactSection[] = (parsed.sections || []).map((s, idx) => ({
-    id: s.id || uuid(),
-    type: (s.type || 'content') as ArtifactSection['type'],
-    title: s.title || `Section ${idx + 1}`,
-    order: s.order ?? idx,
-    components: (s.components || []).map((c: Record<string, any>, cIdx: number) => ({
-      id: c.id || uuid(),
-      type: c.type || 'paragraph',
-      order: c.order ?? cIdx,
-      content: c.content || null,
-      data: c.note ? { note: c.note } : undefined,
-    })),
-  })) as ArtifactSection[]
+  const scale = designOverrides?.scale
+  const isDeck = outputFormat === 'PPTX'
+
+  const sections: ArtifactSection[] = (parsed.sections || []).map((s, idx) => {
+    // Normalize the section level: valid values only, default chapter.
+    const rawLevel = String(s.level || '').toLowerCase()
+    const level = ['part', 'chapter', 'section', 'subsection'].includes(rawLevel) ? rawLevel : 'chapter'
+    // Normalize the blueprint's mandatory visuals (kind whitelist + hints).
+    const rawVisuals = Array.isArray(s.visuals) ? s.visuals : []
+    const visuals = rawVisuals
+      .map((v: unknown) => {
+        const vo = (v && typeof v === 'object' ? v : {}) as Record<string, unknown>
+        const kind = String(vo.kind || '').toLowerCase()
+        const validKinds = ['chart', 'table', 'diagram', 'metrics', 'timeline', 'two_column']
+        return validKinds.includes(kind)
+          ? { kind, hint: typeof vo.hint === 'string' ? vo.hint.slice(0, 200) : undefined }
+          : null
+      })
+      .filter(Boolean) as Array<{ kind: string; hint?: string }>
+
+    return {
+      id: s.id || uuid(),
+      type: (s.type || (level === 'part' ? 'heading' : 'content')) as ArtifactSection['type'],
+      title: s.title || `Section ${idx + 1}`,
+      order: s.order ?? idx,
+      level,
+      visuals,
+      components: (s.components || []).map((c: Record<string, any>, cIdx: number) => ({
+        id: c.id || uuid(),
+        type: c.type || 'paragraph',
+        order: c.order ?? cIdx,
+        content: c.content || null,
+        data: c.note ? { note: c.note } : undefined,
+      })),
+    } as ArtifactSection & { level?: string; visuals?: Array<{ kind: string; hint?: string }> }
+  }) as ArtifactSection[]
 
   // Ensure at least one section
   if (sections.length === 0) {
@@ -356,6 +464,18 @@ export function parsePlanResponse(
       components: [],
     })
   }
+
+  // ---- deterministic normalization pass (order-independent of AI mood) ----
+  const withMeta: Array<Partial<ArtifactSection> & { id: string; visuals?: ArtifactSection['visuals']; number?: string; level?: string }> = sections
+  if (scale && !isDeck && outputFormat !== 'CSV') {
+    enforceVisualCadence(withMeta, scale, {
+      businessLike: /report|business|financial|budget|proposal|plan|performance|revenue|market/i.test(
+        `${parsed.title || ''} ${parsed.description || ''}`
+      ),
+    })
+  }
+  // Numbering: documents get hierarchical numbers; decks stay clean.
+  if (!isDeck) assignSectionNumbers(withMeta)
 
   return {
     id: uuid(),
@@ -376,11 +496,11 @@ export function parsePlanResponse(
     },
     validation: {
       requireTitle: true,
-      maxSections: 50,
+      maxSections: 80,
       minSections: 1,
       requiredSections: [],
       forbiddenContent: ['lorem ipsum', 'placeholder', '[insert here]'],
-      maxLength: 100000,
+      maxLength: 400000,
       mustIncludeBranding: false,
       validateCalculations: true,
       validateReferences: false,

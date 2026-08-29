@@ -168,12 +168,13 @@ test('§3b COMPLETE_FAILED releases the render claim before returning', () => {
 test('§3c PDF renderer rejects on pdfkit errors and cannot hang forever', () => {
   // The PdfRenderer moved to src/services/renderers/pdf-renderer.ts in
   // Phase 8 (document-renderer.ts is now the facade) — the CONTRACT is
-  // unchanged: stream errors reject, a 120s timeout bounds the render, and
+  // unchanged: stream errors reject, a bounded timeout guards the render
+  // (240s since v2: two-pass TOC rendering lays the body out twice), and
   // the guarded promise is awaited before returning bytes.
   const pdf = read('src', 'services', 'renderers', 'pdf-renderer.ts')
   const pdfRender = pdf.match(/class PdfRenderer[\s\S]*?async render\([\s\S]*?\n  \}/)?.[0] || ''
   assert.match(pdfRender, /doc\.on\('error'/, 'pdfkit stream errors must reject the render promise')
-  assert.match(pdfRender, /timed out after 120s/, 'PDF render must be bounded by a timeout')
+  assert.match(pdfRender, /timed out after 240s/, 'PDF render must be bounded by a timeout')
   assert.match(pdfRender, /await done/, 'render must await the guarded promise')
 })
 

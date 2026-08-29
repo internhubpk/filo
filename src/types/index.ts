@@ -309,6 +309,16 @@ export interface ArtifactSection {
   content?: string
   components: SectionComponent[]
   config?: Record<string, unknown>
+  /**
+   * Outline hierarchy level (document-scale engine): "part" = major division
+   * header, "chapter" = normal content section (default), "section" =
+   * sub-section of the preceding chapter. Older blueprints omit it.
+   */
+  level?: 'part' | 'chapter' | 'section' | 'subsection'
+  /** Deterministic outline number computed at planning time ("2", "2.1", "II"). */
+  number?: string
+  /** Mandatory visuals the content generator must produce for this section. */
+  visuals?: Array<{ kind: 'chart' | 'table' | 'diagram' | 'metrics' | 'timeline' | 'two_column'; hint?: string }>
 }
 
 export type SectionType = 

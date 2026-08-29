@@ -7,7 +7,16 @@
 // =============================================================================
 
 import type { ArtifactSpecification, BrandingConfig, ColorPalette } from '@/types'
-import { THEMES, getTheme, chartPaletteFor, type ThemeTokens } from '@/services/themes'
+import {
+  THEMES,
+  getTheme,
+  chartPaletteFor,
+  headingOrnamentFor,
+  footerStyleFor,
+  type ThemeTokens,
+  type HeadingOrnament,
+  type FooterStyle,
+} from '@/services/themes'
 import { normalizeChartSpec, renderChart, type NormalizedChart } from '@/services/chart-engine'
 import { normalizeDiagramSpec, renderDiagram, type DiagramSpec } from '@/services/diagram-engine'
 import { renderEquation, equationLatexOf } from '@/services/math-engine'
@@ -203,6 +212,12 @@ export interface DerivedTheme {
   colors: ColorPalette
   accent: string
   chartPalette: string[]
+  /** Structural design dialect — renderers MUST honor these. */
+  ornament: HeadingOrnament
+  footer: FooterStyle
+  cover: ThemeTokens['cover']
+  table: ThemeTokens['table']
+  headingCase: ThemeTokens['headingCase']
 }
 
 /**
@@ -224,12 +239,56 @@ export function deriveTheme(spec: ArtifactSpecification): DerivedTheme {
     ...(design?.colors ?? {}),
   }
   const accent = colors.accent || tokens.colors.accent
+
+  // PRINT-SAFETY REMAP: dark-canvas themes (professional-dark) are designed
+  // for screens — PPTX paints their dark background, but DOCX/PDF render on
+  // WHITE paper. Without this remap those documents shipped near-white
+  // headings on white pages — invisible text. For paper formats we keep the
+  // theme's accent identity and derive a light-canvas palette.
+  const format = String(spec.outputFormat || '').toUpperCase()
+  const isPaperFormat = format === 'DOCX' || format === 'PDF'
+  if (isPaperFormat && isDarkColor(tokens.colors.background)) {
+    const safePrimary = isDarkColor(accent) ? accent : '#334155'
+    Object.assign(colors, {
+      background: '#FFFFFF',
+      card: '#FFFFFF',
+      foreground: '#111827',
+      primary: safePrimary,
+      muted: '#F1F5F9',
+      mutedForeground: '#64748B',
+      border: '#E2E8F0',
+    })
+  }
+
   return {
     tokens,
     colors,
     accent,
     chartPalette: chartPaletteFor(tokens, accent),
+    ornament: headingOrnamentFor(tokens),
+    footer: footerStyleFor(tokens),
+    cover: tokens.cover,
+    table: tokens.table,
+    headingCase: tokens.headingCase,
   }
+}
+
+/** Relative luminance (0=black, 1=white) of a hex color. */
+export function luminance(color: string | undefined, fallback = '#FFFFFF'): number {
+  let hex = String(color || '').trim()
+  if (/^#[0-9a-fA-F]{6}$/.test(hex)) hex = hex.slice(1)
+  else if (/^[0-9a-fA-F]{6}$/.test(hex)) hex = hex
+  else hex = fallback.replace('#', '')
+  const r = parseInt(hex.slice(0, 2), 16) / 255
+  const g = parseInt(hex.slice(2, 4), 16) / 255
+  const b = parseInt(hex.slice(4, 6), 16) / 255
+  const lin = (v: number) => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
+  return 0.2126 * lin(r) + 0.7152 * lin(g) + 0.0722 * lin(b)
+}
+
+/** True when the color is dark enough that white text on it stays readable. */
+export function isDarkColor(color: string | undefined): boolean {
+  return luminance(color) < 0.4
 }
 
 // ==================== IMAGE PIPELINE (charts + diagrams) ====================
