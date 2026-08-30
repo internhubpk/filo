@@ -335,7 +335,7 @@ async function main() {
   const plans = await convex.query(api.plans.getAllPlans, {});
   const pro = (plans || []).find((p) => p.tier === 'pro') || (plans || []).find((p) => p.aiChatEnabled);
   if (pro) {
-    await convex.mutation(api.users.updateUser, { userId: user.id, planId: pro._id });
+    await convex.mutation(api.users.updateUser, { userId: user.id, planId: pro._id, serverToken: SERVER_SECRET });
     console.log(`user ${user.id} upgraded to plan ${pro.name || pro.tier}`);
   }
 

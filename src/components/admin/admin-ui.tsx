@@ -77,6 +77,8 @@ export function AdminTable({
   onSearch,
   searchPlaceholder = "Search…",
   toolbar,
+  emptyTitle = "Nothing here yet",
+  emptyDescription = "Records appear here automatically as the platform is used.",
 }: {
   columns: string[];
   children: ReactNode;
@@ -88,6 +90,9 @@ export function AdminTable({
   onSearch?: (v: string) => void;
   searchPlaceholder?: string;
   toolbar?: ReactNode;
+  /** Shown when rowsCount === 0 (e.g. "No payments match this filter"). */
+  emptyTitle?: string;
+  emptyDescription?: string;
 }) {
   if (loading) {
     return (
@@ -107,10 +112,8 @@ export function AdminTable({
         <div className="mb-3 flex size-11 items-center justify-center rounded-full bg-muted text-muted-foreground">
           <Inbox className="size-5" />
         </div>
-        <p className="text-sm font-medium">Nothing here yet</p>
-        <p className="mt-1 text-xs text-muted-foreground">
-          Records appear here automatically as the platform is used.
-        </p>
+        <p className="text-sm font-medium">{emptyTitle}</p>
+        <p className="mt-1 max-w-sm text-xs text-muted-foreground">{emptyDescription}</p>
       </div>
     );
   }

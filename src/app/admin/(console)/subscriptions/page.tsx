@@ -24,7 +24,7 @@ export default function AdminSubscriptionsPage() {
   const [query, setQuery] = useState("");
   const subs = useApi<any[]>(
     () => apiClient.adminSubscriptions(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
-    { pollMs: 15_000 }
+    { pollMs: 15_000, deps: [filter] }
   );
 
   const rows = useMemo(() => {
@@ -100,6 +100,12 @@ export default function AdminSubscriptionsPage() {
         search={query}
         onSearch={setQuery}
         searchPlaceholder="Search subscriber, plan or Safepay id…"
+        emptyTitle={filter !== "all" || query ? "No subscriptions match" : "No subscriptions yet"}
+        emptyDescription={
+          filter !== "all" || query
+            ? "Try a different status filter or clear the search."
+            : "Subscriptions appear here as soon as users check out through Safepay."
+        }
       >
         {rows.map((s) => (
           <tr key={s._id} className="border-b last:border-0 hover:bg-accent/30">

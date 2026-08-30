@@ -127,6 +127,12 @@ export default function AdminUsersPage() {
         search={query}
         onSearch={setQuery}
         searchPlaceholder="Search name or email…"
+        emptyTitle={query || statusFilter !== "all" ? "No users match" : "No users yet"}
+        emptyDescription={
+          query || statusFilter !== "all"
+            ? "Try a different search term or clear the filter chips."
+            : "Users appear here the moment someone registers."
+        }
       >
         {rows.map((u) => (
           <tr key={u._id} className="border-b last:border-0 hover:bg-accent/30">

@@ -134,7 +134,7 @@ export default function AdminOverviewPage() {
   const stats = useApi<Stats>(() => apiClient.adminStats().then((r) => (r.success ? (r.data as Stats) : null)), { pollMs: 20_000 });
   const analytics = useApi<Analytics>(
     () => apiClient.adminAnalytics(parseInt(range, 10)).then((r) => (r.success ? (r.data as Analytics) : null)),
-    { pollMs: 60_000 }
+    { pollMs: 60_000, deps: [range] }
   );
   const aiUsage = useApi<AiUsage>(fetchAiUsage, { pollMs: 45_000 });
 

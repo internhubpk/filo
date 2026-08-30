@@ -18,6 +18,13 @@ interface UseApiOptions {
   pollMs?: number;
   /** Skip the initial fetch (e.g. waiting for a jobId). */
   enabled?: boolean;
+  /**
+   * Reactive inputs the fetcher closes over (e.g. ["active"] for a status
+   * filter). When any value changes, the hook refetches IMMEDIATELY.
+   * Without this, a changed filter only took effect on the next poll tick —
+   * filter chips appeared dead for up to a full poll interval.
+   */
+  deps?: unknown[];
 }
 
 interface UseApiResult<T> {
@@ -32,7 +39,7 @@ export function useApi<T = unknown>(
   fetcher: (() => Promise<T | null>) | null,
   options: UseApiOptions = {}
 ): UseApiResult<T> {
-  const { pollMs = 0, enabled = true } = options;
+  const { pollMs = 0, enabled = true, deps } = options;
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState<boolean>(Boolean(fetcher) && enabled);
@@ -61,6 +68,10 @@ export function useApi<T = unknown>(
     }
   }, []);
 
+  // depsKey: stable string form of the reactive inputs so the effect below
+  // re-runs exactly when a filter / range / parameter changes.
+  const depsKey = deps ? JSON.stringify(deps) : "";
+
   useEffect(() => {
     mounted.current = true;
     if (!fetcher || !enabled) {
@@ -88,7 +99,7 @@ export function useApi<T = unknown>(
       if (interval) clearInterval(interval);
       document.removeEventListener("visibilitychange", onFocus);
     };
-  }, [Boolean(fetcher), enabled, pollMs]);
+  }, [Boolean(fetcher), enabled, pollMs, depsKey]);
 
   return { data, error, loading, refresh: () => run(true) };
 }

@@ -327,6 +327,60 @@ class ApiClient {
     })
   }
 
+  /**
+   * Bulk delete artifacts (ownership verified per id server-side).
+   * Returns per-id success/failure so the UI can report partial results.
+   */
+  async bulkDeleteArtifacts(ids: string[]): Promise<ApiResponse<{
+    deleted: string[]
+    deletedCount: number
+    failed: Array<{ id: string; error: string }>
+    storageCleaned: number
+    requested: number
+  }>> {
+    return this.request('/artifacts/bulk', {
+      method: 'POST',
+      body: JSON.stringify({ action: 'delete', ids }),
+    })
+  }
+
+  /**
+   * Export selected artifacts as a single ZIP. Returns the binary ZIP as a
+   * Blob — callers trigger a browser download from it.
+   */
+  async exportArtifactsZip(ids: string[]): Promise<{ ok: boolean; blob?: Blob; fileName?: string; error?: string }> {
+    if (typeof window === 'undefined') {
+      return { ok: false, error: 'Browser only' }
+    }
+    try {
+      const res = await fetch(`${this.baseUrl}/artifacts/export-zip`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...this.getAuthHeader(),
+        },
+        body: JSON.stringify({ ids }),
+      })
+      if (!res.ok) {
+        let error = `HTTP ${res.status}`
+        try {
+          const json = await res.json()
+          if (json?.error) error = json.error
+        } catch { /* binary or non-JSON error body */ }
+        return { ok: false, error }
+      }
+      const blob = await res.blob()
+      const disposition = res.headers.get('content-disposition') ?? ''
+      const match = disposition.match(/filename="([^"]+)"/)
+      return { ok: true, blob, fileName: match?.[1] ?? 'filo-export.zip' }
+    } catch (err) {
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'ZIP export failed',
+      }
+    }
+  }
+
   // ==================== PLAN ENDPOINTS ====================
 
   /**

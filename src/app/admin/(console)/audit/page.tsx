@@ -39,12 +39,24 @@ function actorBadge(type: string) {
 
 export default function AdminAuditPage() {
   const [filter, setFilter] = useState<string>("all");
+  const [query, setQuery] = useState("");
   const logs = useApi<any[]>(
     () => apiClient.adminAuditLogs(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
-    { pollMs: 20_000 }
+    { pollMs: 20_000, deps: [filter] }
   );
 
-  const rows = useMemo(() => logs.data ?? [], [logs.data]);
+  const rows = useMemo(() => {
+    const all = logs.data ?? [];
+    const q = query.trim().toLowerCase();
+    if (!q) return all;
+    return all.filter(
+      (log) =>
+        String(log.action ?? "").toLowerCase().includes(q) ||
+        String(log.actorEmail ?? "").toLowerCase().includes(q) ||
+        String(log.actorId ?? "").toLowerCase().includes(q) ||
+        String(log.targetType ?? "").toLowerCase().includes(q)
+    );
+  }, [logs.data, query]);
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -62,6 +74,15 @@ export default function AdminAuditPage() {
         error={logs.error}
         onRetry={() => void logs.refresh()}
         rowsCount={rows.length}
+        search={query}
+        onSearch={setQuery}
+        searchPlaceholder="Search action, actor or target…"
+        emptyTitle={filter !== "all" || query ? "No audit entries match" : "Audit log is empty"}
+        emptyDescription={
+          filter !== "all" || query
+            ? "Try a different action filter or clear the search."
+            : "Security-relevant events are recorded here as the platform is used."
+        }
       >
         {rows.map((log) => (
           <tr key={log._id} className="border-b last:border-0 hover:bg-accent/30">

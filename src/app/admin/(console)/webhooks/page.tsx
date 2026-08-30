@@ -32,7 +32,7 @@ export default function AdminWebhooksPage() {
 
   const events = useApi<any[]>(
     () => apiClient.adminWebhookEvents(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
-    { pollMs: 10_000 } // live-ish monitor — webhooks arrive in near real time
+    { pollMs: 10_000, deps: [filter] } // live-ish monitor — webhooks arrive in near real time
   );
 
   const rows = useMemo(() => {
@@ -71,6 +71,12 @@ export default function AdminWebhooksPage() {
         search={query}
         onSearch={setQuery}
         searchPlaceholder="Search event id, type or error…"
+        emptyTitle={filter !== "all" || query ? "No webhook events match" : "No webhook events yet"}
+        emptyDescription={
+          filter !== "all" || query
+            ? "Try a different status filter or clear the search."
+            : "Safepay deliveries are recorded here as they arrive."
+        }
       >
         {rows.map((ev) => (
           <tr key={ev._id} className="border-b align-middle last:border-0 hover:bg-accent/30">

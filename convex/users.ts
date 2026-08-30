@@ -142,15 +142,40 @@ export const createUser = mutation({
   },
 });
 
-// Update user profile
+// Update user profile.
+//
+// SECURITY: `planId` changes are BILLING-sensitive (they gate AI
+// generation and plan entitlements). This mutation is reachable directly
+// through the Convex HTTP API by anyone holding the deployment URL, so a
+// planId change now requires the shared server token (same guard as
+// billing/generation). Name/image changes stay open — they are only routed
+// through the ownership-checked /api/user/profile endpoint.
+// Deployments without FILO_SERVER_SECRET configured (throwaway local dev)
+// still allow the change so local test harnesses keep working.
 export const updateUser = mutation({
   args: {
     userId: v.id("users"),
     name: v.optional(v.string()),
     image: v.optional(v.string()),
     planId: v.optional(v.id("plans")),
+    serverToken: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    if (args.planId !== undefined) {
+      const secret = process.env.FILO_SERVER_SECRET;
+      if (secret) {
+        if (
+          typeof args.serverToken !== "string" ||
+          args.serverToken.length !== secret.length ||
+          args.serverToken !== secret
+        ) {
+          throw new Error(
+            "Unauthorized: plan changes require a valid server token"
+          );
+        }
+      }
+    }
+
     const updates: Record<string, unknown> = {
       updatedAt: Date.now(),
     };

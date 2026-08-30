@@ -28,7 +28,7 @@ export default function AdminPaymentsPage() {
   const [query, setQuery] = useState("");
   const payments = useApi<any[]>(
     () => apiClient.adminPayments(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
-    { pollMs: 15_000 }
+    { pollMs: 15_000, deps: [filter] }
   );
 
   const rows = useMemo(() => {
@@ -68,6 +68,12 @@ export default function AdminPaymentsPage() {
         search={query}
         onSearch={setQuery}
         searchPlaceholder="Search customer, email or tracking id…"
+        emptyTitle={filter !== "all" || query ? "No payments match" : "No payments yet"}
+        emptyDescription={
+          filter !== "all" || query
+            ? "Try a different status filter or clear the search."
+            : "Payments appear here the moment Safepay webhooks are verified."
+        }
       >
         {rows.map((p) => (
           <tr key={p._id} className="border-b last:border-0 hover:bg-accent/30">

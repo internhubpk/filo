@@ -218,20 +218,26 @@ export async function GET(request: NextRequest) {
       }
     }
 
+    // Standard response envelope: { success, data }. The list previously
+    // returned { files } at the TOP level while every consumer reads
+    // `data.files` — so the Files page permanently showed "0 files" even
+    // when uploads existed. One envelope, consistent with every other API.
     return NextResponse.json({
       success: true,
-      files: files.map((f) => ({
-        id: f._id,
-        name: f.originalName,
-        originalName: f.originalName,
-        mimeType: f.mimeType,
-        size: f.size,
-        r2Key: f.r2Key,
-        createdAt: f.createdAt,
-        uploaded: f.uploaded,
-      })),
-      total: files.length,
-      storageBytes: files.reduce((s, f) => s + (f.size || 0), 0),
+      data: {
+        files: files.map((f) => ({
+          id: f._id,
+          name: f.originalName,
+          originalName: f.originalName,
+          mimeType: f.mimeType,
+          size: f.size,
+          r2Key: f.r2Key,
+          createdAt: f.createdAt,
+          uploaded: f.uploaded,
+        })),
+        total: files.length,
+        storageBytes: files.reduce((s, f) => s + (f.size || 0), 0),
+      },
     })
   } catch (error) {
     console.error('[FILES] List error:', error)
