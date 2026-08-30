@@ -27,6 +27,7 @@ import {
   HeadingLevel,
   HeightRule,
   ImageRun,
+  LeaderType,
   LineRuleType,
   PageBreak,
   PageNumber,
@@ -35,7 +36,6 @@ import {
   ShadingType,
   Table,
   TableCell,
-  TableOfContents,
   TabStopType,
   TableRow,
   TextRun,
@@ -166,11 +166,12 @@ export class DocxRenderer implements DocumentRenderer {
     }
 
     // ---------------- TABLE OF CONTENTS ----------------
-    // Professional TOC: a real Word TOC FIELD limited to outline headings
-    // (parts + chapters — component sub-headings are content, not outline),
-    // with updateFields so Word refreshes page numbers on open. The
-    // "Contents" title is a styled paragraph, NOT a Heading — it used to
-    // list itself as the first TOC entry.
+    // STATIC styled TOC (numbered outline + dot leaders) instead of a Word
+    // TOC field. The field approach left an EMPTY page in every non-Word
+    // viewer (headless preview, quick-look, browser DOCX preview) until a
+    // user manually updated fields in desktop Word — unacceptable for a paid
+    // product. A static outline renders identically EVERYWHERE, and Word
+    // users keep full navigation via the real heading styles + nav pane.
     const contentSectionsForToc = spec.sections[0]?.type === 'cover' ? spec.sections.slice(1) : spec.sections
     if (contentSectionsForToc.length >= 3) {
       children.push(
@@ -180,10 +181,38 @@ export class DocxRenderer implements DocumentRenderer {
             new TextRun({ text: 'Contents', bold: true, size: 34, color: hex6(colors.primary, '1E3A5F'), font: headingFont }),
           ],
           border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: hex6(colors.accent, '3B82F6'), space: 6 } },
-        }),
-        new TableOfContents('Contents', { hyperlink: true, headingStyleRange: '1-2' }),
-        new Paragraph({ children: [new PageBreak()] })
+        })
       )
+      const tocContentWidth = pageDims.width - margins.left - margins.right
+      for (const s of contentSectionsForToc) {
+        const lvl = ((s as { level?: string }).level || 'chapter').toLowerCase()
+        if (lvl === 'subsection') continue
+        const num = (s as { number?: string }).number
+        const isPart = lvl === 'part'
+        const isSub = lvl === 'section'
+        const label = isPart
+          ? num ? `Part ${num} — ${s.title}` : s.title
+          : num
+            ? isSub ? `${num}  ${s.title}` : `${num}.  ${s.title}`
+            : s.title
+        children.push(
+          new Paragraph({
+            spacing: { before: isPart ? 200 : 40, after: isPart ? 80 : 40 },
+            indent: isPart ? undefined : { left: isSub ? 720 : 360 },
+            tabStops: [{ type: TabStopType.RIGHT, position: tocContentWidth, leader: LeaderType.DOT }],
+            children: [
+              new TextRun({
+                text: label,
+                bold: isPart,
+                size: isPart ? 24 : 22,
+                color: isPart ? hex6(colors.primary, '1E3A5F') : hex6(colors.foreground, '1F2937'),
+                font: isPart ? headingFont : bodyFont,
+              }),
+            ],
+          })
+        )
+      }
+      children.push(new Paragraph({ children: [new PageBreak()] }))
     }
 
     // ---------------- SECTIONS (hierarchy-aware) ----------------
@@ -284,9 +313,6 @@ export class DocxRenderer implements DocumentRenderer {
       creator: 'Filo',
       title: spec.title,
       description: spec.description,
-      // updateFields: Word/LibreOffice refresh the TOC page numbers when the
-      // document opens, so a generated file never ships a stale/empty TOC.
-      features: { updateFields: true },
       styles: {
         default: {
           document: {

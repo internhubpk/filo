@@ -181,7 +181,9 @@ async function verifyDocx(buffer, spec, label, opts = {}) {
   check(`${label}: DOCX deep validation`, deep.ok, deep.issues.map((i) => i.message).join('; '))
   const zip = await JSZip.loadAsync(buffer)
   const xml = await zip.file('word/document.xml').async('string')
-  check(`${label}: TOC field present`, xml.includes('TOC') || xml.includes('fldChar'), 'no TOC field in document.xml')
+  // STATIC TOC: numbered Contents page renders in EVERY viewer (no Word field).
+  check(`${label}: static Contents page`, xml.includes('>Contents<'), 'no Contents title')
+  check(`${label}: TOC lists numbered chapters`, /Part I — |1\.\s\s/.test(xml.replace(/<[^>]+>/g, '')), 'TOC entries missing')
   check(`${label}: headings use Word styles`, (xml.match(/Heading1/g) || []).length >= 2, 'Heading1 count')
   check(`${label}: numbered outline heading`, xml.includes('Part I'), 'missing "Part I"')
   check(`${label}: numbered chapter heading`, xml.includes('1.'), 'missing "1."')
@@ -196,9 +198,6 @@ async function verifyDocx(buffer, spec, label, opts = {}) {
     check(`${label}: code block monospace runs`, monoRuns >= 2, `monoRuns=${monoRuns}`)
     check(`${label}: code language label`, xml.includes('PYTHON'), 'language tag missing')
   }
-  // updateFields → TOC refreshes on open (no stale/empty TOC)
-  const settings = await zip.file('word/settings.xml')?.async('string') ?? ''
-  check(`${label}: updateFields feature on`, /updateFields/.test(settings), 'settings.xml missing updateFields')
   const footer = await (zip.file('word/footer1.xml') || zip.file('word/footer2.xml') || zip.file('word/footer3.xml'))?.async('string') ?? ''
   check(`${label}: footer page number field`, footer.includes('PAGE') || footer.includes('CURRENT'), 'footer field missing')
   // print-safety: no near-white heading colors on white paper — EXCEPT when

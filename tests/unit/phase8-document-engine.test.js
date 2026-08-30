@@ -415,7 +415,7 @@ test('§12 DOCX renderer: editable native DOCX with cover, TOC and rich componen
   assert.ok(docXml.includes('Executive Summary'), 'section heading present')
   assert.ok(docXml.includes('EMEA'), 'table data present')
   assert.ok(docXml.includes('$4.2M'), 'metric grid present')
-  assert.ok(docXml.includes('TOC'), 'table of contents field present')
+  assert.ok(docXml.includes('>Contents<'), 'table of contents page present')
 })
 
 test('§13 PDF renderer: themed paginated PDF with page breaks + validation', async () => {

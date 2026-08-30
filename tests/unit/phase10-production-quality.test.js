@@ -214,7 +214,7 @@ test('§10-D1 DOCX: native OMML equations, diagram images, takeaways box — dee
   assert.ok(doc.includes('discount rate'), 'takeaway content present')
 
   // TOC + page numbers survive
-  assert.ok(doc.includes('TOC'), 'TOC field present')
+  assert.ok(doc.includes('>Contents<'), 'static Contents page present')
   const footer = Object.keys(zip.files).find((p) => /^word\/footer\d*\.xml$/.test(p))
   assert.ok(footer, 'footer part exists')
   const footerXml = await (await zip.file(footer)).async('string')
