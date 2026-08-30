@@ -160,6 +160,25 @@ export async function deleteFromR2(key: string): Promise<void> {
   await r2Client.send(command);
 }
 
+/**
+ * Download an object's bytes (AI-edit flow: the artifact's current file is
+ * fetched, ingested, and handed to the model as editable source content).
+ * Throws on absence so callers can distinguish "gone" from "empty".
+ */
+export async function downloadFromR2(key: string): Promise<Buffer> {
+  const command = new GetObjectCommand({
+    Bucket: BUCKET_NAME,
+    Key: key,
+  });
+  const response = await r2Client.send(command);
+  const body = response.Body as { transformToByteArray?: () => Promise<Uint8Array> } | undefined;
+  if (!body?.transformToByteArray) {
+    throw new Error("R2 object body unavailable");
+  }
+  const bytes = await body.transformToByteArray();
+  return Buffer.from(bytes);
+}
+
 // Check if file exists in R2
 // Uses HeadObject (metadata-only, no body transfer). Previously this used
 // GetObject and DOWNLOADED the whole object just to check existence — for a

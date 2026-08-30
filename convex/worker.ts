@@ -191,7 +191,14 @@ export const processJob = internalAction({
               planResponse.content || "{}",
               artifactType,
               outputFormat,
-              { design, scale }
+              {
+                design,
+                scale,
+                // Mechanically enforce the designer's chart decision —
+                // previously only prompt prose, so the cadence pass kept
+                // injecting decorative charts anyway.
+                useCharts: designPlan.useCharts,
+              }
             );
           } catch (parseErr) {
             lastPlanError = parseErr;
@@ -603,16 +610,20 @@ async function designStage(
  * The architect prompt body: the user request plus extracted file context so
  * plans can be grounded in attached source material (spec §21/§26).
  */
-function planUserPrompt(job: { prompt: string; sourceContext?: string | null }): string {
+function planUserPrompt(job: { prompt: string; sourceContext?: string | null; sourceArtifactId?: string | null }): string {
   const context = job.sourceContext?.trim();
+  const editPreamble = job.sourceArtifactId
+    ? "EDIT REQUEST — the source material below is the user's EXISTING document. Plan must REUSE its structure and headings (updated titles are allowed), carry its real content forward, and apply this edit instruction. Do not plan a different document.\n\n"
+    : "";
   if (context) {
     return (
+      editPreamble +
       `${job.prompt}\n\nSOURCE MATERIAL EXTRACTED FROM THE USER'S ATTACHED FILES ` +
       `(the plan MUST be grounded in this content; reuse its structure, facts ` +
       `and figures where relevant):\n${context.slice(0, 20000)}`
     );
   }
-  return job.prompt;
+  return editPreamble + job.prompt;
 }
 
 /** Human-readable design direction from the job's persisted designPlan. */
@@ -733,6 +744,10 @@ async function generateOneUnit(
     sectionLevel: section.level || "chapter",
     wordTarget,
     visuals: section.visuals ?? [],
+    // EDIT MODE: jobs that reference an existing artifact preserve and revise
+    // it instead of writing a from-scratch replacement.
+    isEdit: Boolean(job.sourceArtifactId),
+    editInstruction: job.sourceArtifactId ? job.prompt : null,
   });
 
   try {

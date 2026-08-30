@@ -196,18 +196,63 @@ export function validateDocument(
   }
 
   // --- Check 9: chart data validity ----------------------------------------
+  // A chart ships only when it is UNDERSTANDABLE: numeric series, series
+  // length aligned with the category labels, and no all-zero flatlines
+  // (the "forced nonsense chart" complaint).
   let chartIssues = 0
   for (const c of components) {
     if (c.type !== 'CHART' && c.type !== 'chart') continue
     const o = (c.content && typeof c.content === 'object' ? c.content : {}) as Record<string, unknown>
     const series = Array.isArray(o.series) ? (o.series as Array<Record<string, unknown>>) : []
+    const categories = Array.isArray(o.categories) ? (o.categories as unknown[]).filter((x) => typeof x === 'string' && String(x).trim()) : []
     const hasData = series.some((s) => Array.isArray(s.data) && s.data.some((d) => typeof d === 'number' && Number.isFinite(d)))
     if (!hasData) {
       chartIssues++
       issues.push({ type: 'INVALID_CHART_DATA', sectionId: c.sectionId, componentIndex: c.index, severity: 'error', message: 'Chart component has no numeric series data.' })
+      continue
+    }
+    const chartKind = String(o.chartType || '').toLowerCase()
+    const cartesian = ['bar', 'line', 'area', 'hbar', 'stacked'].includes(chartKind)
+    if (cartesian && categories.length > 0) {
+      for (const s of series) {
+        const len = Array.isArray(s.data) ? s.data.length : 0
+        if (len > 0 && len !== categories.length) {
+          chartIssues++
+          issues.push({
+            type: 'CHART_DATA_MISALIGNED',
+            sectionId: c.sectionId,
+            componentIndex: c.index,
+            severity: 'warning',
+            message: `Chart series has ${len} points for ${categories.length} categories — renderer will align them.`,
+          })
+          break
+        }
+      }
+    }
+    // Flatline detection: every series all-zero → the chart shows nothing.
+    const allZero = series.length > 0 && series.every((s) => {
+      const nums = Array.isArray(s.data) ? (s.data as unknown[]).filter((d): d is number => typeof d === 'number' && Number.isFinite(d)) : []
+      return nums.length > 0 && nums.every((n) => n === 0)
+    })
+    if (allZero) {
+      chartIssues++
+      issues.push({ type: 'CHART_ALL_ZERO', sectionId: c.sectionId, componentIndex: c.index, severity: 'error', message: 'Chart data is all zeros — a chart of nothing is decoration.' })
     }
   }
-  checks.push({ id: 'chart-data', label: 'Charts carry numeric data', passed: chartIssues === 0 })
+  checks.push({ id: 'chart-data', label: 'Charts carry aligned, meaningful data', passed: chartIssues === 0 })
+
+  // --- Check 9b: code blocks carry real code --------------------------------
+  let codeIssues = 0
+  for (const c of components) {
+    if (c.type !== 'CODE' && c.type !== 'code') continue
+    const o = (c.content && typeof c.content === 'object' ? c.content : {}) as Record<string, unknown>
+    const code = typeof o.code === 'string' ? o.code : typeof c.content === 'string' ? c.content : ''
+    if (!code.trim()) {
+      codeIssues++
+      issues.push({ type: 'EMPTY_CODE_BLOCK', sectionId: c.sectionId, componentIndex: c.index, severity: 'error', message: 'Code component has no code content.' })
+    }
+  }
+  checks.push({ id: 'code-blocks-valid', label: 'Code blocks carry source code', passed: codeIssues === 0 })
 
   // --- Check 10: equation validity (math must be renderable, never broken) --
   let eqIssues = 0

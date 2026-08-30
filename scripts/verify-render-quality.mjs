@@ -76,12 +76,12 @@ function para(words) {
 
 /** Rich blueprint: 2 parts, 8 chapters, 2 subsections, visuals everywhere. */
 function buildRichSpec(themeId) {
-  const S = (id, title, level, number, comps, visuals) => ({
-    id, type: level === 'part' ? 'heading' : 'content', title, order: 0,
+  const S = (id, title, level, number, comps, visuals, type) => ({
+    id, type: type || (level === 'part' ? 'heading' : 'content'), title, order: 0,
     level, number, visuals, components: (comps || []).map((c, i) => ({ id: `${id}-c${i}`, type: c.type, order: i, content: c.content, data: null })),
   })
   const sections = [
-    S('cover', 'Distributed Systems Reliability Field Guide', 'chapter', undefined, [{ type: 'paragraph', content: 'An operator-focused handbook for teams running distributed systems in production.' }]),
+    S('cover', 'Distributed Systems Reliability Field Guide', 'chapter', undefined, [{ type: 'paragraph', content: 'An operator-focused handbook for teams running distributed systems in production.' }], [], 'cover'),
     S('p1', 'Foundations', 'part', 'I', []),
     S('c1', 'Why Availability Budgets Change Team Behavior', 'chapter', '1', [
       { type: 'paragraph', content: para(120) },
@@ -135,6 +135,8 @@ function buildRichSpec(themeId) {
     ], [{ kind: 'chart' }, { kind: 'table' }]),
     S('c4', 'The Runbook Is the Product', 'chapter', '4', [
       { type: 'paragraph', content: para(100) },
+      { type: 'code', content: { language: 'python', code: 'def burn_rate(slo: float, window: int) -> float:\n    """Compute the SLO burn rate over a sliding window."""\n    errors = count_failed_requests(window)\n    total = count_total_requests(window)\n    if total == 0:\n        return 0.0\n    observed = 1.0 - (errors / total)\n    return (1.0 - observed) / (1.0 - slo)' } },
+      { type: 'paragraph', content: para(90) },
       { type: 'quote', content: 'An unread runbook is indistinguishable from no runbook at all.' },
       { type: 'paragraph', content: para(90) },
       { type: 'timeline', content: [
@@ -188,6 +190,15 @@ async function verifyDocx(buffer, spec, label, opts = {}) {
   }
   const media = Object.keys(zip.files).filter((p) => /^word\/media\//.test(p))
   check(`${label}: chart/diagram images embedded`, media.length >= 3, `media=${media.length}`)
+  // CODE BLOCKS: monospace runs + language label must exist in the XML.
+  if (opts.expectCode !== false) {
+    const monoRuns = (xml.match(/Consolas|Courier New/g) || []).length
+    check(`${label}: code block monospace runs`, monoRuns >= 2, `monoRuns=${monoRuns}`)
+    check(`${label}: code language label`, xml.includes('PYTHON'), 'language tag missing')
+  }
+  // updateFields → TOC refreshes on open (no stale/empty TOC)
+  const settings = await zip.file('word/settings.xml')?.async('string') ?? ''
+  check(`${label}: updateFields feature on`, /updateFields/.test(settings), 'settings.xml missing updateFields')
   const footer = await (zip.file('word/footer1.xml') || zip.file('word/footer2.xml') || zip.file('word/footer3.xml'))?.async('string') ?? ''
   check(`${label}: footer page number field`, footer.includes('PAGE') || footer.includes('CURRENT'), 'footer field missing')
   // print-safety: no near-white heading colors on white paper — EXCEPT when
@@ -222,6 +233,11 @@ async function verifyPdf(buffer, spec, label) {
   check(`${label}: TOC with page numbers`, /Table of Contents/.test(all) && /\.\s*\d+/.test(all), 'TOC text missing')
   check(`${label}: part heading in body`, /Part I — Foundations/.test(all), 'Part I missing')
   check(`${label}: numbered chapter in body`, /2\.\s+Consensus Is Not a Backup Strategy/.test(all), 'chapter number missing')
+  // TOC NUMBERING: the FIRST content chapter must appear in the TOC as "1." —
+  // the cover no longer consumes outline number 1.
+  check(`${label}: TOC starts at 1 (cover not numbered)`, /1\.\s+Why Availability Budgets/.test(all), 'first chapter not numbered 1 in TOC/body')
+  // CODE BLOCKS: the python source must appear in the text layer.
+  check(`${label}: code block in text layer`, /burn_rate\(slo: float/.test(all) && /PYTHON/.test(all), 'code content missing')
   check(`${label}: figure captions present`, (all.match(/Figure \d+/g) || []).length >= 2, 'figure captions')
   check(`${label}: footer page stamps`, /\b2\b[\s\S]*\b3\b/.test(all) || /\d+/.test(all), 'no page numbers')
   check(`${label}: chart PNG embedded`, pdf.numPages > 0 && buffer.length > 60_000, `bytes=${buffer.length}`)
@@ -238,8 +254,11 @@ async function verifyPptx(buffer, spec, label) {
   for (const s of slides) allXml += await zip.file(s).async('string')
   check(`${label}: agenda slide`, /Agenda/.test(allXml), 'agenda missing')
   check(`${label}: part divider slide`, /PART I/.test(allXml), 'part divider missing')
+  // NATIVE CHARTS: chart parts with embedded workbooks (editable data)
+  const chartParts = Object.keys(zip.files).filter((p) => /^ppt\/charts\/chart\d+\.xml$/.test(p))
+  check(`${label}: native chart parts`, chartParts.length >= 1, `charts=${chartParts.length}`)
   const media = Object.keys(zip.files).filter((p) => /^ppt\/media\//.test(p))
-  check(`${label}: chart images embedded`, media.length >= 3, `media=${media.length}`)
+  check(`${label}: diagram/timeline images embedded`, media.length >= 1, `media=${media.length}`)
   check(`${label}: tables present`, (allXml.match(/<a:tbl>/g) || []).length >= 1, 'no native tables')
   check(`${label}: slide numbers`, /<a:t>2<\/a:t>/.test(allXml) || /<a:t>\d+<\/a:t>/.test(allXml), 'slide numbers missing')
 }
@@ -434,7 +453,7 @@ async function main() {
     const t0 = Date.now()
     const out = await renderArtifact(longSpec, compsFor(longSpec), 'DOCX')
     const docxMs = Date.now() - t0
-    await verifyDocx(out.buffer, longSpec, 'long:docx', { expectTables: false })
+    await verifyDocx(out.buffer, longSpec, 'long:docx', { expectTables: false, expectCode: false })
     console.log(`    (long DOCX: ${(out.buffer.length / 1024).toFixed(0)} KB in ${docxMs} ms)`)
 
     const deep = await validateRenderedOutputDeep(out.buffer, 'DOCX')
@@ -456,6 +475,68 @@ async function main() {
     const tocSlice = (all.replace(/\n/g, ' ').match(/Table of Contents[\s\S]{0,8000}/) || [''])[0]
     check('F: long PDF TOC entry has page number', /The Automation Ladder[\s\S]{0,200}?\d{1,3}/.test(tocSlice), 'no page number after chapter 24 entry')
     console.log(`    (long PDF: ${totalPages} pages in ${pdfMs} ms, ${(pdfOut.buffer.length / 1024).toFixed(0)} KB)`)
+  }
+
+  // ---------- G. engine-level regressions (pure functions) ----------
+  console.log('\n— G. Engine regressions: numbering, cadence, chart data, theme fidelity —')
+  {
+    // G1. Cover sections never consume outline numbers (TOC starts at 1).
+    const { assignSectionNumbers, enforceVisualCadence } = require(path.join(BUILD_DIR, 'services/doc-scale.js'))
+    const numbered = assignSectionNumbers([
+      { id: 'cov', type: 'cover', level: 'chapter' },
+      { id: 'a', type: 'content', level: 'chapter' },
+      { id: 'b', type: 'content', level: 'chapter' },
+      { id: 'b1', type: 'content', level: 'section' },
+    ])
+    check('G1: cover not numbered', numbered[0].number === undefined, `got ${numbered[0].number}`)
+    check('G1: first chapter is 1', numbered[1].number === '1', `got ${numbered[1].number}`)
+    check('G1: subsection is 2.1', numbered[3].number === '2.1', `got ${numbered[3].number}`)
+
+    // G2. Visual cadence: charts ONLY where quantitative; useCharts=false kills them.
+    const scaleG = resolveDocumentScale('standard report', 'standard')
+    const sectionsG = [
+      { id: 's1', type: 'content', level: 'chapter', title: 'Introduction to Governance Principles' },
+      { id: 's2', type: 'content', level: 'chapter', title: 'Quarterly Revenue Trends and Forecast' },
+      { id: 's3', type: 'content', level: 'chapter', title: 'Implementation Roadmap Overview' },
+      { id: 's4', type: 'content', level: 'chapter', title: 'Market Share Breakdown by Region' },
+    ]
+    enforceVisualCadence(sectionsG, scaleG, { useCharts: true })
+    const kinds = sectionsG.map((s) => (s.visuals || []).map((v) => v.kind).join(','))
+    const chartedOnQualitative = (sectionsG[0].visuals || []).some((v) => v.kind === 'chart')
+    check('G2: no chart on qualitative section', !chartedOnQualitative, kinds.join(' | '))
+    const chartOnQuant = (sectionsG[1].visuals || []).some((v) => v.kind === 'chart') || (sectionsG[3].visuals || []).some((v) => v.kind === 'chart')
+    check('G2: chart allowed on quantitative section', chartOnQuant, kinds.join(' | '))
+    const sectionsNoCharts = sectionsG.map((s) => ({ id: s.id, type: s.type, level: s.level, title: s.title }))
+    enforceVisualCadence(sectionsNoCharts, scaleG, { useCharts: false })
+    check('G2: useCharts=false injects zero charts', sectionsNoCharts.every((s) => !(s.visuals || []).some((v) => v.kind === 'chart')))
+
+    // G3. Chart data validation: alignment, flatline rejection, pie slice cap.
+    const { normalizeChartSpec } = require(path.join(BUILD_DIR, 'services/chart-engine.js'))
+    const misaligned = normalizeChartSpec({
+      chartType: 'bar', title: 'T', categories: ['Q1', 'Q2', 'Q3', 'Q4'],
+      series: [{ name: 'A', data: [1, 2, 3, 4, 5, 6] }],
+    })
+    check('G3: misaligned series truncated to categories', misaligned && misaligned.series[0].data.length === 4 && misaligned.categories.length === 4, JSON.stringify(misaligned?.repairs))
+    const flatline = normalizeChartSpec({ chartType: 'bar', title: 'Z', categories: ['a', 'b', 'c'], series: [{ name: 'A', data: [0, 0, 0] }] })
+    check('G3: all-zero chart rejected', flatline === null)
+    const bigPie = normalizeChartSpec({ chartType: 'pie', title: 'P', categories: Array.from({ length: 14 }, (_, i) => `item${i}`), series: [{ name: 'S', data: Array.from({ length: 14 }, (_, i) => i + 1) }] })
+    check('G3: pie slices capped with Other', bigPie && bigPie.categories.length <= 8 && bigPie.categories.includes('Other'), `slices=${bigPie?.categories.length}`)
+    const nulled = normalizeChartSpec({ chartType: 'bar', title: 'N', categories: ['a', 'b', 'c'], series: [{ name: 'A', data: [null, null, null] }] })
+    check('G3: null-only series rejected', nulled === null)
+
+    // G4. Registry-first colors: a blueprint carrying the generic default
+    // palette + a real theme renders with the THEME palette, not black/blue.
+    const specG = buildRichSpec('financial')
+    specG.design.colors = {
+      primary: '#1a1a1a', secondary: '#333333', accent: '#3B82F6', background: '#ffffff', foreground: '#0f172a',
+      muted: '#f1f5f9', mutedForeground: '#64748b', border: '#e2e8f0', card: '#ffffff', cardForeground: '#0f172a',
+      success: '#16a34a', warning: '#f59e0b', error: '#dc2626', info: '#2563eb',
+    }
+    const outG = await renderArtifact(specG, compsFor(specG), 'DOCX')
+    const zipG = await JSZip.loadAsync(outG.buffer)
+    const xmlG = await zipG.file('word/document.xml').async('string')
+    check('G4: theme green kept (generic palette ignored)', xmlG.toUpperCase().includes('064E3B'), 'financial primary missing')
+    check('G4: generic black headings NOT applied', !xmlG.toUpperCase().includes('w:color w:val="1A1A1A"'), 'generic primary leaked into headings')
   }
 
   // ---------- summary ----------

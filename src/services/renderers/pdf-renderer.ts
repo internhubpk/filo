@@ -19,6 +19,7 @@
 
 import type { RendererOutput, DocumentRenderer, RenderableDocument, CanonicalComponent } from './shared'
 import {
+  asCodeBlock,
   asMetrics,
   asString,
   asStringArray,
@@ -26,6 +27,7 @@ import {
   asTwoColumn,
   deriveTheme,
   equationLatexOf,
+  isDarkColor,
   renderComponentImage,
   tint,
   withHash,
@@ -33,7 +35,7 @@ import {
 } from './shared'
 import { evaluateFormula } from '@/services/formula-evaluator'
 import type { CellMatrix } from '@/services/formula-evaluator'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 
 const PAGE_SIZES: Record<string, [number, number]> = {
   A4: [595.28, 841.89],
@@ -46,38 +48,95 @@ interface FontPair {
   bold: string
 }
 
+/** Theme-matched Latin font candidates, best-first (metric-compatible with the DOCX twins). */
+const THEME_FONTS = {
+  serif: [
+    { regular: '/usr/share/fonts/truetype/english/Tinos-Regular.ttf', bold: '/usr/share/fonts/truetype/english/Tinos-Bold.ttf' },
+    { regular: '/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf', bold: '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf' },
+  ],
+  sans: [
+    { regular: '/usr/share/fonts/truetype/english/Carlito-Regular.ttf', bold: '/usr/share/fonts/truetype/english/Carlito-Bold.ttf' },
+    { regular: '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', bold: '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf' },
+  ],
+  mono: [
+    { regular: '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf', bold: '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf' },
+    { regular: '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf', bold: '/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf' },
+  ],
+} as const
+
+const SERIF_BODY_FONTS = /georgia|times|palatino|garamond|book|serif|cambria|minion/i
+const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/
+
 /**
- * Locate a Unicode-capable TTF/TTC on this host for pdfkit embedding.
- * pdfkit's base-14 fonts are Latin-1 only; without a real font file every
- * CJK glyph degrades to mojibake. Checked in order so any standard install
- * works; FILO_PDF_FONT_PATH wins for constrained deployments.
+ * True when the file at `path` is a real font (TTF/OTF magic bytes). Some
+ * deployments ship broken 'fonts' that are actually HTML error pages —
+ * fontkit then crashes the whole render with 'Unknown font format'.
  */
-function resolveUnicodeFonts(): FontPair | null {
+function isRealFontFile(p: string): boolean {
+  try {
+    const fd = readFileSync(p)
+    if (fd.length < 8) return false
+    // TTF: 00 01 00 00 · OTF: 'OTTO' · TTC: 'ttcf' · WOFF: 'wOFF'
+    const sig = fd.subarray(0, 4).toString('latin1')
+    return sig === '\u0000\u0001\u0000\u0000' || sig === 'OTTO' || sig === 'ttcf' || sig === 'wOFF'
+  } catch {
+    return false
+  }
+}
+
+function firstValidPair(candidates: ReadonlyArray<{ regular: string; bold: string }>): FontPair | null {
+  for (const c of candidates) {
+    if (isRealFontFile(c.regular) && isRealFontFile(c.bold)) return c
+  }
+  return null
+}
+
+/**
+ * Locate fonts for pdfkit embedding, matched to the THEME's typography so a
+ * PDF twin of a Georgia DOCX also reads as a serif document (the old code
+ * shipped Helvetica for every theme). Any CJK content forces the Noto CJK
+ * fallback — base-14 fonts are Latin-1 only and would mojibake it.
+ */
+function resolveDocumentFonts(themeBodyFont: string, sampleText: string): { pair: FontPair | null; mono: FontPair | null } {
+  const cjkCandidates: FontPair[] = [
+    { regular: '/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf', bold: '/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf' },
+    { regular: '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', bold: '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc' },
+    { regular: '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc', bold: '/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc' },
+  ]
   const env = process.env.FILO_PDF_FONT_PATH
-  const regularCandidates = [
-    env,
-    '/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf',
-    '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',
-    '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
-    '/System/Library/Fonts/Supplemental/Songti.ttc',
-    '/System/Library/Fonts/PingFang.ttc',
-    'C:\\Windows\\Fonts\\msyh.ttc',
-    'C:\\Windows\\Fonts\\simsun.ttc',
-  ].filter((p): p is string => Boolean(p))
-  const boldCandidates = [
-    env,
-    '/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf',
-    '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc',
-    '/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc',
-    '/System/Library/Fonts/Supplemental/Songti.ttc',
-    '/System/Library/Fonts/PingFang.ttc',
-    'C:\\Windows\\Fonts\\msyhbd.ttc',
-    'C:\\Windows\\Fonts\\simsun.ttc',
-  ].filter((p): p is string => Boolean(p))
-  const regular = regularCandidates.find((p) => existsSync(p))
-  if (!regular) return null
-  const bold = boldCandidates.find((p) => existsSync(p)) ?? regular
-  return { regular, bold }
+  const pair: FontPair | null = CJK_RE.test(sampleText)
+    ? (cjkCandidates.find((p) => isRealFontFile(p.regular) && isRealFontFile(p.bold)) ?? null)
+    : (() => {
+        if (env && isRealFontFile(env)) {
+          const boldCandidate = env.replace(/\.ttf$/i, '-Bold.ttf')
+          return { regular: env, bold: isRealFontFile(boldCandidate) ? boldCandidate : env }
+        }
+        const chosen = SERIF_BODY_FONTS.test(themeBodyFont) ? THEME_FONTS.serif : THEME_FONTS.sans
+        return firstValidPair(chosen)
+      })()
+  const mono: FontPair | null = firstValidPair([...THEME_FONTS.mono])
+  return { pair, mono }
+}
+
+/** Parse '72pt' / '1in' / '96px' into PDF points. */
+function parseMarginPt(v: string | undefined, fallback: number): number {
+  const m = /([\d.]+)\s*(pt|in|px)?/.exec(String(v ?? ''))
+  if (!m) return fallback
+  const n = Number(m[1])
+  if (m[2] === 'in') return Math.round(n * 72)
+  if (m[2] === 'px') return Math.round(n * 0.75)
+  return Math.round(n)
+}
+
+/**
+ * Current 1-based page number of a pdfkit document. `bufferedPageRange()`
+ * returns {start, count} where COUNT RESETS as completed pages flush to the
+ * stream — reading `.count` alone made every page look like page 1 and every
+ * TOC entry print the same number. The true page number is start + count.
+ */
+function currentPageNo(doc: any): number {
+  const r = doc.bufferedPageRange()
+  return (r.start ?? 0) + (r.count ?? 0)
 }
 
 interface PdfThemeColors {
@@ -101,14 +160,27 @@ export class PdfRenderer implements DocumentRenderer {
     const layout = spec.design?.layout
     const sizeKey = (layout?.pageSize ?? 'A4').toUpperCase()
     const [pageW, pageH] = PAGE_SIZES[sizeKey] ?? PAGE_SIZES.A4
-    const margin = 56
-    const bottomMargin = 24
+    // MARGINS FROM THE THEME (was hardcoded 56 — visibly tighter than the
+    // DOCX twin and cramped against the footer).
+    const margin = Math.min(96, Math.max(48, parseMarginPt(layout?.margins?.left, 72)))
+    const bottomMargin = Math.min(96, Math.max(40, parseMarginPt(layout?.margins?.bottom, 64)))
+    const contentBottom = pageH - bottomMargin - 14 // keep clear of the footer zone
 
     const sections = spec.sections
     const coverSection = sections[0]?.type === 'cover' ? sections[0] : null
     const hasCover = Boolean(coverSection) || sections.length >= 3
     const contentSections = coverSection ? sections.slice(1) : sections
     const hasParts = contentSections.some((s) => (s.level || 'chapter') === 'part')
+
+    // Sample text drives CJK font detection + body size / line height tokens.
+    const sampleText = [
+      spec.title,
+      spec.description,
+      ...contentSections.map((s) => s.title),
+      ...document.sections.slice(0, 12).flatMap((s) => s.components.slice(0, 4).map((c) => (typeof c.content === 'string' ? c.content : ''))),
+    ].join('\n')
+    const bodyFontSize = Math.min(12, Math.max(9.5, theme.typography?.bodySize ? theme.typography.bodySize - 0.5 : 10.5))
+    const bodyLineGap = Math.max(2, Math.round((theme.typography?.lineHeight ?? 1.45) * bodyFontSize - bodyFontSize - 1))
 
     // ---------------- PASS 1: layout probe ----------------
     // Render the body into a throwaway document to learn where every section
@@ -118,8 +190,9 @@ export class PdfRenderer implements DocumentRenderer {
       size: sizeKey === 'LEGAL' ? 'LEGAL' : sizeKey === 'LETTER' ? 'LETTER' : 'A4',
       margins: { top: margin, bottom: bottomMargin, left: margin, right: margin },
       info: { Title: spec.title, Producer: 'Filo' },
+      autoFirstPage: false,
     })
-    probe.info = probe.info // keep TS shape
+    probe.addPage()
     const probeChunks: Buffer[] = []
     probe.on('data', (c: Buffer) => probeChunks.push(c))
     const probeDone = new Promise<Buffer>((resolve) => {
@@ -128,21 +201,27 @@ export class PdfRenderer implements DocumentRenderer {
     })
     const sectionStartPages: number[] = []
     let bodyPagesTotal = 0
-    const registerFonts = (doc: any): { bodyFont: string; headingFont: string } => {
+    const registerFonts = (doc: any): { bodyFont: string; headingFont: string; monoFont: string | null } => {
       let bodyFont = 'Helvetica'
       let headingFont = 'Helvetica-Bold'
-      const unicodeFonts = resolveUnicodeFonts()
-      if (unicodeFonts) {
-        try {
-          doc.registerFont('FiloBody', unicodeFonts.regular)
-          doc.registerFont('FiloHeading', unicodeFonts.bold)
+      let monoFont: string | null = null
+      const { pair, mono } = resolveDocumentFonts(theme.typography?.bodyFont || '', sampleText)
+      try {
+        if (pair) {
+          doc.registerFont('FiloBody', pair.regular)
+          doc.registerFont('FiloHeading', pair.bold)
           bodyFont = 'FiloBody'
           headingFont = 'FiloHeading'
-        } catch {
-          // fall back to base-14
         }
+        if (mono) {
+          doc.registerFont('FiloMono', mono.regular)
+          doc.registerFont('FiloMonoBold', mono.bold)
+          monoFont = 'FiloMono'
+        }
+      } catch {
+        // fall back to base-14
       }
-      return { bodyFont, headingFont }
+      return { bodyFont, headingFont, monoFont }
     }
     {
       const { bodyFont, headingFont } = registerFonts(probe)
@@ -151,18 +230,24 @@ export class PdfRenderer implements DocumentRenderer {
         pageW,
         pageH,
         margin,
-        contentBottom: pageH - 64,
+        contentBottom,
         bodyFont,
         headingFont,
-        recordSectionPage: (idx: number) => sectionStartPages.push(probe.bufferedPageRange().count),
+        bodyFontSize,
+        bodyLineGap,
+        recordSectionPage: (idx: number) => sectionStartPages.push(idx),
       })
-      bodyPagesTotal = probe.bufferedPageRange().count
+      bodyPagesTotal = currentPageNo(probe)
       probe.end()
       await probeDone
     }
-    void sectionStartPages
+    void hasParts
 
     // ---------------- TOC ENTRY LIST ----------------
+    // sectionStartPages[i] is the body-relative page (1-based) where section i
+    // starts — recorded AFTER the pagination decision in renderBody, so the
+    // numbers are exact. NO shift() here: the cover was already sliced off,
+    // and the old shift() deleted the FIRST REAL CHAPTER from the TOC.
     interface TocEntry {
       level: string
       number?: string
@@ -177,8 +262,6 @@ export class PdfRenderer implements DocumentRenderer {
         page: sectionStartPages[i] ?? 0,
       }))
       .filter((e: TocEntry) => e.title && e.page > 0 && e.level !== 'subsection')
-    // drop the auto-cover placeholder from the TOC
-    if (coverSection && tocEntries.length > 0) tocEntries.shift()
 
     // ---------------- PASS 2: final document ----------------
     const doc = new pdfkit({
@@ -200,7 +283,7 @@ export class PdfRenderer implements DocumentRenderer {
       })
     })
 
-    const { bodyFont, headingFont } = registerFonts(doc)
+    const { bodyFont, headingFont, monoFont } = registerFonts(doc)
     const fg = withHash(colors.foreground, '#1F2937')
     const primary = withHash(colors.primary, '#1E3A5F')
     const accent = withHash(colors.accent, '#3B82F6')
@@ -208,8 +291,60 @@ export class PdfRenderer implements DocumentRenderer {
     const borderCol = withHash(colors.border, '#E2E8F0')
     const themeColors: PdfThemeColors = { fg, primary, accent, mutedFg, borderCol }
 
-    // ---- cover (offset 0: body starts at page coverPages+1) ----
+    // ---- running header/footer (UNIFIED stamping) ----
+    // Every page AFTER the cover is stamped exactly once via the pageAdded
+    // handler + explicit stamping of the first front-matter page. The old
+    // code double-stamped the last page and never stamped the first body
+    // page (registered the handler too late).
     let coverPages = 0
+    let tocPages = 0
+    const stampHeaderFooter = (pageNo: number) => {
+      // The footer draws BELOW the content area (pageH - 36 < maxY). Without
+      // this guard, pdfkit auto-paginates DURING stamping → pageAdded fires
+      // again → stamp again → infinite recursion (RangeError: Maximum call
+      // stack size exceeded). Zeroing the page's bottom margin for the
+      // duration of the stamp makes maxY the page edge — no auto-pagination.
+      const savedBottom = doc.page.margins.bottom
+      doc.page.margins.bottom = 0
+      try {
+        // Total-page estimate is computed LAZILY (bodyPagesTotal is known by
+        // the time any page is stamped) and includes cover + TOC pages.
+        const totalPagesEstimate = coverPages + tocPages + Math.max(bodyPagesTotal, 1)
+        if (spec.design?.layout?.headerEnabled !== false) {
+          doc.font(bodyFont).fontSize(8).fillColor(mutedFg)
+          doc.text(spec.title, margin, 28, { width: pageW - margin * 2, align: 'right', lineBreak: false })
+        }
+        if (spec.design?.layout?.footerEnabled !== false) {
+          doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
+          const label =
+            theme.footer === 'page-of'
+              ? `Page ${pageNo} of ${totalPagesEstimate}`
+              : theme.footer === 'brand-page'
+                ? `${theme.tokens.label}`
+                : `${pageNo}`
+          if (theme.footer === 'brand-page') {
+            doc.text(label, margin, pageH - 36, { width: pageW - margin * 2, align: 'left', lineBreak: false })
+            doc.text(`${pageNo}`, margin, pageH - 36, { width: pageW - margin * 2, align: 'right', lineBreak: false })
+          } else {
+            doc.text(label, margin, pageH - 36, { width: pageW - margin * 2, align: 'center', lineBreak: false })
+          }
+        }
+      } finally {
+        doc.page.margins.bottom = savedBottom
+      }
+    }
+    // pageAdded fires for every addPage from here on (TOC continuations +
+    // body pages); save/restore flow state so stamping never corrupts an
+    // in-flight paragraph.
+    doc.on('pageAdded', () => {
+      const savedY = doc.y
+      const savedX = doc.x
+      stampHeaderFooter(currentPageNo(doc))
+      doc.y = savedY
+      doc.x = savedX
+    })
+
+    // ---- cover (drawn first; cover itself is NEVER stamped) ----
     if (hasCover) {
       coverPages = this.drawCover(doc, document, theme, themeColors, {
         pageW,
@@ -224,10 +359,11 @@ export class PdfRenderer implements DocumentRenderer {
           ) || spec.description,
       })
     }
-
-    // ---- TOC pages ----
-    let tocPages = 0
-    if (tocEntries.length >= 4) {
+    // drawCover ended with addPage → the current page is fresh front matter.
+    // If there is NO TOC the body starts right here — stamp it explicitly,
+    // because no addPage will fire before the first body content.
+    const needToc = tocEntries.length >= 3
+    if (needToc) {
       // Precompute how many pages the TOC will consume using the exact same
       // layout constants drawToc uses, so body page numbers printed in the
       // TOC are correct even when the TOC itself spans multiple pages.
@@ -239,6 +375,8 @@ export class PdfRenderer implements DocumentRenderer {
         tocEntries.length <= firstPageCap
           ? 1
           : 1 + Math.ceil((tocEntries.length - firstPageCap) / laterPageCap)
+      // Stamp the first TOC page (it exists already — no pageAdded fired).
+      stampHeaderFooter(coverPages + 1)
       this.drawToc(doc, tocEntries, {
         pageW,
         pageH,
@@ -248,67 +386,32 @@ export class PdfRenderer implements DocumentRenderer {
         colors: themeColors,
         // printed page = body page + cover + toc pages (absolute, 1-based)
         offset: coverPages + tocPages,
-        // pdfkit can only draw on the CURRENT page — TOC pages must be
-        // stamped exactly as they are created.
-        stamp: (pageNo: number) => {
-          if (spec.design?.layout?.headerEnabled !== false) {
-            doc.font(bodyFont).fontSize(8).fillColor(mutedFg)
-            doc.text(spec.title, margin, 28, { width: pageW - margin * 2, align: 'right', lineBreak: false })
-          }
-          if (spec.design?.layout?.footerEnabled !== false) {
-            doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
-            doc.text(`${pageNo}`, margin, pageH - 40, { width: pageW - margin * 2, align: 'center', lineBreak: false })
-          }
-        },
       })
+    } else if (coverPages > 0) {
+      stampHeaderFooter(coverPages + 1)
     }
     const pageOffset = coverPages + tocPages
     void pageOffset
 
-    // ---- running header/footer ----
-    const totalPagesEstimate = coverPages + tocPages + Math.max(bodyPagesTotal, 1)
-    const stampHeaderFooter = (pageNo: number) => {
-      if (spec.design?.layout?.headerEnabled !== false) {
-        doc.font(bodyFont).fontSize(8).fillColor(mutedFg)
-        doc.text(spec.title, margin, 28, { width: pageW - margin * 2, align: 'right', lineBreak: false })
-      }
-      if (spec.design?.layout?.footerEnabled !== false) {
-        doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
-        const label =
-          theme.footer === 'page-of'
-            ? `Page ${pageNo} of ${totalPagesEstimate}`
-            : theme.footer === 'brand-page'
-              ? `${theme.tokens.label}`
-              : `${pageNo}`
-        if (theme.footer === 'brand-page') {
-          doc.text(label, margin, pageH - 40, { width: pageW - margin * 2, align: 'left', lineBreak: false })
-          doc.text(`${pageNo}`, margin, pageH - 40, { width: pageW - margin * 2, align: 'right', lineBreak: false })
-        } else {
-          doc.text(label, margin, pageH - 40, { width: pageW - margin * 2, align: 'center', lineBreak: false })
-        }
-      }
-    }
-
-    // Stamp cover-adjacent front matter is handled inside drawToc (pdfkit
-    // can only draw on the current page — retroactive stamping is impossible).
-
     this.figureNo = 0
-    // The body MUST start on a fresh page after cover/TOC front matter —
-    // otherwise the first chapter would render on top of the TOC page.
-    if (coverPages + tocPages > 0) doc.addPage() // pageAdded stamps this page
+    // The body MUST start on a fresh page after the TOC (drawToc consumed the
+    // current page). Without a TOC the current page is already fresh — adding
+    // another one used to ship a BLANK PAGE 2.
+    if (tocPages > 0) doc.addPage()
     await this.renderBody(doc, document, contentSections, {
       theme,
       pageW,
       pageH,
       margin,
-      contentBottom: pageH - 64,
+      contentBottom,
       bodyFont,
       headingFont,
+      bodyFontSize,
+      bodyLineGap,
+      monoFont,
       recordSectionPage: () => {},
-      onPageStart: (pageNo: number) => stampHeaderFooter(pageNo),
       pageOffset,
     })
-    stampHeaderFooter(coverPages + tocPages + Math.max(bodyPagesTotal, 1))
     doc.end()
     const buffer = await done
 
@@ -334,12 +437,15 @@ export class PdfRenderer implements DocumentRenderer {
       contentBottom: number
       bodyFont: string
       headingFont: string
-      recordSectionPage: (idx: number) => void
-      onPageStart?: (pageNo: number) => void
+      bodyFontSize: number
+      bodyLineGap: number
+      monoFont?: string | null
+      /** Called with the 1-based BODY page each section starts on. */
+      recordSectionPage: (pageNo: number) => void
       pageOffset?: number
     }
   ): Promise<void> {
-    const { theme, margin, contentBottom, bodyFont, headingFont } = opts
+    const { theme, margin, contentBottom, bodyFont, headingFont, bodyFontSize, bodyLineGap } = opts
     const colors = theme.colors
     const width = opts.pageW - margin * 2
     const fg = withHash(colors.foreground, '#1F2937')
@@ -357,23 +463,6 @@ export class PdfRenderer implements DocumentRenderer {
       return currentY
     }
 
-    let lastPageSeen = doc.bufferedPageRange().count
-    doc.on('pageAdded', () => {
-      lastPageSeen = doc.bufferedPageRange().count
-      if (!opts.onPageStart) return
-      // CRITICAL: pdfkit fires pageAdded from INSIDE a flowed paragraph's
-      // line loop. The header/footer stamp moves doc.y (footer lands below
-      // maxY), so without saving/restoring the flow state pdfkit resumes the
-      // paragraph at the footer position — every subsequent line overflows
-      // the page, addPage fires per line, and the document explodes to
-      // thousands of near-blank pages.
-      const savedY = doc.y
-      const savedX = doc.x
-      opts.onPageStart(lastPageSeen)
-      doc.y = savedY
-      doc.x = savedX
-    })
-
     for (let i = 0; i < contentSections.length; i++) {
       const section = contentSections[i]
       const components = (document.sections.find((s) => s.id === section.id)?.components ?? [])
@@ -384,16 +473,16 @@ export class PdfRenderer implements DocumentRenderer {
       const isPart = level === 'part'
       const isSub = level === 'section' || level === 'subsection'
 
-      opts.recordSectionPage(i)
-
-      // Pagination: parts + chapters start on a fresh page (professional
-      // reports/notes); sub-sections flow.
+      // Pagination FIRST, then record the page the section actually starts
+      // on. Recording before addPage used to make every page-broken chapter
+      // report page N−1 and the TOC print wrong numbers.
       if (renderedIdx > 0 && !isSub) {
         doc.addPage()
         cursorY = margin + 8
       } else if (renderedIdx > 0) {
         cursorY += 18
       }
+      opts.recordSectionPage(currentPageNo(doc))
 
       // ---- heading (ornament-driven) ----
       const headingText = isPart
@@ -415,6 +504,9 @@ export class PdfRenderer implements DocumentRenderer {
           y: cursorY,
           ensureSpace: ensureSpaceAt,
           contentBottom,
+          bodyFontSize,
+          bodyLineGap,
+          monoFont: opts.monoFont ?? null,
           ctx: { pageW: opts.pageW, margin, fg, primary: withHash(colors.primary, '#1E3A5F'), accent: withHash(colors.accent, '#3B82F6'), mutedFg: withHash(colors.mutedForeground, '#64748B'), borderCol: withHash(colors.border, '#E2E8F0'), bodyFont, headingFont },
           document,
           subFontScale: isPart ? 0.95 : 1,
@@ -535,14 +627,13 @@ export class PdfRenderer implements DocumentRenderer {
   private drawToc(
     doc: any,
     entries: Array<{ level: string; number?: string; title: string; page: number }>,
-    opts: { pageW: number; pageH: number; margin: number; bodyFont: string; headingFont: string; colors: PdfThemeColors; offset: number; stamp: (pageNo: number) => void }
+    opts: { pageW: number; pageH: number; margin: number; bodyFont: string; headingFont: string; colors: PdfThemeColors; offset: number }
   ): number {
     const { pageW, pageH, margin, bodyFont, headingFont, colors } = opts
     const width = pageW - margin * 2
     const usable = pageH - margin - 60
     const entryH = 19
 
-    opts.stamp(doc.bufferedPageRange().count)
     doc.font(headingFont).fontSize(21).fillColor(colors.primary)
     doc.text('Table of Contents', margin, margin + 6, { width })
     doc.rect(margin, doc.y + 4, 64, 2.6).fill(colors.accent)
@@ -553,14 +644,15 @@ export class PdfRenderer implements DocumentRenderer {
       if (y + entryH > margin + usable) {
         doc.addPage()
         pages++
-        opts.stamp(doc.bufferedPageRange().count)
         y = margin + 8
       }
       const isPart = e.level === 'part'
       const isSub = e.level === 'section' || e.level === 'subsection'
       const indent = isPart ? 0 : isSub ? 32 : 16
       const label = e.number ? (isPart ? `Part ${e.number} — ${e.title}` : isSub ? `${e.number}  ${e.title}` : `${e.number}.  ${e.title}`) : e.title
-      const printedPage = e.page + opts.offset + 1 // body-relative → absolute (1-based)
+      // body-relative page + cover/TOC offset = absolute 1-based page. The
+      // stray "+1" that shifted every printed number is GONE.
+      const printedPage = e.page + opts.offset
       doc.font(headingFont).fontSize(isPart ? 11.5 : 10).fillColor(isPart ? colors.primary : colors.fg)
       const labelW = doc.widthOfString(label)
       const pageLabelW = doc.widthOfString(String(printedPage))
@@ -654,6 +746,9 @@ export class PdfRenderer implements DocumentRenderer {
       y: number
       ensureSpace: (currentY: number, needed: number) => number
       contentBottom: number
+      bodyFontSize: number
+      bodyLineGap: number
+      monoFont?: string | null
       ctx: {
         pageW: number
         margin: number
@@ -669,7 +764,7 @@ export class PdfRenderer implements DocumentRenderer {
       subFontScale?: number
     }
   ): Promise<number> {
-    const { theme, ensureSpace, ctx } = opts
+    const { theme, ensureSpace, ctx, bodyFontSize, bodyLineGap } = opts
     const { pageW, margin, fg, primary, accent, mutedFg, borderCol, bodyFont, headingFont } = ctx
     const width = pageW - margin * 2
     let y = opts.y
@@ -687,16 +782,16 @@ export class PdfRenderer implements DocumentRenderer {
       case 'paragraph': {
         const text = asString(component.content)
         if (!text) return y
-        doc.font(bodyFont).fontSize(10.5).fillColor(fg)
-        const height = doc.heightOfString(text, { width, lineGap: 3 })
+        doc.font(bodyFont).fontSize(bodyFontSize).fillColor(fg)
+        const height = doc.heightOfString(text, { width, lineGap: bodyLineGap })
         // A paragraph taller than one page: flow it with pdfkit's own
         // pagination instead of ensureSpace (which would loop forever).
         if (height > opts.contentBottom - margin - 8) {
-          doc.text(text, margin, y, { width, align: 'justify', lineGap: 3 })
+          doc.text(text, margin, y, { width, align: 'justify', lineGap: bodyLineGap })
           return doc.y + 10
         }
         y = ensureSpace(y, height + 10)
-        doc.text(text, margin, y, { width, align: 'justify', lineGap: 3 })
+        doc.text(text, margin, y, { width, align: 'justify', lineGap: bodyLineGap })
         return doc.y + 10
       }
 
@@ -704,7 +799,7 @@ export class PdfRenderer implements DocumentRenderer {
       case 'key_takeaways': {
         const items = asStringArray(component.content)
         if (items.length === 0) return y
-        doc.font(bodyFont).fontSize(10.5).fillColor(fg)
+        doc.font(bodyFont).fontSize(bodyFontSize).fillColor(fg)
         let iy = y
         for (const item of items) {
           if (!item) continue
@@ -754,7 +849,9 @@ export class PdfRenderer implements DocumentRenderer {
         y = ensureSpace(y, cardH + 16)
         let x = margin
         for (const m of metrics) {
-          doc.rect(x, y, cardW, cardH).fillAndStroke('#FAFBFC', borderCol)
+          // Card fill derives from the THEME (hardcoded #FAFBFC ignored the
+          // palette entirely on warm/editorial themes).
+          doc.rect(x, y, cardW, cardH).fillAndStroke(tint(primary, 0.965), borderCol)
           doc.rect(x, y, cardW, 3).fill(primary)
           doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
           doc.text(m.label || ' ', x + 10, y + 12, { width: cardW - 20 })
@@ -767,6 +864,75 @@ export class PdfRenderer implements DocumentRenderer {
           x += cardW + gap
         }
         return y + cardH + 18
+      }
+
+      case 'code': {
+        // FIRST-CLASS CODE BLOCK: theme-shaded monospace panel with a language
+        // label and an accent rule — the PDF twin of the DOCX code block.
+        // Line-by-line layout (measure → paginate → draw) so the panel splits
+        // cleanly across pages with no trapped paragraphs.
+        const block = asCodeBlock(component.content)
+        if (!block) return y
+        const mono = opts.monoFont || 'Courier'
+        const monoLabel = opts.monoFont ? 'FiloMonoBold' : 'Courier-Bold'
+        const lines = block.code.split('\n').slice(0, 400)
+        const truncated = block.code.split('\n').length - lines.length
+        const fontSize = 8.5
+        const lineGap = 2.5
+        const padX = 14
+        const padY = 9
+        const textW = width - padX * 2 - 4
+        doc.font(mono).fontSize(fontSize)
+        // Measure every source line's wrapped height ONCE (heightOfString
+        // draws nothing — safe for measurement).
+        const lineHeights = lines.map((l) => (l.length ? doc.heightOfString(l, { width: textW, lineGap }) : fontSize))
+        const labelH = block.language ? 16 : 0
+
+        let idx = 0
+        let panelY = y
+        let firstSegment = true
+        while (idx < lines.length) {
+          const top = firstSegment ? panelY : margin
+          const avail = opts.contentBottom - top - padY * 2 - (firstSegment ? labelH : 0)
+          // Fit as many whole lines as possible on this segment.
+          let take = 0
+          let used = 0
+          while (idx + take < lines.length && used + lineHeights[idx + take] <= avail) {
+            used += lineHeights[idx + take]
+            take++
+          }
+          if (take === 0) take = 1 // single oversized line still progresses
+          if (!firstSegment) {
+            doc.addPage()
+            panelY = margin
+          }
+          const segH = used + padY * 2 + (firstSegment ? labelH : 0)
+          doc.rect(margin, panelY, width, segH).fill(tint(primary, 0.96))
+          doc.rect(margin, panelY, 3.5, segH).fill(accent)
+          doc.rect(margin, panelY, width, 0.8).fill(borderCol)
+          doc.rect(margin, panelY + segH - 0.8, width, 0.8).fill(borderCol)
+          let ty = panelY + padY
+          if (firstSegment && block.language) {
+            doc.font(monoLabel).fontSize(7).fillColor(mutedFg)
+            doc.text(block.language.toUpperCase(), margin + padX, ty, { width: textW, lineBreak: false })
+            ty += labelH
+          }
+          doc.font(mono).fontSize(fontSize).fillColor(fg)
+          for (let k = 0; k < take; k++) {
+            const raw = lines[idx + k]
+            if (raw.length) doc.text(raw, margin + padX + 2, ty, { width: textW, lineGap })
+            ty += lineHeights[idx + k]
+          }
+          idx += take
+          panelY = panelY + segH + 2
+          firstSegment = false
+        }
+        if (truncated > 0) {
+          doc.font(mono).fontSize(7.5).fillColor(mutedFg)
+          doc.text(`… ${truncated} more lines truncated`, margin + padX, panelY + 2, { width: width - padX * 2 })
+          panelY = doc.y + 4
+        }
+        return panelY + 12
       }
 
       case 'two_column': {
@@ -901,7 +1067,10 @@ export class PdfRenderer implements DocumentRenderer {
           return bandY + 28
         }
         case 'dark-header': {
-          doc.rect(margin, bandY, width, 24).fill(colors.fg)
+          // Luminance guard (missing here while DOCX had one): a light
+          // 'dark-header' fill with white text rendered an INVISIBLE header.
+          const fill = isDarkColor(colors.fg) ? colors.fg : isDarkColor(colors.primary) ? colors.primary : '#334155'
+          doc.rect(margin, bandY, width, 24).fill(fill)
           doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
           let hx = margin
           header.forEach((cell: unknown, i: number) => {
@@ -952,14 +1121,20 @@ export class PdfRenderer implements DocumentRenderer {
         y = o.ensureSpace(ry, rowH + 24 + 24)
         ry = drawHeaderBand(y)
       }
-      // row backgrounds
+      // row backgrounds — banding keyed off the theme PRIMARY, not a
+      // hardcoded gray (tinting '#64748B' ignored every palette).
       if (theme.table === 'banded' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint(colors.primary, 0.96))
-      if (theme.table === 'dark-header' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint('#64748B', 0.85))
+      if (theme.table === 'dark-header' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint(colors.primary, 0.94))
       if (theme.table === 'editorial' && rIdx % 2 === 1) doc.rect(margin, ry, width, rowH).fill(tint(colors.primary, 0.95))
-      // borders
-      if (theme.table === 'boxed') doc.rect(margin, ry, width, rowH).stroke(colors.borderCol)
-      else {
-        doc.rect(margin, ry, width, rowH).lineWidth(0.4).stroke(colors.borderCol)
+      // borders: boxed = full cell rectangles; every other dialect draws
+      // ONLY the horizontal rule under the row (the old code stroked a full
+      // rect around every row, defeating the dialect).
+      if (theme.table === 'boxed') {
+        doc.rect(margin, ry, width, rowH).lineWidth(0.6).stroke(colors.borderCol)
+      } else {
+        doc.save()
+        doc.moveTo(margin, ry + rowH).lineTo(margin + width, ry + rowH).lineWidth(0.5).strokeColor(colors.borderCol).stroke()
+        doc.restore()
       }
       row.forEach((cell: string | number | null, i: number) => {
         doc.fillColor(colors.fg).text(cellText(cell), colXs[i] + 6, ry + 5, { width: colWidths[i] - 12, lineGap: 1 })

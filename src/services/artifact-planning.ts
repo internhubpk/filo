@@ -64,14 +64,15 @@ COMPONENT VOCABULARY (use these types in section components):
 - quote: notable quotation (string)
 - metric_grid: 2-4 headline KPIs (array of {label, value, change?, unit?} objects)
 - callout: highlighted note/insight (string) — use for key takeaways, warnings, insights
-- chart: data visualization (object {chartType: "bar|line|pie|donut|area|hbar|stacked|scatter", title, categories: string[], series: [{name, data: number[]}], note?, xLabel?, yLabel?})
+- chart: data visualization (object {chartType: "bar|line|pie|donut|area|hbar|stacked|scatter", title, categories: string[], series: [{name, data: number[]}], note?, xLabel?, yLabel?}) — ONLY where the content is genuinely quantitative; every chart must visualize real data from this section
+- code: source code / SQL / config / commands / algorithm (object {language: "python|javascript|typescript|java|c|cpp|go|rust|sql|bash|json|yaml|html|css|text", code: string}) — ALWAYS use for any code, snippet, query or terminal output; NEVER paste code into paragraphs or lists; renderers produce a styled monospace code block
 - timeline: chronological steps (array of {label, description})
 - diagram: structural visual (object {kind: "flowchart|process|hierarchy", title?, steps: [{label, description?}]}) — use for workflows, decision flows, org structures, architectures
 - equation: real mathematical formula (object {latex: "LaTeX source", display: true}) — use for scientific/mathematical/financial content: fractions, powers, roots, summations, integrals, Greek symbols
 - key_takeaways: executive summary bullets (array of strings)
 - two_column: side-by-side comparison (object {leftTitle, leftPoints: string[], rightTitle, rightPoints: string[]})
 
-Use metric_grid in the opening section of business/report documents. Use charts when data relationships matter. Use diagrams when structure/flow matters (processes, hierarchies, decision flows). Use equations when the content is mathematical — never write formulas as plain text. Use callout sparingly for emphasis. For XLSX prefer table-heavy sections; for PPTX prefer list/metric_grid/chart with minimal paragraph text.`
+Use metric_grid in the opening section of business/report documents. Use charts ONLY when a section discusses quantities (trends, comparisons, shares, distributions) — a chart of invented numbers in a qualitative section is forbidden. Use diagrams when structure/flow matters (processes, hierarchies, decision flows). Use equations when the content is mathematical — never write formulas as plain text. Use code blocks for EVERY code sample — never inline code in prose. Use callout sparingly for emphasis. For XLSX prefer table-heavy sections; for PPTX prefer list/metric_grid/chart with minimal paragraph text.`
 
   const hierarchyRules = `SECTION HIERARCHY (for long documents):
 - sections[] is a FLAT ordered list; use the "level" field to express hierarchy:
@@ -95,8 +96,8 @@ CRITICAL RULES:
 6. For DOCX/PDF: Professional document structure with clear hierarchy
 7. Use creative, specific section titles - NOT generic ones like "Section 1"
 8. The type field in sections should be one of: cover, heading, content, table, list, references, appendix
-9. Attach "visuals" to sections that must carry a visual: "visuals": [{"kind": "chart|table|diagram|metrics|timeline|two_column", "hint": "what it shows, e.g. 'line: revenue trend over 6 quarters'"}]. The content generator treats these as MANDATORY.
-10. Vary chart types across the document (bar, line, area, pie) — never emit the same chart type more than twice in a row.
+9. Attach "visuals" to sections that must carry a visual: "visuals": [{"kind": "chart|table|diagram|metrics|timeline|two_column", "hint": "what it shows, e.g. 'line: revenue trend over 6 quarters'"}]. The content generator treats these as MANDATORY. Attach a CHART visual only when the section is genuinely quantitative — a chart needs a numeric story (trend, comparison, share, distribution). For qualitative sections prefer table/diagram/metrics.
+10. Chart types must MATCH the data: time trend → line/area; share of a whole → pie/donut; category comparison → bar/hbar; parts over time → stacked. Never emit the same chart type more than twice in a row.
 11. Section titles must be information-bearing ("How Transformer Attention Replaces Recurrence", not "Attention Mechanisms Overview 1")
 
 You must respond with a JSON object:
@@ -114,7 +115,7 @@ You must respond with a JSON object:
       "components": [
         {
           "id": "comp-id-1",
-          "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|diagram|equation|key_takeaways|two_column",
+          "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|diagram|equation|code|key_takeaways|two_column",
           "order": 0,
           "content": null,
           "note": "Brief note about what content should go here"
@@ -146,6 +147,10 @@ export interface SectionPromptInput {
   wordTarget?: { min: number; max: number } | null
   /** MANDATORY visual components this section must include. */
   visuals?: VisualAssignment[] | null
+  /** EDIT MODE: the user's instruction for modifying their existing document. */
+  editInstruction?: string | null
+  /** EDIT MODE: true when this job edits an existing artifact (preserve + revise). */
+  isEdit?: boolean
 }
 
 export function buildSectionContentPrompt(input: SectionPromptInput): {
@@ -166,7 +171,7 @@ export function buildSectionContentPrompt(input: SectionPromptInput): {
     switch (v.kind) {
       case 'chart':
         visualRules.push(
-          `MANDATORY chart component — ${v.hint || 'pick the best type for the data'}. Shape: {"type":"chart","content":{"chartType":"bar|line|area|pie|hbar|stacked","title":"…","categories":["…"],"series":[{"name":"…","data":[numbers]}],"note":"source/assumption in ≤12 words"}}. Data must be realistic, internally consistent, and consistent with any table in this section.`
+          `MANDATORY chart component — ${v.hint || 'pick the best type for the data'}. Shape: {"type":"chart","content":{"chartType":"bar|line|area|pie|hbar|stacked","title":"…","categories":["…"],"series":[{"name":"…","data":[numbers]}],"note":"data source in ≤12 words","xLabel":"…","yLabel":"…"}}. STRICT DATA RULES: every series array MUST have exactly as many numbers as there are categories; series data must be realistic, internally consistent, and consistent with any table in this section; chartType must fit the story (trend→line, share→pie, comparison→bar); when SOURCE MATERIAL below contains the relevant figures, the series MUST use those exact numbers and the note must name the source; when no source figures exist, the note must start with "Illustrative".`
         )
         break
       case 'table':
@@ -222,14 +227,15 @@ ABSOLUTE CONTENT RULES:
 16. Tables: ≥3 data rows; numeric columns carry numbers, not words; no placeholder "TBD"/"N/A" cells unless the domain genuinely requires them
 17. CHART↔TABLE CONSISTENCY: when a section has both a chart and a table covering the same metric, the numbers MUST agree
 18. In XLSX tables, cells in computed columns may be formula strings like "=SUM(B2:B10)" or "=C2*D2" using your OWN table's coordinates (row 1 = header). Keep formulas simple: SUM/AVERAGE/MIN/MAX/COUNT and +-*/ arithmetic over the table's real cells
-19. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones
+19. When source material is provided, GROUND the content in it — reuse its facts, figures and terminology instead of inventing new ones. Numbers in charts/metrics/tables MUST come from the source material when it contains them.
 20. Do NOT repeat content from the previously-written sections listed in the context — advance the document
+21. For code type: return an object {"language": "python|javascript|typescript|sql|bash|java|go|rust|json|yaml|html|css|text", "code": "the exact code, with real newlines"} — use for ANY code, query, config or command; keep it runnable and complete; NEVER describe code in prose when a code component is possible
 ${visualRules.length ? `\nMANDATORY VISUALS FOR THIS SECTION (the blueprint requires them — output each as its own component in a sensible position, usually after the first or second paragraph):\n${visualRules.map((r, i) => `${i + 1}. ${r}`).join('\n')}\n` : ''}
 RESPOND WITH JSON:
 {
   "components": [
     {
-      "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|diagram|equation|key_takeaways|two_column",
+      "type": "paragraph|heading|list|table|quote|metric_grid|callout|chart|timeline|diagram|equation|code|key_takeaways|two_column",
       "content": "the actual content here"
     }
   ]
@@ -242,13 +248,23 @@ RESPOND WITH JSON:
 
   const numberedTitle = input.sectionNumber && level !== 'part' ? `${input.sectionNumber} ${input.sectionTitle}` : input.sectionTitle
 
+  const editModeRules = input.isEdit
+    ? `
+EDIT MODE — this document is a NEW VERSION of the user's existing document. The source material below IS (an extraction of) that document.
+- PRESERVE the original's structure, voice, headings and intent. Improve and extend; do not replace the author's content with a new document.
+- Apply the user's edit instruction faithfully. Where the instruction does not reach, keep the original content (polished, never contradicted).
+- Carry over ALL of the original's facts, figures, tables and code exactly — corrections only where the instruction asks.
+`
+    : ''
+
   const user = `Generate content for this section:
 
 Section: ${numberedTitle}
 Section Level: ${level}
 Section Type: ${input.sectionType}
-${notes}
-${input.sourceContext ? `\nSOURCE MATERIAL EXTRACTED FROM THE USER'S FILES (ground the content in these facts where relevant — do not contradict them):\n${input.sourceContext.slice(0, 12000)}\n` : ''}
+${notes}${editModeRules}
+${input.sourceContext ? `\nSOURCE MATERIAL EXTRACTED FROM THE USER'S FILES (ground the content in these facts where relevant — do not contradict them):
+${input.sourceContext.slice(0, 24000)}\n` : ''}
 ${input.globalContext ? `\nPreviously written content (for continuity, do not repeat):\n${input.globalContext}\n` : ''}
 Original Request: ${input.originalPrompt}
 
@@ -407,6 +423,8 @@ export function parsePlanResponse(
     metadata?: Record<string, unknown>
     /** Document scale — drives numbering + visual cadence normalization. */
     scale?: import('./doc-scale').DocumentScale
+    /** Designer's useCharts decision — mechanically enforced (not just prose). */
+    useCharts?: boolean
   }
 ): ArtifactSpecification {
   // Parsed loosely (same as the legacy pipeline) — AI JSON is normalized
@@ -472,6 +490,10 @@ export function parsePlanResponse(
       businessLike: /report|business|financial|budget|proposal|plan|performance|revenue|market/i.test(
         `${parsed.title || ''} ${parsed.description || ''}`
       ),
+      // The designer's useCharts decision is now ENFORCED mechanically —
+      // previously it only changed prompt prose and the cadence pass kept
+      // injecting charts anyway ("forced, meaningless charts" complaint).
+      useCharts: designOverrides?.useCharts,
     })
   }
   // Numbering: documents get hierarchical numbers; decks stay clean.
@@ -521,6 +543,7 @@ export const COMPONENT_TYPES = [
   'TIMELINE',
   'DIAGRAM',
   'EQUATION',
+  'CODE',
   'KEY_TAKEAWAYS',
   'TWO_COLUMN',
 ] as const
@@ -554,8 +577,13 @@ export function normalizeComponentType(type: string): string {
     'keytakeaways': 'KEY_TAKEAWAYS',
     'two_column': 'TWO_COLUMN',
     'twocolumn': 'TWO_COLUMN',
-    // Legacy/plain types degrade gracefully to paragraph
-    'code': 'PARAGRAPH',
+    // First-class code blocks: any code/query/config becomes a styled,
+    // monospace code block — never a degraded paragraph.
+    'code': 'CODE',
+    'code_block': 'CODE',
+    'codeblock': 'CODE',
+    'snippet': 'CODE',
+    // Image content cannot be honored from text generation — degrade honestly.
     'image': 'PARAGRAPH',
   }
   return typeMap[type?.toLowerCase()] || 'PARAGRAPH'

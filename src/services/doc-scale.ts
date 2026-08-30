@@ -236,20 +236,57 @@ export interface VisualAssignment {
 }
 
 /**
+ * Quantitative-intent detection. A CHART is only appropriate when the section
+ * actually tells a numeric story — the user's #1 complaint was decorative,
+ * meaningless charts injected into purely qualitative sections. This regex
+ * gates chart injection: titles/hints about trends, comparisons, shares,
+ * budgets, measurements or results qualify; narrative/theory/definition
+ * sections do NOT (they may still carry tables, diagrams or metrics).
+ */
+const QUANTITATIVE_INTENT_RE =
+  /\b(chart|graph|data|metric|kpi|number|percentage|percent|%|ratio|statistic|measure|measurement|trend|growth|decline|forecast|projection|budget|cost|revenue|profit|margin|sales|price|pricing|volume|quantity|share|market share|distribution|breakdown|composition|comparison|compare|benchmark|score|rating|survey|result|outcome|performance|target|actual|variance|year over year|yoy|q[1-4]|quarter|monthly|annual|per year|per month|timeline of amounts|figures|statistics|analysis of)\b/i
+
+/** True when the section title/hint suggests the content is quantitative. */
+export function sectionHasQuantitativeIntent(title?: string, hints?: Array<string | undefined>): boolean {
+  const haystack = [title || '', ...(hints || [])].join(' ')
+  return QUANTITATIVE_INTENT_RE.test(haystack)
+}
+
+/**
+ * Derive the chart type from WHAT THE DATA IS, never from a rotation array.
+ * A share/composition story gets a pie; a time trend gets a line; a category
+ * comparison gets bars. Falls back to bar (the most legible default).
+ */
+export function chartKindFromIntent(hint?: string): string {
+  const h = String(hint || '').toLowerCase()
+  if (/share|composition|proportion|breakdown|split of|percent of|of the total|of total/.test(h)) return 'pie: share/composition of a whole'
+  if (/trend|over time|timeline|period|month|quarter|year|growth|forecast|projection|progression/.test(h)) return 'line: trend over time/periods'
+  if (/stack|cumulative|layer/.test(h)) return 'stacked: parts contributing to a total over periods'
+  if (/area|cumulative volume|cumulative growth/.test(h)) return 'area: cumulative trend over periods'
+  if (/horizontal|ranking|rank|top \d|leaderboard|per item/.test(h)) return 'hbar: ranked comparison across items'
+  if (/scatter|correlation|relationship between|versus|vs\./.test(h)) return 'scatter: relationship between two measures'
+  if (/distribut|spread|range|histogram/.test(h)) return 'bar: distribution across buckets'
+  return 'bar: compare categories'
+}
+
+/**
  * Deterministic visual distribution for a section list. The architect's own
- * visual notes are honored; this pass GUARANTEES the cadence and the chart
- * variety so "charts where required" stops depending on model mood:
- *   • every Nth section carries at least one visual;
+ * visual notes are honored; this pass GUARANTEES a sensible cadence:
+ *   • every Nth section carries at least one visual — BUT the kind is chosen
+ *     from the section's actual content: charts ONLY where a numeric story
+ *     exists (design.useCharts still gates them entirely);
+ *   • chart TYPE derives from the data intent, not a rotation array;
  *   • pie/donut charts cap at ~1/3 of charts (no pie-chart soup);
  *   • business/financial documents get a metric grid in the opening section.
  */
 export function enforceVisualCadence(
-  sections: Array<{ id: string; visuals?: VisualAssignment[]; level?: string; title?: string }>,
+  sections: Array<{ id: string; visuals?: VisualAssignment[]; level?: string; title?: string; type?: string }>,
   scale: DocumentScale,
-  opts?: { businessLike?: boolean }
+  opts?: { businessLike?: boolean; useCharts?: boolean }
 ): void {
-  const usable = sections.filter((s) => (s.level || 'chapter') !== 'part')
+  const usable = sections.filter((s) => (s.level || 'chapter') !== 'part' && s.type !== 'cover')
   const everyN = Math.max(2, scale.visualEveryN)
+  const allowCharts = opts?.useCharts !== false
   let chartCount = 0
   let pieCount = 0
 
@@ -259,17 +296,27 @@ export function enforceVisualCadence(
     const hasVisual = s.visuals.length > 0
     const needsVisual = (i + 1) % everyN === 0 || i === 1 // early visual to set expectations
     if (!hasVisual && needsVisual) {
-      // Rotate kinds so documents don't become all-bar-charts.
-      const cycle: VisualAssignment['kind'][] = ['chart', 'table', 'chart', 'diagram', 'chart']
-      const kind = cycle[i % cycle.length]
-      const hint =
-        kind === 'chart'
-          ? chartKindHint(chartCount, pieCount)
-          : kind === 'table'
+      // Chart ONLY when the design allows charts AND this section is
+      // genuinely quantitative. Otherwise pick a visual that serves the
+      // section: structured facts → table, process/structure → diagram,
+      // headline numbers → metrics. Never a decorative chart.
+      const quantitative = allowCharts && sectionHasQuantitativeIntent(s.title, s.visuals?.map((v) => v.hint))
+      let kind: VisualAssignment['kind']
+      let hint: string
+      if (quantitative) {
+        kind = 'chart'
+        hint = chartKindFromIntent(s.title)
+      } else {
+        // Rotate the NON-chart kinds so qualitative sections still vary.
+        const cycle: VisualAssignment['kind'][] = ['table', 'diagram', 'metrics', 'table']
+        kind = cycle[i % cycle.length]
+        hint =
+          kind === 'table'
             ? '3-6 columns × 5-8 data rows, realistic values'
             : kind === 'diagram'
               ? 'flowchart or hierarchy of the process/structure described'
               : '2-4 headline numbers'
+      }
       s.visuals.push({ kind, hint })
     }
     for (const v of s.visuals) {
@@ -304,18 +351,12 @@ export function enforceVisualCadence(
   }
 }
 
-function chartKindHint(chartIdx: number, pieCount: number): string {
-  const kinds = ['bar', 'line', 'bar', 'area', 'line']
-  const kind = kinds[chartIdx % kinds.length]
-  if (kind === 'bar' && pieCount === 0 && chartIdx >= 1) return 'pie: share/composition of a whole'
-  return `${kind}: ${kind === 'line' || kind === 'area' ? 'trend over time/periods' : 'compare categories'}`
-}
-
 // ==================== HEADING NUMBERING ====================
 
 export interface NumberedSection {
   level?: string
   number?: string
+  type?: string
 }
 
 /**
@@ -324,12 +365,21 @@ export interface NumberedSection {
  *   chapter  → 1, 2, 3 … (restarts never; parts don't reset chapter numbers —
  *              continuous numbering is the norm for reports)
  *   section  → 1.1, 1.2 … under the nearest preceding chapter
+ *
+ * COVER SECTIONS ARE NOT NUMBERED — they are front matter, not content.
+ * Previously the cover consumed number "1" so every body chapter and every
+ * TOC entry started at "2" (the exact "TOC numbering is wrong" defect).
  */
 export function assignSectionNumbers<T extends NumberedSection>(sections: T[]): T[] {
   let partNo = 0
   let chapterNo = 0
   let sectionNo = 0
   for (const s of sections) {
+    const type = String(s.type || '').toLowerCase()
+    if (type === 'cover') {
+      s.number = undefined
+      continue
+    }
     const level = (s.level || 'chapter').toLowerCase()
     if (level === 'part') {
       partNo++

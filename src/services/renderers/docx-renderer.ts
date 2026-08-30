@@ -27,6 +27,7 @@ import {
   HeadingLevel,
   HeightRule,
   ImageRun,
+  LineRuleType,
   PageBreak,
   PageNumber,
   Packer,
@@ -46,6 +47,7 @@ import type { ISectionOptions } from 'docx'
 import type { RendererOutput, DocumentRenderer } from './shared'
 import type { RenderableDocument, CanonicalComponent } from './shared'
 import {
+  asCodeBlock,
   asMetrics,
   asString,
   asStringArray,
@@ -89,6 +91,13 @@ function pageMargins(layout: RenderableDocument['specification']['design']['layo
   }
 }
 
+/** '12pt' → 240 twips; bare numbers treated as points. */
+function parsePtToTwips(v: string | undefined, fallback: number): number {
+  const m = /([\d.]+)/.exec(String(v ?? ''))
+  if (!m) return fallback
+  return Math.round(Number(m[1]) * 20)
+}
+
 // ==================== TABLE DIALECTS ====================
 
 interface TableDialect {
@@ -113,10 +122,12 @@ function tableDialectFor(theme: DerivedTheme): TableDialect {
       // Luminance guard: a dark-header fill that is too light for white text
       // would render an invisible header row (dark-canvas themes on paper).
       const fill = isDarkColor(c.foreground) ? c.foreground : isDarkColor(c.primary) ? c.primary : '#334155'
-      return { headerFill: hex6(fill), headerColor: 'FFFFFF', borders: 'rows', zebra: tint(c.muted, 0.35) }
+      // Zebra banding keyed off the PRIMARY (muted is near-white in most
+      // themes — tinting it produced invisible banding).
+      return { headerFill: hex6(fill), headerColor: 'FFFFFF', borders: 'rows', zebra: tint(c.primary, 0.94) }
     }
     case 'editorial':
-      return { headerColor: hex6(c.primary), borders: 'rows', headerRule: true, zebra: tint(c.muted, 0.5) }
+      return { headerColor: hex6(c.primary), borders: 'rows', headerRule: true, zebra: tint(c.primary, 0.95) }
     case 'banded':
     default:
       return { headerFill: hex6(c.primary), headerColor: 'FFFFFF', borders: 'rows', zebra: tint(c.primary, 0.94) }
@@ -130,9 +141,17 @@ export class DocxRenderer implements DocumentRenderer {
     const spec = document.specification
     const theme = deriveTheme(spec)
     const colors = theme.colors
-    const typography = spec.design?.typography
+    const typography = theme.typography
     const headingFont = typography?.headingFont || 'Calibri'
     const bodyFont = typography?.bodyFont || 'Calibri'
+    const monoFont = typography?.monoFont || 'Consolas'
+    // TYPOGRAPHY TOKENS: body size, line-height and paragraph spacing come
+    // from the theme (previously hardcoded — margins/line-spacing complaints).
+    const bodySizeHalf = Math.max(18, Math.round((typography?.bodySize ?? 11) * 2)) // half-points
+    const lineHeight = Math.min(1.6, Math.max(1.15, typography?.lineHeight ?? 1.4))
+    const lineTwips = Math.round(lineHeight * 240) // lineRule AUTO: 240 = single
+    const paraAfterTwips = parsePtToTwips(theme.spacing?.paragraphSpacing, 160)
+    const sectionBeforeTwips = parsePtToTwips(theme.spacing?.sectionSpacing, 320)
     const margins = pageMargins(spec.design?.layout)
 
     const pageSize = spec.design?.layout?.pageSize?.toUpperCase() === 'LETTER' ? 'LETTER' : 'A4'
@@ -147,22 +166,29 @@ export class DocxRenderer implements DocumentRenderer {
     }
 
     // ---------------- TABLE OF CONTENTS ----------------
+    // Professional TOC: a real Word TOC FIELD limited to outline headings
+    // (parts + chapters — component sub-headings are content, not outline),
+    // with updateFields so Word refreshes page numbers on open. The
+    // "Contents" title is a styled paragraph, NOT a Heading — it used to
+    // list itself as the first TOC entry.
     const contentSectionsForToc = spec.sections[0]?.type === 'cover' ? spec.sections.slice(1) : spec.sections
-    const hasParts = contentSectionsForToc.some((s) => (s.level || 'chapter') === 'part')
-    if (spec.sections.length >= 4) {
+    if (contentSectionsForToc.length >= 3) {
       children.push(
         new Paragraph({
-          text: 'Contents',
-          heading: HeadingLevel.HEADING_1,
-          spacing: { before: 360, after: 240 },
+          spacing: { before: 240, after: 240 },
+          children: [
+            new TextRun({ text: 'Contents', bold: true, size: 34, color: hex6(colors.primary, '1E3A5F'), font: headingFont }),
+          ],
+          border: { bottom: { style: BorderStyle.SINGLE, size: 6, color: hex6(colors.accent, '3B82F6'), space: 6 } },
         }),
-        new TableOfContents('Contents', { hyperlink: true, headingStyleRange: '1-3' }),
+        new TableOfContents('Contents', { hyperlink: true, headingStyleRange: '1-2' }),
         new Paragraph({ children: [new PageBreak()] })
       )
     }
 
     // ---------------- SECTIONS (hierarchy-aware) ----------------
     const sectionsToRender = spec.sections[0]?.type === 'cover' ? spec.sections.slice(1) : spec.sections
+    const hasParts = sectionsToRender.some((s) => (s.level || 'chapter') === 'part')
     let figureNo = 0
     let renderedAnything = false
 
@@ -199,6 +225,9 @@ export class DocxRenderer implements DocumentRenderer {
           figureNo: () => ++figureNo,
           subHeadingLevel: isSub ? HeadingLevel.HEADING_3 : HeadingLevel.HEADING_2,
           bodyFont,
+          monoFont,
+          lineTwips,
+          paraAfterTwips,
         })
         children.push(...rendered)
       }
@@ -255,26 +284,30 @@ export class DocxRenderer implements DocumentRenderer {
       creator: 'Filo',
       title: spec.title,
       description: spec.description,
+      // updateFields: Word/LibreOffice refresh the TOC page numbers when the
+      // document opens, so a generated file never ships a stale/empty TOC.
+      features: { updateFields: true },
       styles: {
         default: {
           document: {
-            run: { font: bodyFont, size: 22, color: hex6(colors.foreground, '1F2937') },
+            run: { font: bodyFont, size: bodySizeHalf, color: hex6(colors.foreground, '1F2937') },
+            paragraph: { spacing: { after: paraAfterTwips, line: lineTwips, lineRule: LineRuleType.AUTO } },
           },
           heading1: {
-            run: { font: headingFont, size: 34, bold: true, color: hex6(colors.primary, '1E3A5F') },
-            paragraph: { spacing: { before: 400, after: 200 } },
+            run: { font: headingFont, size: 36, bold: true, color: hex6(colors.primary, '1E3A5F') },
+            paragraph: { spacing: { before: sectionBeforeTwips, after: 220, line: 276, lineRule: LineRuleType.AUTO }, keepNext: true, keepLines: true },
           },
           heading2: {
-            run: { font: headingFont, size: 27, bold: true, color: hex6(colors.primary, '1E3A5F') },
-            paragraph: { spacing: { before: 320, after: 160 } },
+            run: { font: headingFont, size: 28, bold: true, color: hex6(colors.primary, '1E3A5F') },
+            paragraph: { spacing: { before: 340, after: 170, line: 276, lineRule: LineRuleType.AUTO }, keepNext: true, keepLines: true },
           },
           heading3: {
-            run: { font: headingFont, size: 23, bold: true, color: hex6(colors.accent, '3B82F6') },
-            paragraph: { spacing: { before: 260, after: 130 } },
+            run: { font: headingFont, size: 24, bold: true, color: hex6(colors.primary, '1E3A5F') },
+            paragraph: { spacing: { before: 280, after: 140, line: 276, lineRule: LineRuleType.AUTO }, keepNext: true, keepLines: true },
           },
           heading4: {
-            run: { font: headingFont, size: 21, bold: true, color: hex6(colors.foreground, '1F2937') },
-            paragraph: { spacing: { before: 220, after: 110 } },
+            run: { font: headingFont, size: 22, bold: true, italics: true, color: hex6(colors.foreground, '1F2937') },
+            paragraph: { spacing: { before: 220, after: 110, line: 276, lineRule: LineRuleType.AUTO }, keepNext: true, keepLines: true },
           },
         },
       },
@@ -659,11 +692,20 @@ export class DocxRenderer implements DocumentRenderer {
     theme: ReturnType<typeof deriveTheme>,
     headingFont: string,
     bodyFont: string,
-    ctx?: { figureNo?: () => number; subHeadingLevel?: (typeof HeadingLevel)[keyof typeof HeadingLevel]; bodyFont?: string }
+    ctx?: {
+      figureNo?: () => number
+      subHeadingLevel?: (typeof HeadingLevel)[keyof typeof HeadingLevel]
+      bodyFont?: string
+      monoFont?: string
+      lineTwips?: number
+      paraAfterTwips?: number
+    }
   ): Promise<(Paragraph | Table)[]> {
     const colors = theme.colors
     const out: (Paragraph | Table)[] = []
     const inHeadingFont = headingFont
+    const lineTwips = ctx?.lineTwips ?? 336
+    const paraAfter = ctx?.paraAfterTwips ?? 160
 
     switch (component.type) {
       case 'heading': {
@@ -682,7 +724,7 @@ export class DocxRenderer implements DocumentRenderer {
           out.push(
             new Paragraph({
               text,
-              spacing: { after: 160, line: 300 },
+              spacing: { after: paraAfter, line: lineTwips, lineRule: LineRuleType.AUTO },
               alignment: AlignmentType.JUSTIFIED,
             })
           )
@@ -735,7 +777,17 @@ export class DocxRenderer implements DocumentRenderer {
       case 'metric_grid': {
         const metrics = asMetrics(component.content)
         if (metrics.length > 0) {
-          out.push(this.metricTable(metrics, colors.primary, colors.accent, inHeadingFont))
+          out.push(this.metricTable(metrics, colors.primary, colors.accent, inHeadingFont, hex6(colors.mutedForeground, '64748B')))
+          out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
+        }
+        break
+      }
+      case 'code': {
+        // FIRST-CLASS CODE BLOCK: monospace, theme-shaded, accent-ruled,
+        // language-labeled. Code is NEVER dumped as a body paragraph.
+        const block = asCodeBlock(component.content)
+        if (block) {
+          out.push(this.codeBlockTable(block, colors, ctx?.monoFont || 'Consolas'))
           out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
         }
         break
@@ -743,7 +795,7 @@ export class DocxRenderer implements DocumentRenderer {
       case 'two_column': {
         const data = asTwoColumn(component.content)
         if (data) {
-          out.push(this.twoColumnTable(data, colors.primary, colors.accent))
+          out.push(this.twoColumnTable(data, colors.primary, colors.accent, hex6(colors.border, 'E2E8F0')))
           out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
         }
         break
@@ -845,6 +897,79 @@ export class DocxRenderer implements DocumentRenderer {
 
   // ---------------- TABLE BUILDERS ----------------
 
+  /**
+   * Professional code block: shaded single-cell table with a thin theme
+   * border, an accent left rule, an optional language label, and one
+   * Paragraph per source line (whitespace-preserving, wrap-safe).
+   */
+  private codeBlockTable(block: { language: string; code: string }, colors: DocxColor, monoFont: string): Table {
+    const fill = tint(colors.primary, 0.96).slice(1).toUpperCase()
+    const accent = hex6(colors.accent, '3B82F6')
+    const border = { style: BorderStyle.SINGLE, size: 4, color: hex6(colors.border, 'E2E8F0') }
+    const lines = block.code.split('\n').slice(0, 400)
+    const truncated = block.code.split('\n').length - lines.length
+    const codeParagraphs = lines.map(
+      (line) =>
+        new Paragraph({
+          spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
+          children: [
+            new TextRun({ text: line.length ? line : ' ', font: monoFont, size: 18, color: hex6(colors.foreground, '1F2937') }),
+          ],
+        })
+    )
+    if (truncated > 0) {
+      codeParagraphs.push(
+        new Paragraph({
+          spacing: { before: 60, after: 0 },
+          children: [new TextRun({ text: `… ${truncated} more lines truncated`, font: monoFont, size: 16, italics: true, color: hex6(colors.mutedForeground, '64748B') })],
+        })
+      )
+    }
+    return new Table({
+      width: { size: 100, type: WidthType.PERCENTAGE },
+      rows: [
+        ...(block.language
+          ? [
+              new TableRow({
+                children: [
+                  new TableCell({
+                    shading: { type: ShadingType.CLEAR, fill: tint(colors.primary, 0.9).slice(1).toUpperCase() },
+                    borders: {
+                      top: border,
+                      left: { style: BorderStyle.SINGLE, size: 12, color: accent },
+                      right: border,
+                      bottom: border,
+                    },
+                    margins: { top: 60, bottom: 60, left: 160, right: 160 },
+                    children: [
+                      new Paragraph({
+                        children: [new TextRun({ text: block.language.toUpperCase(), font: monoFont, size: 15, bold: true, color: hex6(colors.mutedForeground, '64748B') })],
+                      }),
+                    ],
+                  }),
+                ],
+              }),
+            ]
+          : []),
+        new TableRow({
+          children: [
+            new TableCell({
+              shading: { type: ShadingType.CLEAR, fill },
+              borders: {
+                top: border,
+                left: { style: BorderStyle.SINGLE, size: 12, color: accent },
+                right: border,
+                bottom: border,
+              },
+              margins: { top: 120, bottom: 120, left: 160, right: 160 },
+              children: codeParagraphs,
+            }),
+          ],
+        }),
+      ],
+    })
+  }
+
   private calloutTable(text: string, accent: string): Table {
     const fill = tint(accent, 0.88).slice(1).toUpperCase()
     return new Table({
@@ -906,7 +1031,7 @@ export class DocxRenderer implements DocumentRenderer {
     })
   }
 
-  private metricTable(metrics: Array<{ label: string; value: string; change?: string }>, primary: string, accent: string, headingFont: string): Table {
+  private metricTable(metrics: Array<{ label: string; value: string; change?: string }>, primary: string, accent: string, headingFont: string, mutedFg: string): Table {
     const rows: TableRow[] = []
     const headerRow = new TableRow({
       children: metrics.map((m) =>
@@ -948,7 +1073,7 @@ export class DocxRenderer implements DocumentRenderer {
               children: [
                 new Paragraph({
                   alignment: AlignmentType.CENTER,
-                  children: [new TextRun({ text: m.change ?? '', size: 18, italics: true, color: '64748B' })],
+                  children: [new TextRun({ text: m.change ?? '', size: 18, italics: true, color: mutedFg })],
                 }),
               ],
             })
@@ -963,9 +1088,10 @@ export class DocxRenderer implements DocumentRenderer {
   private twoColumnTable(
     data: { leftTitle: string; leftPoints: string[]; rightTitle: string; rightPoints: string[] },
     primary: string,
-    accent: string
+    accent: string,
+    borderColor: string
   ): Table {
-    const cellBorder = { style: BorderStyle.SINGLE, size: 4, color: 'E2E8F0' }
+    const cellBorder = { style: BorderStyle.SINGLE, size: 4, color: borderColor }
     const mkSide = (title: string, points: string[], fillTitle: string) =>
       new TableCell({
         width: { size: 50, type: WidthType.PERCENTAGE },

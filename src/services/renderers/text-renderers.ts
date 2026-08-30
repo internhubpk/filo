@@ -16,7 +16,7 @@
 // =============================================================================
 
 import type { RendererOutput, DocumentRenderer, RenderableDocument, CanonicalComponent } from './shared'
-import { asMetrics, asString, asStringArray, asTable, deriveTheme, withHash } from './shared'
+import { asCodeBlock, asMetrics, asString, asStringArray, asTable, deriveTheme, withHash } from './shared'
 import { evaluateFormula, type CellMatrix } from '@/services/formula-evaluator'
 
 function csvEscape(v: string | number | null): string {
@@ -277,6 +277,15 @@ export class TxtRenderer implements DocumentRenderer {
             rows.forEach((r) => lines.push('  ' + r.map((cell) => (cell === null ? '' : String(cell))).join(' | ')))
             break
           }
+          case 'code': {
+            const block = asCodeBlock(c.content)
+            if (block) {
+              lines.push('', block.language ? `[${block.language}]` : '')
+              block.code.split('\n').forEach((l) => lines.push('    ' + l))
+              lines.push('')
+            }
+            break
+          }
           case 'chart': {
             const o = (c.content && typeof c.content === 'object' ? c.content : {}) as Record<string, unknown>
             lines.push(`[Chart: ${String(o.title ?? 'Chart')}]`)
@@ -328,6 +337,15 @@ export class HtmlRenderer implements DocumentRenderer {
           case 'callout':
             body.push(`<div class="callout">${esc(asString(comp.content))}</div>`)
             break
+          case 'code': {
+            const block = asCodeBlock(comp.content)
+            if (block) {
+              body.push(
+                `<div class="codeblock">${block.language ? `<div class="codelang">${esc(block.language)}</div>` : ''}<pre><code>${esc(block.code)}</code></pre></div>`
+              )
+            }
+            break
+          }
           case 'metric_grid':
             body.push(
               `<div class="metrics">${asMetrics(comp.content)
@@ -371,6 +389,10 @@ export class HtmlRenderer implements DocumentRenderer {
   tbody tr:nth-child(even) { background: ${withHash(c.muted)}; }
   blockquote { border-left: 4px solid var(--accent); margin: 16px 0; padding: 8px 20px; color: var(--muted); font-style: italic; }
   .callout { background: ${withHash(c.muted)}; border-left: 4px solid var(--accent); padding: 12px 18px; font-weight: 600; margin: 16px 0; }
+  .codeblock { margin: 16px 0; border: 1px solid var(--border); border-left: 4px solid var(--accent); border-radius: 6px; overflow: hidden; }
+  .codelang { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); background: ${withHash(c.muted)}; padding: 6px 14px; }
+  .codeblock pre { margin: 0; padding: 14px 16px; background: #f8fafc; overflow-x: auto; }
+  .codeblock code { font-family: ui-monospace, 'Cascadia Code', Consolas, monospace; font-size: 13px; line-height: 1.55; color: var(--fg); }
   .metrics { display: flex; gap: 14px; margin: 18px 0; flex-wrap: wrap; }
   .metric { flex: 1; min-width: 140px; border: 1px solid var(--border); border-top: 3px solid var(--primary); padding: 12px 16px; }
   .metric .label { font-size: 12px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; }

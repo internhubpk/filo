@@ -78,3 +78,8 @@ playwright-report/
 /tests/.build/
 .local-backend/
 tests/artifact-e2e/.storage/
+
+# local render samples + build artifacts
+tests/.samples/
+tests/.build/
+tests/.verify-out/

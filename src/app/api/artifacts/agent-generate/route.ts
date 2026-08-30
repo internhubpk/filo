@@ -102,10 +102,17 @@ export async function POST(request: NextRequest) {
     const { prompt, artifactType, outputFormat, workspaceId, brandConfig, files } = body
 
     if (!prompt || typeof prompt !== 'string' || prompt.trim().length < 10) {
-      return NextResponse.json(
-        { success: false, error: 'Prompt must be at least 10 characters', code: 'INVALID_PROMPT' },
-        { status: 400 }
-      )
+      // EDIT MODE may arrive with only an editInstruction — the effective
+      // prompt is derived after source resolution; here we only hard-reject
+      // requests that have NEITHER a usable prompt NOR an instruction.
+      const hasInstruction = typeof body.editInstruction === 'string' && body.editInstruction.trim().length >= 3
+      const hasSource = typeof body.sourceArtifactId === 'string' && body.sourceArtifactId.length > 0
+      if (!(hasInstruction && hasSource)) {
+        return NextResponse.json(
+          { success: false, error: 'Prompt must be at least 10 characters', code: 'INVALID_PROMPT' },
+          { status: 400 }
+        )
+      }
     }
 
     // Validate attached files (names are persisted; content stays ephemeral —
@@ -189,6 +196,63 @@ export async function POST(request: NextRequest) {
         { success: false, error: 'Background generation requires a real account', code: 'UNAUTHORIZED' },
         { status: 401 }
       )
+    }
+
+    // ==================== AI EDIT OF AN EXISTING ARTIFACT =================
+    // sourceArtifactId switches the job into EDIT MODE: the artifact's
+    // CURRENT file is downloaded, ingested, and passed as the editable source
+    // document; the output format defaults to the artifact's own format (an
+    // edited DOCX must come back as a DOCX). The versioned render path
+    // (resolveRenderTarget) then writes the result as a NEW VERSION of the
+    // same artifact instead of a duplicate.
+    const sourceArtifactId = typeof body.sourceArtifactId === 'string' ? body.sourceArtifactId : undefined
+    const editInstruction = typeof body.editInstruction === 'string' ? body.editInstruction.trim() : undefined
+    // Effective request: an edit merges the instruction into the prompt and
+    // defaults the output format to the source artifact's format.
+    let effectivePrompt = prompt.trim()
+    let effectiveOutputFormat: string | undefined = outputFormat
+    if (sourceArtifactId) {
+      const convexClientForEdit = getConvexClient()
+      const artifactDoc = (await convexClientForEdit.query(api.artifacts.getArtifactForUser, {
+        artifactId: sourceArtifactId as any,
+        userId: userId as any,
+      }).catch(() => null)) as { _id: string; format?: string; title?: string; fileId?: string } | null
+      if (!artifactDoc) {
+        return NextResponse.json(
+          { success: false, error: 'Artifact to edit was not found in your library', code: 'SOURCE_ARTIFACT_NOT_FOUND' },
+          { status: 404 }
+        )
+      }
+
+      // EDIT MODE + no attached files → pull the artifact's current file and
+      // ingest it so the model edits REAL content, not a summary.
+      if (safeFiles.length === 0 && artifactDoc.fileId) {
+        try {
+          const fileDoc = (await convexClientForEdit.query(api.files.getFileForUser, {
+            fileId: artifactDoc.fileId as any,
+            userId: userId as any,
+          }).catch(() => null)) as { r2Key?: string; originalName?: string; mimeType?: string } | null
+          if (fileDoc?.r2Key) {
+            const { downloadFromR2 } = await import('@/lib/r2/client')
+            const bytes = await downloadFromR2(fileDoc.r2Key)
+            const ingestedArtifact = await ingestFile(bytes, fileDoc.originalName || 'artifact', fileDoc.mimeType || 'application/octet-stream')
+            sourceContext = buildSourceContext([ingestedArtifact], 48_000)
+            for (const w of ingestedArtifact.warnings) ingestionWarnings.push(`${fileDoc.originalName || 'artifact'}: ${w}`)
+          }
+        } catch (downloadErr) {
+          console.warn('[AGENT-GENERATE] Artifact file download failed — editing from metadata only:', downloadErr)
+          ingestionWarnings.push('The current file of this artifact could not be read; the AI will work from the artifact metadata.')
+        }
+      }
+      // An edited document comes back in ITS OWN format unless explicitly overridden.
+      if (!effectiveOutputFormat && artifactDoc.format) {
+        effectiveOutputFormat = artifactDoc.format
+      }
+      // The prompt for an edit carries the INSTRUCTION; the architect prompt
+      // gets the full EDIT preamble from the worker.
+      if (editInstruction) {
+        effectivePrompt = `Apply this edit to my document "${artifactDoc.title || ''}": ${editInstruction}`
+      }
     }
 
     // ==================== PLAN + QUOTA (single Convex round-trip each) ====
@@ -292,10 +356,10 @@ export async function POST(request: NextRequest) {
     const result = (await convexClient.mutation(api.generation.enqueueJob, {
       serverToken,
       userId: userId as any,
-      prompt: prompt.trim(),
+      prompt: effectivePrompt,
       workspaceId: (workspaceId || undefined) as any,
       artifactType: artifactType || undefined,
-      outputFormat: outputFormat || undefined,
+      outputFormat: effectiveOutputFormat || undefined,
       appBaseUrl: origin,
       brandConfig: brandConfig ?? undefined,
       attachedFileNames: safeFiles.map((f) => f.filename),

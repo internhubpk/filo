@@ -15,6 +15,8 @@
 
 import type { RendererOutput, DocumentRenderer, RenderableDocument, CanonicalComponent } from './shared'
 import {
+  asChart,
+  asCodeBlock,
   asMetrics,
   asString,
   asStringArray,
@@ -424,6 +426,10 @@ export class PptxRenderer implements DocumentRenderer {
         return 3.1
       case 'equation':
         return 1.2
+      case 'code': {
+        const lines = asCodeBlock(c.content)?.code.split('\n').length ?? 0
+        return Math.min(4, 0.4 + Math.min(lines, 16) * 0.21)
+      }
       case 'table': {
         const rows = asTable(c.content).length
         return Math.min(4, 0.4 + rows * 0.28)
@@ -444,9 +450,100 @@ export class PptxRenderer implements DocumentRenderer {
       case 'heading':
         return 0.4
       default: {
-        const len = asString(c.content).length
+        const len = Math.min(asString(c.content).length, 380) // slides cap prose
         return Math.min(4, 0.3 + (len / 90) * 0.42)
       }
+    }
+  }
+
+  /**
+   * NATIVE pptxgenjs chart (editable data in PowerPoint) with theme palette.
+   * Returns false when the chart kind is not natively expressible — the caller
+   * then falls back to the ECharts PNG pipeline.
+   */
+  private addNativeChart(
+    slide: any,
+    spec: { chartType: string; categories: string[]; series: Array<{ name: string; data: Array<number | null> }> },
+    o: {
+      y: number
+      h: number
+      colors: { fg: string; accent: string; muted: string; dark: boolean }
+      fonts: { bodyFont: string }
+      theme: ReturnType<typeof deriveTheme>
+    }
+  ): boolean {
+    const kind = String(spec.chartType || 'bar').toLowerCase()
+    const palette = o.theme.chartPalette.map((c) => hex6(c))
+    const axisColor = o.colors.dark ? '94A3B8' : o.colors.muted
+    const gridColor = o.colors.dark ? '334155' : 'E2E8F0'
+    const base = {
+      x: MARGIN,
+      y: o.y,
+      w: CONTENT_W,
+      h: o.h,
+      chartColors: palette,
+      // Axes: readable labels, subtle dashed gridlines, no chart-junk.
+      catAxisLabelColor: axisColor,
+      catAxisLabelFontSize: 10,
+      valAxisLabelColor: axisColor,
+      valAxisLabelFontSize: 10,
+      catAxisLineColor: gridColor,
+      valAxisLineShow: false,
+      valGridLine: { color: gridColor, style: 'dash' as const, size: 1 },
+      catGridLine: { style: 'none' as const },
+      legendFontSize: 10,
+      legendColor: axisColor,
+      dataLabelColor: axisColor,
+      dataLabelFontSize: 9,
+      catAxisLabelFontFace: o.fonts.bodyFont,
+      valAxisLabelFontFace: o.fonts.bodyFont,
+      legendFontFace: o.fonts.bodyFont,
+      dataLabelFontFace: o.fonts.bodyFont,
+    }
+    try {
+      if (kind === 'pie' || kind === 'donut' || kind === 'doughnut') {
+        const labels = spec.categories.slice(0, 8)
+        const values = (spec.series[0]?.data ?? []).slice(0, labels.length).map((v) => v ?? 0)
+        slide.addChart(kind === 'pie' ? 'pie' : 'doughnut', [{ name: spec.series[0]?.name || 'Series', labels, values }], {
+          ...base,
+          showPercent: true,
+          showLegend: true,
+          legendPos: 'r',
+          dataBorder: { pt: 1.5, color: o.colors.dark ? '0B1220' : 'FFFFFF' },
+          holeSize: kind === 'donut' ? 55 : undefined,
+        })
+        return true
+      }
+      const data = spec.series.map((s) => ({ name: s.name, labels: spec.categories, values: s.data.map((v) => v ?? 0) }))
+      const multi = spec.series.length > 1
+      if (kind === 'line' || kind === 'area') {
+        slide.addChart(kind === 'line' ? 'line' : 'area', data, {
+          ...base,
+          lineSize: 2.5,
+          lineSmooth: true,
+          lineDataSymbol: 'circle',
+          lineDataSymbolSize: 6,
+          showLegend: multi,
+          legendPos: 'b',
+        })
+        return true
+      }
+      if (kind === 'bar' || kind === 'hbar' || kind === 'stacked') {
+        slide.addChart('bar', data, {
+          ...base,
+          barDir: kind === 'hbar' ? 'bar' : 'col',
+          barGrouping: kind === 'stacked' ? 'stacked' : 'clustered',
+          barGapWidthPct: 60,
+          showLegend: multi,
+          legendPos: 'b',
+          // Value labels on single-series bars only (multi-series labels collide).
+          showValue: !multi && data[0] && data[0].values.length <= 12,
+        })
+        return true
+      }
+      return false // scatter → PNG fallback
+    } catch {
+      return false
     }
   }
 
@@ -489,7 +586,9 @@ export class PptxRenderer implements DocumentRenderer {
       case 'paragraph': {
         const text = asString(component.content)
         if (!text) return 0
-        const capped = text.slice(0, 700)
+        // SLIDE BREVITY: paragraphs are capped hard — a deck is not a document.
+        // The FULL paragraph still lands in the slide's speaker notes below.
+        const capped = text.length > 380 ? `${text.slice(0, 340).trimEnd()}…` : text
         const lines = Math.ceil(capped.length / 95)
         const h = Math.min(availH, 0.3 + lines * 0.26)
         slide.addText(capped, {
@@ -657,9 +756,40 @@ export class PptxRenderer implements DocumentRenderer {
         return h + 0.2
       }
 
-      case 'chart':
-      case 'timeline':
-      case 'diagram': {
+      case 'chart': {
+        // NATIVE PowerPoint charts (editable data, theme palette) — charts
+        // used to ship as rasterized PNGs, uneditable and unsearchable.
+        // Falls back to the rendered PNG only for shapes pptxgenjs cannot
+        // express natively.
+        const spec = asChart(component.content)
+        if (spec) {
+          const chartH = Math.min(availH, 3.3)
+          const native = this.addNativeChart(slide, spec, {
+            y,
+            h: chartH,
+            colors: ctx.colors,
+            fonts: ctx.fonts,
+            theme,
+          })
+          if (native) {
+            const caption = [spec.title?.trim(), spec.note?.trim()].filter(Boolean).join(' — ')
+            if (caption) {
+              slide.addText(caption.slice(0, 140), {
+                x: MARGIN,
+                y: y + chartH + 0.02,
+                w: CONTENT_W,
+                h: 0.25,
+                fontSize: 10,
+                color: colors.muted,
+                align: 'center',
+                fontFace: fonts.bodyFont,
+              })
+              return chartH + 0.32
+            }
+            return chartH + 0.12
+          }
+        }
+        // FALLBACK: rasterized image (scatter and any unparsed spec).
         const image = await renderComponentImage(component, ctx.theme, { pptx: true })
         if (!image) return 0
         const maxW = CONTENT_W
@@ -687,6 +817,78 @@ export class PptxRenderer implements DocumentRenderer {
           })
         }
         return h + (image.caption ? 0.32 : 0.12)
+      }
+
+      case 'timeline':
+      case 'diagram': {
+        const image = await renderComponentImage(component, ctx.theme, { pptx: true })
+        if (!image) return 0
+        const maxW = CONTENT_W * 0.86
+        const maxH = Math.min(availH, 3.1)
+        const scale = Math.min(maxW / image.width, maxH / image.height)
+        const w = image.width * scale
+        const h = image.height * scale
+        slide.addImage({
+          data: `image/png;base64,${image.png.toString('base64')}`,
+          x: (SLIDE_W - w) / 2,
+          y,
+          w,
+          h,
+        })
+        if (image.caption) {
+          slide.addText(image.caption.slice(0, 120), {
+            x: MARGIN,
+            y: y + h + 0.02,
+            w: CONTENT_W,
+            h: 0.25,
+            fontSize: 10,
+            color: colors.muted,
+            align: 'center',
+            fontFace: fonts.bodyFont,
+          })
+        }
+        return h + (image.caption ? 0.32 : 0.12)
+      }
+
+      case 'code': {
+        // CODE BLOCK slide element: monospace panel with a language tag.
+        const block = asCodeBlock(component.content)
+        if (!block) return 0
+        const lines = block.code.split('\n').slice(0, 16)
+        const truncated = block.code.split('\n').length - lines.length
+        const lineCount = lines.length + (truncated > 0 ? 1 : 0)
+        const h = Math.min(availH, 0.34 + lineCount * 0.21)
+        slide.addShape('roundRect', {
+          x: MARGIN,
+          y,
+          w: CONTENT_W,
+          h,
+          fill: { color: colors.dark ? '111C2E' : 'F8FAFC' },
+          line: { color: colors.dark ? '334155' : 'E2E8F0', width: 1 },
+          rectRadius: 0.05,
+        })
+        slide.addShape('rect', { x: MARGIN, y, w: 0.06, h, fill: { color: colors.accent } })
+        const runs: Array<{ text: string; options?: Record<string, unknown> }> = []
+        if (block.language) {
+          runs.push({ text: block.language.toUpperCase(), options: { fontSize: 9, bold: true, color: colors.muted, breakLine: true } })
+        }
+        for (const l of lines) {
+          runs.push({ text: l.length ? l : ' ', options: { breakLine: true } })
+        }
+        if (truncated > 0) {
+          runs.push({ text: `… ${truncated} more lines`, options: { fontSize: 9, italic: true, color: colors.muted, breakLine: true } })
+        }
+        slide.addText(runs, {
+          x: MARGIN + 0.18,
+          y: y + 0.06,
+          w: CONTENT_W - 0.36,
+          h: h - 0.12,
+          fontSize: 11,
+          fontFace: 'Consolas',
+          color: colors.dark ? 'E2E8F0' : colors.fg,
+          valign: 'top',
+        })
+        return h + 0.18
       }
 
       case 'table': {

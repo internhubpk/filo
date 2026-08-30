@@ -241,6 +241,13 @@ class ApiClient {
     artifactType?: string
     outputFormat?: string
     workspaceId?: string
+    /** EDIT MODE: the artifact to produce a NEW VERSION of. */
+    sourceArtifactId?: string
+    /**
+     * EDIT MODE: natural-language instruction for the change. Merged into the
+     * prompt server-side when the client sends only an instruction.
+     */
+    editInstruction?: string
     brandConfig?: {
       companyName?: string
       logoUrl?: string

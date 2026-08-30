@@ -129,6 +129,9 @@ export function ArtifactLibrary({
   const [versionsLoading, setVersionsLoading] = useState(false);
   const [restoring, setRestoring] = useState<number | null>(null);
   const [exporting, setExporting] = useState<string | null>(null);
+  const [editFor, setEditFor] = useState<ArtifactRow | null>(null);
+  const [editInstruction, setEditInstruction] = useState("");
+  const [editing, setEditing] = useState(false);
 
   const list = useApi<{ artifacts?: ArtifactRow[]; total?: number }>(
     ready && user
@@ -210,6 +213,41 @@ export function ArtifactLibrary({
       }
     },
     [list]
+  );
+
+  // ---- AI EDIT (spec §26 edit mode): new VERSION of the same artifact ----
+  const submitEdit = useCallback(
+    async (row: ArtifactRow) => {
+      const instruction = editInstruction.trim();
+      if (instruction.length < 3) {
+        toast.error("Describe the edit you want", { description: "e.g. \"Add a risk analysis section and shorten the summary.\"" });
+        return;
+      }
+      setEditing(true);
+      try {
+        const res = await apiClient.startGeneration({
+          prompt: `Apply this edit to my document "${row.title}": ${instruction}`,
+          editInstruction: instruction,
+          sourceArtifactId: row._id,
+          outputFormat: row.format || undefined,
+        });
+        if (!res.success) {
+          throw new Error((res as any).error || "Could not start the edit");
+        }
+        toast.success("AI edit started", {
+          description: `A new version of "${row.title}" is being generated — watch the progress panel.`,
+        });
+        setEditFor(null);
+        setEditInstruction("");
+      } catch (err) {
+        toast.error("AI edit failed to start", {
+          description: err instanceof Error ? err.message.slice(0, 160) : "Please try again.",
+        });
+      } finally {
+        setEditing(false);
+      }
+    },
+    [editInstruction]
   );
 
   // ---- Version history (spec §27/§28) ----
@@ -449,6 +487,17 @@ export function ArtifactLibrary({
                         </Button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent align="end" className="w-48">
+                        <DropdownMenuLabel>AI actions</DropdownMenuLabel>
+                        <DropdownMenuItem
+                          disabled={row.status !== "completed"}
+                          onClick={() => {
+                            setEditInstruction("");
+                            setEditFor(row);
+                          }}
+                        >
+                          <Sparkles className="mr-2 size-3.5" /> Edit with AI
+                        </DropdownMenuItem>
+                        <DropdownMenuSeparator />
                         <DropdownMenuLabel>Download</DropdownMenuLabel>
                         <DropdownMenuItem onClick={() => void download(row)}>
                           <Download className="mr-2 size-3.5" /> {row.format || "File"}
@@ -533,6 +582,17 @@ export function ArtifactLibrary({
                     </Button>
                   </DropdownMenuTrigger>
                   <DropdownMenuContent align="end" className="w-48">
+                    <DropdownMenuLabel>AI actions</DropdownMenuLabel>
+                    <DropdownMenuItem
+                      disabled={row.status !== "completed"}
+                      onClick={() => {
+                        setEditInstruction("");
+                        setEditFor(row);
+                      }}
+                    >
+                      <Sparkles className="mr-2 size-3.5" /> Edit with AI
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
                     <DropdownMenuLabel>Download</DropdownMenuLabel>
                     <DropdownMenuItem onClick={() => void download(row)}>
                       <Download className="mr-2 size-3.5" /> {row.format || "File"}
@@ -648,6 +708,36 @@ export function ArtifactLibrary({
                 </div>
               ))
             )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* AI edit (edit mode → new version of the same artifact) */}
+      <Dialog open={Boolean(editFor)} onOpenChange={(o) => !o && setEditFor(null)}>
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              <Sparkles className="size-4 text-primary" /> Edit with AI
+            </DialogTitle>
+            <DialogDescription>
+              Describe the change to apply to "{editFor?.title}". The AI preserves everything else and saves the result as a new version in {editFor?.format || "the original format"}.
+            </DialogDescription>
+          </DialogHeader>
+          <textarea
+            value={editInstruction}
+            onChange={(e) => setEditInstruction(e.target.value)}
+            placeholder='e.g. "Add an executive summary at the top, update the table to 2026 figures, and make the tone more formal."'
+            rows={5}
+            className="w-full resize-none rounded-lg border bg-background px-3 py-2.5 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring"
+          />
+          <div className="flex justify-end gap-2">
+            <Button variant="ghost" size="sm" onClick={() => setEditFor(null)} disabled={editing}>
+              Cancel
+            </Button>
+            <Button size="sm" onClick={() => editFor && void submitEdit(editFor)} disabled={editing || editInstruction.trim().length < 3}>
+              {editing ? <Loader2 className="mr-1.5 size-3.5 animate-spin" /> : <Sparkles className="mr-1.5 size-3.5" />}
+              Apply edit
+            </Button>
           </div>
         </DialogContent>
       </Dialog>

@@ -63,6 +63,7 @@ export type CanonicalComponentType =
   | 'key_takeaways'
   | 'two_column'
   | 'equation'
+  | 'code'
   | 'diagram'
 
 export interface CanonicalComponent {
@@ -104,6 +105,11 @@ const LOWER_MAP: Record<string, CanonicalComponentType> = {
   math: 'equation',
   formula: 'equation',
   latex: 'equation',
+  code: 'code',
+  code_block: 'code',
+  codeblock: 'code',
+  snippet: 'code',
+  pre: 'code',
   diagram: 'diagram',
   flowchart: 'diagram',
   process: 'diagram',
@@ -205,6 +211,39 @@ export function asChart(content: unknown): NormalizedChart | null {
   return normalizeChartSpec(content)
 }
 
+export interface CodeBlockData {
+  language: string
+  code: string
+}
+
+/**
+ * Coerce a CODE component into { language, code }. Accepts the canonical AI
+ * shape ({language, code}), {language, content}, a bare string, or a legacy
+ * string with a leading ```language fence (the model sometimes wraps code in
+ * fences INSIDE the content — strip them so blocks are not double-fenced).
+ */
+export function asCodeBlock(content: unknown): CodeBlockData | null {
+  let language = ''
+  let code = ''
+  if (typeof content === 'string') {
+    code = content
+  } else if (content && typeof content === 'object') {
+    const o = content as Record<string, unknown>
+    language = typeof o.language === 'string' ? o.language.trim() : ''
+    const raw = o.code ?? o.content ?? o.text ?? o.source
+    code = typeof raw === 'string' ? raw : Array.isArray(raw) ? raw.map(String).join('\n') : ''
+  }
+  code = code.replace(/\r\n/g, '\n').replace(/^\n+/, '').replace(/\n+$/, '')
+  // Strip a single wrapping fence (```lang\n ... \n```).
+  const fence = /^```([A-Za-z0-9+#_-]*)\n([\s\S]*?)\n?```$/.exec(code)
+  if (fence) {
+    if (!language) language = fence[1] || ''
+    code = fence[2]
+  }
+  if (!code.trim()) return null
+  return { language: language.slice(0, 24), code }
+}
+
 // ==================== THEME DERIVATION ====================
 
 export interface DerivedTheme {
@@ -218,6 +257,32 @@ export interface DerivedTheme {
   cover: ThemeTokens['cover']
   table: ThemeTokens['table']
   headingCase: ThemeTokens['headingCase']
+  /** Typography tokens (fonts/sizes/line-height) — renderers MUST consume. */
+  typography: ThemeTokens['typography']
+  /** Spacing tokens (paragraph/section spacing) — renderers MUST consume. */
+  spacing: ThemeTokens['spacing']
+}
+
+/**
+ * The generic fallback palette emitted by getDefaultDesign() for blueprints
+ * that never went through the designer stage. When a blueprint carries these
+ * EXACT colors, they are NOT an intentional design decision — they are the
+ * absence of one. Spreading them over the resolved theme tokens used to
+ * flatten every document to the same black/blue/slate look ("shitty
+ * coloring on every document"), so they are detected and ignored.
+ */
+const GENERIC_FALLBACK_COLORS = new Set([
+  '#1a1a1a', '#333333', '#3b82f6', '#ffffff', '#0f172a', '#f1f5f9',
+  '#64748b', '#e2e8f0', '#16a34a', '#f59e0b', '#dc2626', '#2563eb',
+])
+
+function hasIntentionalColors(colors: ColorPalette | undefined): boolean {
+  if (!colors) return false
+  const entries = Object.entries(colors).filter(([k]) => k !== 'accent') as Array<[string, string]>
+  if (entries.length === 0) return false
+  const generic = entries.filter(([, v]) => GENERIC_FALLBACK_COLORS.has(String(v ?? '').toLowerCase()))
+  // Accent is always allowed through (the designer may legitimately tune it).
+  return generic.length < entries.length
 }
 
 /**
@@ -228,15 +293,23 @@ export interface DerivedTheme {
 export function deriveTheme(spec: ArtifactSpecification): DerivedTheme {
   const design = spec.design
   const themeName = design?.theme?.name
-  let tokens: ThemeTokens
-  if (themeName && THEMES.some((t) => t.id === themeName.toLowerCase())) {
-    tokens = getTheme(themeName)
-  } else {
-    tokens = getTheme('executive')
-  }
-  const colors: ColorPalette = {
-    ...tokens.colors,
-    ...(design?.colors ?? {}),
+  const resolvesInRegistry = Boolean(themeName && THEMES.some((t) => t.id === themeName.toLowerCase()))
+  const tokens = resolvesInRegistry ? getTheme(themeName) : getTheme('executive')
+
+  // REGISTRY-FIRST COLORS: when the blueprint's theme resolves in the
+  // registry, the registry palette IS the design. Only override it when the
+  // blueprint carries INTENTIONAL colors (e.g. the designer's accent tune, a
+  // brand palette); the generic default palette is ignored.
+  const colors: ColorPalette = { ...tokens.colors }
+  if (resolvesInRegistry) {
+    if (design?.colors?.accent && /^#[0-9a-fA-F]{6}$/.test(design.colors.accent)) {
+      colors.accent = design.colors.accent
+    }
+    if (hasIntentionalColors(design?.colors)) {
+      Object.assign(colors, design?.colors)
+    }
+  } else if (hasIntentionalColors(design?.colors)) {
+    Object.assign(colors, design?.colors)
   }
   const accent = colors.accent || tokens.colors.accent
 
@@ -270,6 +343,8 @@ export function deriveTheme(spec: ArtifactSpecification): DerivedTheme {
     cover: tokens.cover,
     table: tokens.table,
     headingCase: tokens.headingCase,
+    typography: tokens.typography,
+    spacing: tokens.spacing,
   }
 }
 

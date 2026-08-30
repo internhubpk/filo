@@ -147,7 +147,7 @@ function detectFormat(raw: string): CellFormat | null {
   return null
 }
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
+ 
 type AnyWorkbook = any
 
 export class XlsxRenderer implements DocumentRenderer {
@@ -473,7 +473,7 @@ export class XlsxRenderer implements DocumentRenderer {
 
   private writeTableBlock(
     wb: AnyWorkbook,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     ws: any,
     sheetName: string,
     block: TableBlock,
@@ -696,7 +696,7 @@ export class XlsxRenderer implements DocumentRenderer {
   // ==================== CHART DATA BLOCK WRITER ====================
 
   private writeChartBlock(
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+     
     ws: any,
     sheetName: string,
     spec2: Record<string, unknown>,
