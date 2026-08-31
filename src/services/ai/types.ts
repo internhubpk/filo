@@ -27,6 +27,13 @@ export type ResponseFormat =
   | { type: 'json' }
   | { type: 'json_schema'; schema: unknown }
 
+/** A web citation surfaced by a provider's native search grounding. */
+export interface AiWebSource {
+  title: string
+  url: string
+  snippet?: string
+}
+
 /** Per-request generation options (all optional — providers apply defaults). */
 export interface AiRequestOptions {
   /** Provider-specific model id, e.g. 'deepseek-v4-flash'. */
@@ -42,6 +49,12 @@ export interface AiRequestOptions {
   timeoutMs?: number
   /** Idempotency / trace id propagated into logs. */
   requestId?: string
+  /** Ask the provider to ground the reply in live web results. CHAT ONLY —
+   *  document generation must never ground. Supported natively by GEMINI
+   *  (google_search tool → groundingMetadata) and by OPENAI search-capable
+   *  models (url_citation annotations); unsupported providers/models ignore
+   *  it fail-soft and the caller falls back to link extraction. */
+  webSearch?: boolean
 }
 
 /** A complete generation request. */
@@ -69,6 +82,10 @@ export interface AiResponse {
   /** Wall-clock duration in ms. */
   durationMs: number
   finishReason?: string
+  /** Native web citations from the provider's search grounding — present
+   *  only when the request enabled webSearch AND the provider served
+   *  results. Absent/empty ⇒ caller falls back to link extraction. */
+  sources?: AiWebSource[]
 }
 
 /**

@@ -251,7 +251,18 @@ export async function POST(request: NextRequest) {
               { role: "system", content: CHAT_SYSTEM_PROMPT },
               ...contextMessages,
             ],
-            options: { temperature: 0.7, maxTokens: 2048 },
+            options: {
+              temperature: 0.7,
+              maxTokens: 2048,
+              // CHAT-ONLY native web grounding (env-gated, default off):
+              //   GEMINI → google_search tool → groundingMetadata citations
+              //   OPENAI → web_search_options (search-capable models) →
+              //            url_citation annotations
+              // Providers that can't ground ignore it fail-soft. Document
+              // mode NEVER grounds — generation quality must not depend on
+              // live web state.
+              webSearch: process.env.CHAT_WEB_SEARCH === "true",
+            },
           },
           { task: "generation" }
         );
@@ -269,10 +280,12 @@ export async function POST(request: NextRequest) {
         }
 
         // Persist the assistant reply — the reactive transcript takes over
-        // from the client's local stream buffer. Web resources cited by the
-        // reply (if any) ride along in metadata.sources and render as the
-        // "Web resources" strip in the chat UI.
-        const webSources = extractWebSources(assistantText);
+        // from the client's local stream buffer. Sources: native provider
+        // grounding citations win; link extraction is the fallback when the
+        // provider can't ground (or grounding was disabled).
+        const nativeSources = final.sources ?? [];
+        const webSources =
+          nativeSources.length > 0 ? nativeSources : extractWebSources(assistantText);
         await convex.mutation(api.chats.appendMessage, {
           session: token,
           chatId: chatId as any,

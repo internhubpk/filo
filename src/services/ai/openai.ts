@@ -15,9 +15,11 @@ import type {
   AiResponse,
   ProviderHealth,
   AiStreamResult,
+  AiWebSource,
 } from './types'
 import type { AiProvider } from './provider'
 import { normalizeOpenAiCompatibleBaseUrl, parseSseStream } from './provider'
+import { mapOpenAiCitations, type OpenAiUrlCitation } from './grounding'
 import {
   AiBaseError,
   ApiKeyMissingError,
@@ -35,10 +37,24 @@ export const OPENAI_MODELS = [
   'gpt-4.1',
 ] as const
 
+interface OpenAiAnnotation {
+  type?: string
+  url_citation?: {
+    url?: string
+    title?: string
+    content?: string
+  }
+}
+
 interface OpenAiChatResponse {
   id?: string
   choices?: Array<{
-    message?: { content?: string }
+    message?: {
+      content?: string
+      // url_citation annotations ride on search-capable models
+      // (web_search_options) — they are the NATIVE citations.
+      annotations?: OpenAiAnnotation[]
+    }
     finish_reason?: string
   }>
   usage?: {
@@ -75,6 +91,17 @@ export class OpenAiProvider implements AiProvider {
     return Boolean(process.env.OPENAI_API_KEY)
   }
 
+  /**
+   * Native web search is only accepted by OpenAI's search-capable models
+   * (chat-completions `web_search_options`). Sending it to any other model
+   * is a 400, so it is gated strictly by name; other models degrade to the
+   * caller's link-extraction fallback. Gate by id so gateways that proxy
+   * different names keep working via the self-healing retry below.
+   */
+  private supportsNativeWebSearch(model: string): boolean {
+    return /search-preview|gpt-4o-search|o3-search/i.test(model)
+  }
+
   async generate(request: AiRequest): Promise<AiResponse> {
     const apiKey = this.getApiKey()
     const model = request.options?.model || this.defaultModel
@@ -85,29 +112,53 @@ export class OpenAiProvider implements AiProvider {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
+    const buildBody = (includeSearch: boolean): string =>
+      JSON.stringify({
+        model,
+        messages: request.messages,
+        temperature: opts?.temperature ?? 0.7,
+        max_tokens: opts?.maxTokens,
+        top_p: opts?.topP,
+        frequency_penalty: opts?.frequencyPenalty,
+        presence_penalty: opts?.presencePenalty,
+        stop: opts?.stopSequences,
+        response_format:
+          opts?.responseFormat?.type === 'json'
+            ? { type: 'json_object' }
+            : undefined,
+        ...(includeSearch && opts?.webSearch && this.supportsNativeWebSearch(model)
+          ? { web_search_options: {} }
+          : {}),
+      })
+
     try {
-      const response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+      let response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Authorization: `Bearer ${apiKey}`,
         },
         signal: controller.signal,
-        body: JSON.stringify({
-          model,
-          messages: request.messages,
-          temperature: opts?.temperature ?? 0.7,
-          max_tokens: opts?.maxTokens,
-          top_p: opts?.topP,
-          frequency_penalty: opts?.frequencyPenalty,
-          presence_penalty: opts?.presencePenalty,
-          stop: opts?.stopSequences,
-          response_format:
-            opts?.responseFormat?.type === 'json'
-              ? { type: 'json_object' }
-              : undefined,
-        }),
+        body: buildBody(true),
       })
+
+      // Self-healing search retry: model/gateway rejected web_search_options
+      // → retry once without it; chat keeps working, citations fall back to
+      // link extraction.
+      if (!response.ok && opts?.webSearch && response.status === 400) {
+        console.warn(
+          `[AI][OPENAI] web_search_options rejected on ${model} — retrying without grounding`,
+        )
+        response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          signal: controller.signal,
+          body: buildBody(false),
+        })
+      }
 
       if (!response.ok) {
         const errText = await response.text().catch(() => '')
@@ -119,6 +170,10 @@ export class OpenAiProvider implements AiProvider {
       if (!choice) {
         throw new MalformedResponseError('OPENAI', 'no choices in response')
       }
+
+      const nativeSources: AiWebSource[] = mapOpenAiCitations(
+        choice.message?.annotations ?? [],
+      )
 
       return {
         id: data.id || `oai_${startedAt}`,
@@ -132,6 +187,7 @@ export class OpenAiProvider implements AiProvider {
         model,
         durationMs: Date.now() - startedAt,
         finishReason: choice.finish_reason,
+        ...(nativeSources.length > 0 ? { sources: nativeSources } : {}),
       }
     } catch (err) {
       throw normalizeAiError('OPENAI', err)
@@ -156,6 +212,23 @@ export class OpenAiProvider implements AiProvider {
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
+    const buildBody = (includeSearch: boolean): string =>
+      JSON.stringify({
+        model,
+        messages: request.messages,
+        temperature: opts?.temperature ?? 0.7,
+        max_tokens: opts?.maxTokens,
+        top_p: opts?.topP,
+        frequency_penalty: opts?.frequencyPenalty,
+        presence_penalty: opts?.presencePenalty,
+        stop: opts?.stopSequences,
+        stream: true,
+        stream_options: { include_usage: true },
+        ...(includeSearch && opts?.webSearch && this.supportsNativeWebSearch(model)
+          ? { web_search_options: {} }
+          : {}),
+      })
+
     let response: Response
     try {
       response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
@@ -165,19 +238,25 @@ export class OpenAiProvider implements AiProvider {
           Authorization: `Bearer ${apiKey}`,
         },
         signal: controller.signal,
-        body: JSON.stringify({
-          model,
-          messages: request.messages,
-          temperature: opts?.temperature ?? 0.7,
-          max_tokens: opts?.maxTokens,
-          top_p: opts?.topP,
-          frequency_penalty: opts?.frequencyPenalty,
-          presence_penalty: opts?.presencePenalty,
-          stop: opts?.stopSequences,
-          stream: true,
-          stream_options: { include_usage: true },
-        }),
+        body: buildBody(true),
       })
+
+      // Self-healing search retry — see generate().
+      if (!response.ok && opts?.webSearch && response.status === 400) {
+        const errText = await response.text().catch(() => '')
+        console.warn(
+          `[AI][OPENAI] web_search_options rejected on ${model} — retrying without grounding`,
+        )
+        response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          signal: controller.signal,
+          body: buildBody(false),
+        })
+      }
     } catch (err) {
       clearTimeout(timer)
       throw normalizeAiError('OPENAI', err)
@@ -211,12 +290,19 @@ export class OpenAiProvider implements AiProvider {
       let content = ''
       let finishReason: string | undefined
       let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      const citations: OpenAiUrlCitation[] = []
       try {
         for await (const payload of sse) {
           if (payload === '[DONE]') break
           let chunk: {
             choices?: Array<{
-              delta?: { content?: string }
+              delta?: {
+                content?: string
+                // url_citation annotations arrive on deltas of search-capable
+                // models; the final chunk may also carry message.annotations.
+                annotations?: OpenAiAnnotation[]
+              }
+              message?: { annotations?: OpenAiAnnotation[] }
               finish_reason?: string | null
             }>
             usage?: OpenAiChatResponse['usage']
@@ -226,9 +312,12 @@ export class OpenAiProvider implements AiProvider {
           } catch {
             continue
           }
-          const delta = chunk.choices?.[0]?.delta?.content
+          const choice = chunk.choices?.[0]
+          const delta = choice?.delta?.content
           if (delta) content += delta
-          const fr = chunk.choices?.[0]?.finish_reason
+          const anns = choice?.delta?.annotations ?? choice?.message?.annotations
+          if (anns?.length) citations.push(...anns)
+          const fr = choice?.finish_reason
           if (fr) finishReason = fr
           if (chunk.usage) {
             usage = {
@@ -241,6 +330,7 @@ export class OpenAiProvider implements AiProvider {
         if (!content) {
           throw new MalformedResponseError('OPENAI', 'stream produced no content')
         }
+        const nativeSources: AiWebSource[] = mapOpenAiCitations(citations)
         return {
           id: `oai_${startedAt}`,
           content,
@@ -249,6 +339,7 @@ export class OpenAiProvider implements AiProvider {
           model,
           durationMs: Date.now() - startedAt,
           finishReason,
+          ...(nativeSources.length > 0 ? { sources: nativeSources } : {}),
         }
       } catch (err) {
         if (err instanceof AiBaseError) throw err

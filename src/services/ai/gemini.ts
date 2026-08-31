@@ -44,9 +44,11 @@ import type {
   AiResponse,
   ProviderHealth,
   AiStreamResult,
+  AiWebSource,
 } from './types'
 import type { AiProvider } from './provider'
 import { parseSseStream } from './provider'
+import { mapGeminiGrounding, type GeminiGroundingChunk } from './grounding'
 import {
   AiBaseError,
   ApiKeyMissingError,
@@ -79,6 +81,13 @@ interface GeminiGenerateContentResponse {
   candidates?: Array<{
     content?: { parts?: Array<{ text?: string }> }
     finishReason?: string
+    // Native search grounding (request.tools: [{ google_search: {} }]):
+    // groundingMetadata arrives on stream chunks — text parts carry the
+    // answer, groundingChunks carry the actual citations.
+    groundingMetadata?: {
+      groundingChunks?: GeminiGroundingChunk[]
+      webSearchQueries?: string[]
+    }
   }>
   promptFeedback?: { blockReason?: string }
   usageMetadata?: {
@@ -156,13 +165,16 @@ export class GeminiProvider implements AiProvider {
       // buildBody(false) — bare config, no thinkingConfig (self-healing retry:
       //     if Google ever 400s our optional params again, retry once with the
       //     minimal body before letting the router move to the next model).
+      // includeTools — attach the google_search grounding tool when the
+      //     caller asked for chat-mode web search (opts.webSearch).
       // NOTE: JSON.stringify drops undefined fields, so unset temperature/topP
       // are genuinely omitted — Google then applies ITS defaults (temp 1.0 is
       // the strongly recommended default for all Gemini 3 models).
-      const buildBody = (includeThinking: boolean): string =>
+      const buildBody = (includeThinking: boolean, includeTools: boolean): string =>
         JSON.stringify({
           contents,
           ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+          ...(includeTools && opts?.webSearch ? { tools: [{ google_search: {} }] } : {}),
           generationConfig: {
             temperature: opts?.temperature,
             maxOutputTokens: opts?.maxTokens,
@@ -178,7 +190,7 @@ export class GeminiProvider implements AiProvider {
         method: 'POST',
         headers,
         signal: controller.signal,
-        body: buildBody(true),
+        body: buildBody(true, true),
       })
 
       if (!response.ok) {
@@ -194,7 +206,7 @@ export class GeminiProvider implements AiProvider {
             method: 'POST',
             headers,
             signal: controller.signal,
-            body: buildBody(false),
+            body: buildBody(false, false),
           })
           if (!response.ok) {
             const retryErrText = await response.text().catch(() => '')
@@ -232,6 +244,10 @@ export class GeminiProvider implements AiProvider {
         throw new MalformedResponseError('GEMINI', 'no candidate parts in response')
       }
 
+      const nativeSources: AiWebSource[] = mapGeminiGrounding(
+        data.candidates?.[0]?.groundingMetadata?.groundingChunks ?? [],
+      )
+
       return {
         id: `gem_${startedAt}`,
         content,
@@ -244,6 +260,7 @@ export class GeminiProvider implements AiProvider {
         model,
         durationMs: Date.now() - startedAt,
         finishReason,
+        ...(nativeSources.length > 0 ? { sources: nativeSources } : {}),
       }
     } catch (err) {
       // Our own AiBaseError subclasses pass through unchanged; raw
@@ -290,21 +307,48 @@ export class GeminiProvider implements AiProvider {
       'Content-Type': 'application/json',
       'x-goog-api-key': apiKey,
     }
-    const body = JSON.stringify({
-      contents,
-      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
-      generationConfig: {
-        temperature: opts?.temperature,
-        maxOutputTokens: opts?.maxTokens,
-        topP: opts?.topP,
-        stopSequences: opts?.stopSequences,
-        ...( { thinkingConfig: { thinkingLevel } } ),
-      },
-    })
+    const buildBody = (includeTools: boolean): string =>
+      JSON.stringify({
+        contents,
+        ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+        ...(includeTools && opts?.webSearch ? { tools: [{ google_search: {} }] } : {}),
+        generationConfig: {
+          temperature: opts?.temperature,
+          maxOutputTokens: opts?.maxTokens,
+          topP: opts?.topP,
+          stopSequences: opts?.stopSequences,
+          thinkingConfig: { thinkingLevel },
+        },
+      })
 
     let response: Response
     try {
-      response = await fetch(url, { method: 'POST', headers, signal: controller.signal, body })
+      response = await fetch(url, {
+        method: 'POST',
+        headers,
+        signal: controller.signal,
+        body: buildBody(true),
+      })
+
+      // Self-healing grounding retry: if the model/gateway rejects the
+      // google_search tool (400 INVALID_ARGUMENT family), retry ONCE without
+      // it — chat keeps working, the caller falls back to link extraction.
+      if (!response.ok && opts?.webSearch && response.status === 400) {
+        const errText = await response.text().catch(() => '')
+        console.warn(
+          `[AI][GEMINI] google_search tool rejected on ${model} — retrying without grounding`,
+        )
+        response = await fetch(url, {
+          method: 'POST',
+          headers,
+          signal: controller.signal,
+          body: buildBody(false),
+        })
+        if (!response.ok) {
+          const retryErrText = await response.text().catch(() => '')
+          throw errorFromHttpStatus('GEMINI', response.status, retryErrText)
+        }
+      }
     } catch (err) {
       clearTimeout(timer)
       throw normalizeAiError('GEMINI', err)
@@ -342,6 +386,7 @@ export class GeminiProvider implements AiProvider {
       let content = ''
       let finishReason: string | undefined
       let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      const groundingChunks: GeminiGroundingChunk[] = []
       try {
         for await (const payload of sse) {
           if (payload === '[DONE]') break
@@ -359,6 +404,9 @@ export class GeminiProvider implements AiProvider {
           for (const p of parts) {
             if (p.text) content += p.text
           }
+          // Grounding citations can arrive on ANY chunk — accumulate all.
+          const gm = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks
+          if (gm?.length) groundingChunks.push(...gm)
           const fr = chunk.candidates?.[0]?.finishReason
           if (fr && fr !== 'FINISH_REASON_UNSPECIFIED') finishReason = fr
           if (chunk.usageMetadata) {
@@ -375,6 +423,7 @@ export class GeminiProvider implements AiProvider {
       if (!content && !finishReason) {
         throw new MalformedResponseError('GEMINI', 'stream produced no content')
       }
+      const nativeSources: AiWebSource[] = mapGeminiGrounding(groundingChunks)
       return {
         id: `gem_${startedAt}`,
         content,
@@ -383,6 +432,7 @@ export class GeminiProvider implements AiProvider {
         model,
         durationMs: Date.now() - startedAt,
         finishReason,
+        ...(nativeSources.length > 0 ? { sources: nativeSources } : {}),
       }
     })()
 
