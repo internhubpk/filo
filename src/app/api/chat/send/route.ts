@@ -284,10 +284,13 @@ export async function POST(request: NextRequest) {
       // ---- Chat model pin (chat mode ONLY — document mode keeps its own
       // cost-optimized task matrix) ----
       // Precedence: client-supplied model (validated charset; future picker)
-      // > CHAT_MODEL env pin > provider default/task matrix. Pinning a model
-      // that belongs to another provider routes to THAT provider (the router
-      // honors pins across the registry), so e.g. CHAT_MODEL=gpt-5.6-sol
-      // requires AGENT_ROUTER_API_KEY to be configured.
+      // > CHAT_MODEL env pin > provider default/task matrix.
+      // Routing is DIRECT: the strategy provider (production = OpenAI via
+      // OPENAI_API_KEY) serves the pinned id itself when its registry lists
+      // it, and an explicit AI_PROVIDER env is absolute — a shared gateway
+      // that happens to carry the same model id (e.g. AgentRouter's
+      // gpt-5.6-sol) never hijacks the request. So CHAT_MODEL=gpt-5.6-sol
+      // needs ONLY OPENAI_API_KEY, no AgentRouter key.
       const bodyModel =
         typeof body.model === "string" && /^[A-Za-z0-9._/-]{1,120}$/.test(body.model)
           ? body.model

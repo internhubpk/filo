@@ -31,11 +31,81 @@ import {
 const DEFAULT_BASE_URL = 'https://api.openai.com/v1'
 
 export const OPENAI_MODELS = [
+  // gpt-5.6 family — served DIRECTLY by api.openai.com with the operator's
+  // own key (operator decision 2026-09-01: production does NOT use the
+  // AgentRouter gateway; the same ids exist there but are never preferred).
+  'gpt-5.6-sol',
+  'gpt-5.6',
   'gpt-4o-mini',
   'gpt-4o',
   'gpt-4.1-mini',
   'gpt-4.1',
 ] as const
+
+/**
+ * Reasoning-family models (gpt-5.x, o-series) reject classic sampling
+ * parameters: `temperature`/`top_p`/penalties must stay at their defaults
+ * and `max_tokens` is replaced by `max_completion_tokens`. Sending them
+ * anyway is a guaranteed 400 ("Unsupported parameter" / "Only the default
+ * (1) value is supported"), so these models are detected UP FRONT and the
+ * request body is built in reasoning-compat mode. Unknown future ids are
+ * still healed reactively by parse400Fixes() below.
+ */
+function isReasoningModel(model: string): boolean {
+  return /^gpt-5/i.test(model) || /^o[134](-|$)/i.test(model)
+}
+
+/** Mutable per-request compat switches for the OpenAI wire format. */
+interface CompatFlags {
+  /** Include web_search_options (already gated by supportsNativeWebSearch). */
+  search: boolean
+  /** Send maxTokens as max_completion_tokens instead of max_tokens. */
+  useMaxCompletionTokens: boolean
+  /** Omit temperature/top_p/penalties entirely (reasoning models). */
+  dropSampling: boolean
+}
+
+/** What a 400 error message asks us to change, parsed conservatively. */
+interface Parsed400Fixes {
+  useMaxCompletionTokens: boolean
+  dropSampling: boolean
+  searchRejected: boolean
+  /** At least one cause we understand was found in the message. */
+  recognized: boolean
+}
+
+/** Extract the human-readable message from an OpenAI error payload. */
+function openAiErrorMessage(errText: string): string {
+  try {
+    const parsed = JSON.parse(errText) as { error?: { message?: string }; message?: string }
+    return parsed?.error?.message || parsed?.message || errText
+  } catch {
+    return errText
+  }
+}
+
+function parse400Fixes(message: string): Parsed400Fixes {
+  const useMaxCompletionTokens = /max_completion_tokens/i.test(message)
+  const dropSampling =
+    /(temperature|top_p|frequency_penalty|presence_penalty)/i.test(message) &&
+    /(unsupported|not supported|only the default|does not support|invalid value)/i.test(message)
+  const searchRejected = /web_search/i.test(message)
+  return {
+    useMaxCompletionTokens,
+    dropSampling,
+    searchRejected,
+    recognized: useMaxCompletionTokens || dropSampling || searchRejected,
+  }
+}
+
+/**
+ * Per-isolate memory of what each model has PROVEN to reject, so the fix is
+ * applied to the INITIAL body of every later request — one round trip, no
+ * repeated 400 penalty across a serverless isolate's lifetime. Only
+ * attributable causes are memoized (a message that clearly named the
+ * parameter); generic failures are retried but never remembered.
+ */
+const modelCompatMemo = new Map<string, CompatFlags>()
 
 interface OpenAiAnnotation {
   type?: string
@@ -95,11 +165,135 @@ export class OpenAiProvider implements AiProvider {
    * Native web search is only accepted by OpenAI's search-capable models
    * (chat-completions `web_search_options`). Sending it to any other model
    * is a 400, so it is gated strictly by name; other models degrade to the
-   * caller's link-extraction fallback. Gate by id so gateways that proxy
-   * different names keep working via the self-healing retry below.
+   * caller's link-extraction fallback. The gpt-5 family is ALLOWED to try
+   * (it may accept the parameter): a rejection is remembered per isolate by
+   * the compat memo so later requests skip the failed round trip. Gate by
+   * id so gateways that proxy different names keep working via the
+   * self-healing retry below.
    */
   private supportsNativeWebSearch(model: string): boolean {
-    return /search-preview|gpt-4o-search|o3-search/i.test(model)
+    if (modelCompatMemo.get(model)?.search === false) return false
+    return /search-preview|gpt-4o-search|o3-search|^gpt-5/i.test(model)
+  }
+
+  /** Initial compat flags for a model (memo + reasoning detection). */
+  private initialCompatFlags(model: string): CompatFlags {
+    const memo = modelCompatMemo.get(model)
+    return {
+      search: this.supportsNativeWebSearch(model),
+      useMaxCompletionTokens: isReasoningModel(model) || memo?.useMaxCompletionTokens === true,
+      dropSampling: isReasoningModel(model) || memo?.dropSampling === true,
+    }
+  }
+
+  /** Apply parsed 400 fixes to a flags object (mutates + returns it). */
+  private static applyFixes(flags: CompatFlags, fixes: Parsed400Fixes): CompatFlags {
+    if (fixes.useMaxCompletionTokens) flags.useMaxCompletionTokens = true
+    if (fixes.dropSampling) flags.dropSampling = true
+    if (fixes.searchRejected) flags.search = false
+    return flags
+  }
+
+  /**
+   * Build the chat-completions request body under the given compat flags.
+   * Reasoning-compat (dropSampling + max_completion_tokens) is decided up
+   * front by isReasoningModel()/memo; search is pre-gated by
+   * supportsNativeWebSearch(). JSON.stringify drops undefined fields.
+   */
+  private buildRequestBody(
+    request: AiRequest,
+    model: string,
+    flags: CompatFlags,
+    stream: boolean,
+  ): string {
+    const opts = request.options
+    const sampling: Record<string, unknown> = flags.dropSampling
+      ? {}
+      : {
+          temperature: opts?.temperature ?? 0.7,
+          top_p: opts?.topP,
+          frequency_penalty: opts?.frequencyPenalty,
+          presence_penalty: opts?.presencePenalty,
+        }
+    return JSON.stringify({
+      model,
+      messages: request.messages,
+      ...sampling,
+      ...(flags.useMaxCompletionTokens
+        ? { max_completion_tokens: opts?.maxTokens }
+        : { max_tokens: opts?.maxTokens }),
+      stop: opts?.stopSequences,
+      response_format:
+        opts?.responseFormat?.type === 'json'
+          ? { type: 'json_object' }
+          : undefined,
+      ...(stream ? { stream: true, stream_options: { include_usage: true } } : {}),
+      ...(flags.search && opts?.webSearch ? { web_search_options: {} } : {}),
+    })
+  }
+
+  /**
+   * POST /chat/completions with the 400 self-heal ladder:
+   *   attempt 1 — initial flags (reasoning compat + search gate + memo);
+   *   on 400    — parse the error message and apply EVERY fix it names in a
+   *               single retry (search off / max_completion_tokens / default
+   *               sampling). Attributable fixes are memoized per model so
+   *               later requests build the healed body on the FIRST attempt
+   *               — no repeated 400 round trips per serverless isolate.
+   * A generic unrecognized 400 with search enabled retries once without
+   * grounding (legacy fail-soft); if that clears, the rejection is
+   * attributed to web_search_options and memoized.
+   */
+  private async postChatCompletions(
+    request: AiRequest,
+    model: string,
+    flags: CompatFlags,
+    controller: AbortController,
+    stream = false,
+  ): Promise<Response> {
+    const apiKey = this.getApiKey()
+    const post = (body: string): Promise<Response> =>
+      fetch(`${this.getBaseUrl()}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+        body,
+      })
+
+    let response = await post(this.buildRequestBody(request, model, flags, stream))
+    if (response.ok || response.status !== 400) return response
+
+    // clone(): the caller still needs the original body when nothing heals.
+    const errText = await response.clone().text().catch(() => '')
+    const fixes = parse400Fixes(openAiErrorMessage(errText))
+    if (!fixes.recognized && !flags.search) return response
+
+    const healed: CompatFlags = { ...flags }
+    let attributed = fixes.recognized
+    if (fixes.recognized) {
+      OpenAiProvider.applyFixes(healed, fixes)
+    } else {
+      // Unrecognized 400 with search on → legacy fail-soft: retry without
+      // grounding; if that clears, blame web_search_options (below).
+      healed.search = false
+    }
+    console.warn(
+      `[AI][OPENAI] 400 on ${model} — self-healing retry` +
+        ` (search=${healed.search ? 'on' : 'off'}` +
+        `${healed.useMaxCompletionTokens ? ', max_completion_tokens' : ''}` +
+        `${healed.dropSampling ? ', default sampling' : ''})`,
+    )
+    response = await post(this.buildRequestBody(request, model, healed, stream))
+    if (response.ok && attributed) {
+      modelCompatMemo.set(model, { ...healed })
+    } else if (response.ok && !attributed && flags.search) {
+      // cleared without search on a generic 400 — attribute & remember
+      modelCompatMemo.set(model, { ...healed })
+    }
+    return response
   }
 
   async generate(request: AiRequest): Promise<AiResponse> {
@@ -107,58 +301,17 @@ export class OpenAiProvider implements AiProvider {
     const model = request.options?.model || this.defaultModel
     const timeoutMs = request.options?.timeoutMs ?? 60_000
     const startedAt = Date.now()
-    const opts = request.options
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-    const buildBody = (includeSearch: boolean): string =>
-      JSON.stringify({
-        model,
-        messages: request.messages,
-        temperature: opts?.temperature ?? 0.7,
-        max_tokens: opts?.maxTokens,
-        top_p: opts?.topP,
-        frequency_penalty: opts?.frequencyPenalty,
-        presence_penalty: opts?.presencePenalty,
-        stop: opts?.stopSequences,
-        response_format:
-          opts?.responseFormat?.type === 'json'
-            ? { type: 'json_object' }
-            : undefined,
-        ...(includeSearch && opts?.webSearch && this.supportsNativeWebSearch(model)
-          ? { web_search_options: {} }
-          : {}),
-      })
-
     try {
-      let response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        signal: controller.signal,
-        body: buildBody(true),
-      })
-
-      // Self-healing search retry: model/gateway rejected web_search_options
-      // → retry once without it; chat keeps working, citations fall back to
-      // link extraction.
-      if (!response.ok && opts?.webSearch && response.status === 400) {
-        console.warn(
-          `[AI][OPENAI] web_search_options rejected on ${model} — retrying without grounding`,
-        )
-        response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          signal: controller.signal,
-          body: buildBody(false),
-        })
-      }
+      const response = await this.postChatCompletions(
+        request,
+        model,
+        this.initialCompatFlags(model),
+        controller,
+      )
 
       if (!response.ok) {
         const errText = await response.text().catch(() => '')
@@ -207,56 +360,22 @@ export class OpenAiProvider implements AiProvider {
     const model = request.options?.model || this.defaultModel
     const timeoutMs = request.options?.timeoutMs ?? 120_000
     const startedAt = Date.now()
-    const opts = request.options
 
     const controller = new AbortController()
     const timer = setTimeout(() => controller.abort(), timeoutMs)
 
-    const buildBody = (includeSearch: boolean): string =>
-      JSON.stringify({
-        model,
-        messages: request.messages,
-        temperature: opts?.temperature ?? 0.7,
-        max_tokens: opts?.maxTokens,
-        top_p: opts?.topP,
-        frequency_penalty: opts?.frequencyPenalty,
-        presence_penalty: opts?.presencePenalty,
-        stop: opts?.stopSequences,
-        stream: true,
-        stream_options: { include_usage: true },
-        ...(includeSearch && opts?.webSearch && this.supportsNativeWebSearch(model)
-          ? { web_search_options: {} }
-          : {}),
-      })
-
+    // Shared compat-aware POST (initial flags + 400 self-heal ladder). The
+    // retry happens BEFORE the SSE body is ever consumed, so streaming
+    // semantics are unaffected — the returned response is a clean 200.
     let response: Response
     try {
-      response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${apiKey}`,
-        },
-        signal: controller.signal,
-        body: buildBody(true),
-      })
-
-      // Self-healing search retry — see generate().
-      if (!response.ok && opts?.webSearch && response.status === 400) {
-        const errText = await response.text().catch(() => '')
-        console.warn(
-          `[AI][OPENAI] web_search_options rejected on ${model} — retrying without grounding`,
-        )
-        response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${apiKey}`,
-          },
-          signal: controller.signal,
-          body: buildBody(false),
-        })
-      }
+      response = await this.postChatCompletions(
+        request,
+        model,
+        this.initialCompatFlags(model),
+        controller,
+        true,
+      )
     } catch (err) {
       clearTimeout(timer)
       throw normalizeAiError('OPENAI', err)

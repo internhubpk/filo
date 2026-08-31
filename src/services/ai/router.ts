@@ -686,16 +686,35 @@ class AiRouter {
     // provider (AI_PROVIDER env → GEMINI in dev, OPENAI in prod). No
     // cross-provider fallback chains.
     const chain = activeProviderChain()
+    const strategy = chain[0]
 
-    // If the request pins a model that belongs to a DIFFERENT provider than
-    // the strategy, honor the pin by moving that provider to the front of
-    // the one-element chain — the pinned model is a deliberate choice.
+    // 1. An EXPLICIT AI_PROVIDER pin is absolute: every request — including
+    //    a pinned model id — is served by the strategy provider DIRECTLY.
+    //    Operator decision (2026-09-01): production talks to OpenAI directly
+    //    with the operator's own key; a shared gateway that happens to list
+    //    the same model id (e.g. gpt-5.6-sol in the AgentRouter pool) must
+    //    NEVER hijack the request.
+    if ((process.env.AI_PROVIDER ?? '').trim()) return chain
+
     const pinned = opts.model
     if (pinned) {
+      // 2. The strategy provider's own registry claims this id → serve it
+      //    there directly. (gpt-5.6-sol is listed by BOTH the OpenAI
+      //    registry and the AgentRouter gateway pool; the strategy provider
+      //    wins so the operator's direct credential is always preferred.)
+      if (getProvider(strategy)?.availableModels.includes(pinned)) return chain
+      // 3. Otherwise honor the pin on a DIFFERENT, CONFIGURED provider
+      //    (e.g. a Gemini model pinned while serving from OpenAI). An
+      //    unconfigured owner is skipped — the strategy provider's model
+      //    chain degrades an unknown pinned id to its own defaults instead
+      //    of stranding on a guaranteed MODEL_NOT_FOUND / UNCONFIGURED.
       const owner = PROVIDER_FALLBACK_ORDER.find(
-        (id) => getProvider(id)?.availableModels.includes(pinned)
+        (id) =>
+          id !== strategy &&
+          getProvider(id)?.isConfigured() &&
+          getProvider(id)?.availableModels.includes(pinned)
       )
-      if (owner && !chain.includes(owner)) return [owner]
+      if (owner) return [owner]
     }
     return chain
   }
