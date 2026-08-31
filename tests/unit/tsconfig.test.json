@@ -16,10 +16,17 @@
     "noEmit": false,
     "baseUrl": "../..",
     "paths": {
-      "@/*": ["src/*"],
-      "@convex/*": ["convex/*"]
+      "@/*": [
+        "src/*"
+      ],
+      "@convex/*": [
+        "convex/*"
+      ]
     },
-    "lib": ["ES2022", "DOM"]
+    "lib": [
+      "ES2022",
+      "DOM"
+    ]
   },
   "include": [
     "../../src/types/index.ts",
@@ -36,6 +43,14 @@
     "../../src/services/ingestion/index.ts",
     "../../src/services/chart-engine.ts",
     "../../src/services/diagram-engine.ts",
+    "../../src/services/typography/fonts.ts",
+    "../../src/services/diagram/types.ts",
+    "../../src/services/diagram/validate.ts",
+    "../../src/services/diagram/svg.ts",
+    "../../src/services/diagram/layout-graph.ts",
+    "../../src/services/diagram/layout-custom.ts",
+    "../../src/services/diagram/index.ts",
+    "../../src/services/ast.ts",
     "../../src/services/math-engine.ts",
     "../../src/services/math-omml.ts",
     "../../src/services/formula-evaluator.ts",
@@ -50,6 +65,8 @@
     "../../src/services/renderers/text-renderers.ts",
     "../../src/services/document-renderer.ts",
     "../../src/lib/r2/client.ts",
-    "../../src/lib/r2/errors.ts"
+    "../../src/lib/r2/errors.ts",
+    "../../src/services/typography/inline.ts",
+    "../../src/services/typography/code.ts"
   ]
 }

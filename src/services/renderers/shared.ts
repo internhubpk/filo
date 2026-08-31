@@ -18,7 +18,7 @@ import {
   type FooterStyle,
 } from '@/services/themes'
 import { normalizeChartSpec, renderChart, type NormalizedChart } from '@/services/chart-engine'
-import { normalizeDiagramSpec, renderDiagram, type DiagramSpec } from '@/services/diagram-engine'
+import { normalizeDiagramSpec, renderDiagram, type DiagramSpec } from '@/services/diagram'
 import { renderEquation, equationLatexOf } from '@/services/math-engine'
 import type { RenderedEquation } from '@/services/math-engine'
 import type { MathComponent } from 'docx'
@@ -50,21 +50,21 @@ export interface DocumentRenderer {
 
 // ==================== CANONICAL COMPONENT MODEL ====================
 
-export type CanonicalComponentType =
-  | 'paragraph'
-  | 'heading'
-  | 'list'
-  | 'table'
-  | 'quote'
-  | 'metric_grid'
-  | 'callout'
-  | 'chart'
-  | 'timeline'
-  | 'key_takeaways'
-  | 'two_column'
-  | 'equation'
-  | 'code'
-  | 'diagram'
+// The canonical component vocabulary + validators live in services/ast.ts —
+// the single source of truth shared by renderers, QA and tests.
+export {
+  CANONICAL_COMPONENT_TYPES,
+  canonicalType,
+  validateChartContent,
+  validateCodeContent,
+  validateEquationContent,
+  validateTableContent,
+  validateComponent,
+} from '@/services/ast'
+import { canonicalType as canonicalTypeOf, type CanonicalComponentType as CanonicalType } from '@/services/ast'
+
+export type CanonicalComponentType = CanonicalType
+export type { CanonicalComponent as AstCanonicalComponent } from '@/services/ast'
 
 export interface CanonicalComponent {
   sectionId: string
@@ -88,40 +88,8 @@ export interface RenderableDocument {
   branding?: BrandingConfig
 }
 
-const LOWER_MAP: Record<string, CanonicalComponentType> = {
-  paragraph: 'paragraph',
-  text: 'paragraph',
-  heading: 'heading',
-  list: 'list',
-  table: 'table',
-  quote: 'quote',
-  metric_grid: 'metric_grid',
-  callout: 'callout',
-  chart: 'chart',
-  timeline: 'timeline',
-  key_takeaways: 'key_takeaways',
-  two_column: 'two_column',
-  equation: 'equation',
-  math: 'equation',
-  formula: 'equation',
-  latex: 'equation',
-  code: 'code',
-  code_block: 'code',
-  codeblock: 'code',
-  snippet: 'code',
-  pre: 'code',
-  diagram: 'diagram',
-  flowchart: 'diagram',
-  process: 'diagram',
-  hierarchy: 'diagram',
-  org_chart: 'diagram',
-  orgchart: 'diagram',
-}
 
-export function canonicalType(raw: string): CanonicalComponentType {
-  const lower = String(raw || 'paragraph').toLowerCase()
-  return LOWER_MAP[lower] ?? 'paragraph'
-}
+
 
 // ==================== CONTENT COERCION ====================
 
@@ -373,14 +341,16 @@ export interface RenderedImage {
   width: number
   height: number
   caption?: string
+  /** Mechanical repairs from the chart/diagram engines — surfaced in QA. */
+  repairs?: string[]
 }
 
 /**
- * Normalize a DIAGRAM component (flowchart/process/hierarchy) into a
- * DiagramSpec. Bare arrays become timelines (AI-canonical shape); objects
- * carry an explicit kind. Returns null when fewer than 2 usable steps.
+ * Normalize a DIAGRAM component (any accepted AI shape — semantic
+ * nodes/edges or legacy steps) into a validated DiagramSpec. Bare arrays
+ * become timelines (AI-canonical shape). Returns null when unusable.
  */
-export function asDiagram(content: unknown): DiagramSpec | null {
+export function asDiagram(content: unknown) {
   return normalizeDiagramSpec(content)
 }
 
@@ -407,19 +377,29 @@ export async function renderComponentImage(
     // visibly (honest fallback), never a silent drop.
     return null
   }
-  if (component.type === 'diagram') {
-    const spec = asDiagram(component.content)
+  if (component.type === 'diagram' || component.type === 'timeline') {
+    const content = component.content
+    // A bare array is the AI-canonical timeline shape (planning rule 10) —
+    // do NOT spread it into an object (spread loses array elements).
+    const prepared =
+      component.type === 'timeline'
+        ? Array.isArray(content)
+          ? content
+          : { kind: 'timeline', ...((content && typeof content === 'object') ? content as Record<string, unknown> : {}) }
+        : content
+    const spec = asDiagram(prepared)
     if (!spec) return null
-    const diagram = await renderDiagram(spec, {
+    const diagram = await renderDiagram(prepared, {
       width: opts?.width ?? (opts?.pptx ? 600 : 620),
       colors: theme.colors,
     })
-    if (!diagram) return null
+    if (!diagram || !diagram.png) return null
     return {
       png: diagram.png,
       width: diagram.width,
       height: diagram.height,
-      caption: spec.title?.trim() || undefined,
+      caption: (spec as { title?: string }).title?.trim() || undefined,
+      repairs: diagram.repairs,
     }
   }
   if (component.type === 'chart') {
@@ -436,19 +416,7 @@ export async function renderComponentImage(
     // identity of the figure in the document text layer — it must be
     // selectable/searchable text, not pixels inside the PNG.
     const caption = [spec.title?.trim(), spec.note?.trim()].filter(Boolean).join(' — ') || undefined
-    return { png: chart.png, width: chart.width, height: chart.height, caption }
-  }
-  if (component.type === 'timeline') {
-    const content = component.content
-    // A bare array is the AI-canonical timeline shape (planning rule 10) —
-    // do NOT spread it into an object (spread loses array elements).
-    const spec = normalizeDiagramSpec(
-      Array.isArray(content) ? { kind: 'timeline', steps: content } : { kind: 'timeline', ...(content && typeof content === 'object' ? (content as Record<string, unknown>) : {}) }
-    )
-    if (!spec) return null
-    const diagram = await renderDiagram(spec, { width: opts?.width ?? (opts?.pptx ? 600 : 620), colors: theme.colors })
-    if (!diagram) return null
-    return { png: diagram.png, width: diagram.width, height: diagram.height }
+    return { png: chart.png, width: chart.width, height: chart.height, caption, repairs: spec.repairs }
   }
   return null
 }

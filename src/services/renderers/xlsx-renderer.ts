@@ -54,6 +54,8 @@ interface SheetChart {
   seriesCount: number
   anchorRow: number
   anchorCol: number
+  /** Per-chart series colors (hex, no #) — replaces the mutable module global. */
+  palette: string[]
 }
 
 interface TableBlock {
@@ -79,6 +81,8 @@ interface SheetPlan {
   lists: string[][]
   charts: Array<{ content: Record<string, unknown>; note: string }>
   diagrams: Array<unknown>
+  /** QA-visible truncation notes (rows/cols capped) — never silent. */
+  truncations: string[]
 }
 
 function sanitizeSheetName(name: string, used: Set<string>): string {
@@ -100,7 +104,7 @@ function sanitizeSheetName(name: string, used: Set<string>): string {
 // ==================== NUMBER FORMAT DETECTION ====================
 
 interface CellFormat {
-  value: string | number | null
+  value: string | number | Date | null
   numFmt?: string
 }
 
@@ -131,10 +135,11 @@ function detectFormat(raw: string): CellFormat | null {
     }
   }
 
-  // ISO date
+  // ISO date → REAL date serial (was: the raw string with a date format
+  // applied — which left sorting and date math broken in Excel).
   if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
     const d = new Date(`${text}T00:00:00Z`)
-    if (!Number.isNaN(d.getTime())) return { value: text, numFmt: 'yyyy-mm-dd' }
+    if (!Number.isNaN(d.getTime())) return { value: d, numFmt: 'yyyy-mm-dd' }
   }
 
   // plain number (with optional thousands separators)
@@ -270,12 +275,15 @@ export class XlsxRenderer implements DocumentRenderer {
         lists: [],
         charts: [],
         diagrams: [],
+        truncations: [],
       }
 
       for (const c of components) {
         if (c.type === 'table') {
           const rows = asTable(c.content)
-          if (rows.length > 0) plan.tables.push({ rows: rows.slice(0, MAX_ROWS) })
+          if (rows.length > MAX_ROWS) plan.truncations.push(`${section.title}: table truncated to ${MAX_ROWS} of ${rows.length} rows`)
+          if (rows.length > 0) plan.tables.push({ rows: rows.slice(0, MAX_ROWS).map((r) => (r.length > MAX_COLS ? r.slice(0, MAX_COLS) : r)) })
+          if (rows.some((r) => r.length > MAX_COLS)) plan.truncations.push(`${section.title}: columns truncated to ${MAX_COLS}`)
         } else if (c.type === 'metric_grid') {
           plan.metrics = asMetrics(c.content)
         } else if (c.type === 'list' || c.type === 'key_takeaways') {
@@ -382,6 +390,7 @@ export class XlsxRenderer implements DocumentRenderer {
         if (info.dataInfo) dataSheets.push(info.dataInfo)
         for (const req of info.chartRequests) chartRequests.push(req)
       }
+      for (const t of plan.truncations) rendererIssues.push(`XLSX cap: ${t}`)
 
       // Chart data blocks + native chart requests (per AI chart component)
       for (const chartComp of plan.charts.slice(0, 3)) {
@@ -431,7 +440,10 @@ export class XlsxRenderer implements DocumentRenderer {
     }
 
     // ---------------- DASHBOARD (live formulas over real ranges) ----------
-    this.buildDashboard(dashboard, wb, spec.title, spec.description, dataSheets, colors, chartRequests)
+    const chartPaletteHex = theme.chartPalette
+      .map((c) => String(c).replace('#', '').toUpperCase())
+      .filter((c) => /^[0-9A-F]{6}$/i.test(c))
+    this.buildDashboard(dashboard, wb, spec.title, spec.description, dataSheets, colors, chartRequests, chartPaletteHex.length >= 2 ? chartPaletteHex : DEFAULT_CHART_COLORS)
 
     // Overview print setup
     overview.pageSetup = { paperSize: 9, orientation: 'portrait', fitToPage: true, fitToWidth: 1, fitToHeight: 0 }
@@ -444,10 +456,6 @@ export class XlsxRenderer implements DocumentRenderer {
     // Series colors come from the THEME palette (not hardcoded Office blue).
     if (chartRequests.length > 0) {
       try {
-        THEME_CHART_COLORS = theme.chartPalette
-          .map((c) => c.replace('#', '').toUpperCase())
-          .filter((c) => /^[0-9A-F]{6}$/i.test(c))
-        if (THEME_CHART_COLORS.length < 2) THEME_CHART_COLORS = ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47']
         buf = (await injectNativeCharts(buf, chartRequests, wb)) as typeof buf
         qa.charts = { count: chartRequests.length, types: chartRequests.map((c) => c.type) }
       } catch (chartErr) {
@@ -662,6 +670,27 @@ export class XlsxRenderer implements DocumentRenderer {
       if (dataRowCount > 0 && numeric >= dataRowCount / 2) numericCols.push(cIdx)
     }
 
+    // Conditional formatting: data bars on the leading numeric column of the
+    // PRIMARY table — an at-a-glance magnitude cue that prints cleanly.
+    if (opts.isPrimary && numericCols.length > 0 && dataRowCount >= 3 && dataRowCount <= 500) {
+      try {
+        const colLetter = columnLetter(numericCols[0])
+        ws.addConditionalFormatting({
+          ref: `${colLetter}${tableStartRow + 1}:${colLetter}${dataEnd}`,
+          rules: [
+            {
+              type: 'dataBar',
+              priority: 1,
+              cfvo: [{ type: 'min' }, { type: 'max' }],
+              color: { argb: `FF${hex6(colors.accent, '3B82F6')}` },
+            },
+          ] as never,
+        })
+      } catch {
+        // Conditional formatting is decoration — never fail the sheet for it.
+      }
+    }
+
     // Freeze panes below header + autofilter (spec §15) — primary table only
     if (hasHeader && cursor - tableStartRow > 2 && opts.isPrimary) {
       ws.views = [{ state: 'frozen', ySplit: tableStartRow }]
@@ -701,7 +730,7 @@ export class XlsxRenderer implements DocumentRenderer {
     sheetName: string,
     spec2: Record<string, unknown>,
     startCursor: number,
-    opts: { colors: ReturnType<typeof deriveTheme>['colors']; sectionTitle: string }
+    opts: { colors: ReturnType<typeof deriveTheme>['colors']; sectionTitle: string; palette?: string[] }
   ): { cursor: number; requests: SheetChart[] } | null {
     const { colors } = opts
     let cursor = startCursor
@@ -753,6 +782,7 @@ export class XlsxRenderer implements DocumentRenderer {
       seriesCount: Math.min(series.length, 5),
       anchorRow: cursor + 1,
       anchorCol: 0,
+      palette: opts.palette ?? DEFAULT_CHART_COLORS,
     }
     return { cursor: cursor + 16, requests: [request] }
   }
@@ -766,7 +796,8 @@ export class XlsxRenderer implements DocumentRenderer {
     description: string | undefined,
     dataSheets: WrittenTableInfo[],
     colors: ReturnType<typeof deriveTheme>['colors'],
-    chartRequests: SheetChart[]
+    chartRequests: SheetChart[],
+    palette: string[]
   ): void {
     const accentArgb = `FF${hex6(colors.accent, '3B82F6')}`
     const mutedArgb = `FF${hex6(colors.mutedForeground, '64748B')}`
@@ -875,6 +906,7 @@ export class XlsxRenderer implements DocumentRenderer {
           seriesCount: Math.min(2, Math.max(1, firstData.numericCols.length)),
           anchorRow: row + 1,
           anchorCol: 0,
+          palette: palette.length >= 2 ? palette : DEFAULT_CHART_COLORS,
         })
       }
     }
@@ -932,7 +964,8 @@ function buildChartXml(chart: SheetChart, idx: number): string {
     const colLetterS = columnLetter(s + 2)
     const valRef = `'${dataSheet}'!$${colLetterS}$${chart.firstDataRow}:$${colLetterS}$${chart.lastDataRow}`
     const nameRef = `'${dataSheet}'!$${columnLetter(s + 2)}$${chart.firstDataRow - 1}`
-    const color = THEME_CHART_COLORS[s % THEME_CHART_COLORS.length]
+    const palette = chart.palette && chart.palette.length >= 2 ? chart.palette : DEFAULT_CHART_COLORS
+    const color = palette[s % palette.length]
     sers.push(
       `<c:ser>` +
         `<c:idx val="${s}"/>` +
@@ -995,23 +1028,21 @@ function buildChartXml(chart: SheetChart, idx: number): string {
 </c:chartSpace>`
 }
 
-/** Theme-neutral fallback is REPLACED at render time via resolveChartColors. */
-let THEME_CHART_COLORS: string[] = ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47']
+/** Default series palette — charts carry their own THEME palette per render. */
+const DEFAULT_CHART_COLORS: string[] = ['4472C4', 'ED7D31', 'A5A5A5', 'FFC000', '5B9BD5', '70AD47']
 
-function buildDrawingXml(chart: SheetChart, anchorFromRow: number, anchorToRow: number): string {
-  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">
-<xdr:twoCellAnchor editAs="oneCell">
+/** ONE twoCellAnchor fragment inside the sheet's single drawing part. */
+function buildAnchorXml(chart: SheetChart, relId: number, anchorFromRow: number, anchorToRow: number): string {
+  return `<xdr:twoCellAnchor editAs="oneCell">
 <xdr:from><xdr:col>${chart.anchorCol}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${anchorFromRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:from>
 <xdr:to><xdr:col>${chart.anchorCol + 9}</xdr:col><xdr:colOff>0</xdr:colOff><xdr:row>${anchorToRow}</xdr:row><xdr:rowOff>0</xdr:rowOff></xdr:to>
 <xdr:graphicFrame macro="">
-<xdr:nvGraphicFramePr><xdr:cNvPr id="2" name="Chart ${chart.anchorSheetName ? 'Dashboard' : '1'}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
+<xdr:nvGraphicFramePr><xdr:cNvPr id="${relId + 1}" name="Chart ${relId}"/><xdr:cNvGraphicFramePr/></xdr:nvGraphicFramePr>
 <xdr:xfrm><a:off x="0" y="0"/><a:ext cx="0" cy="0"/></xdr:xfrm>
-<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="${NS_R}" r:id="rId1"/></a:graphicData></a:graphic>
+<a:graphic><a:graphicData uri="http://schemas.openxmlformats.org/drawingml/2006/chart"><c:chart xmlns:c="http://schemas.openxmlformats.org/drawingml/2006/chart" xmlns:r="${NS_R}" r:id="rId${relId}"/></a:graphicData></a:graphic>
 </xdr:graphicFrame>
 <xdr:clientData/>
-</xdr:twoCellAnchor>
-</xdr:wsDr>`
+</xdr:twoCellAnchor>`
 }
 
 /**
@@ -1039,60 +1070,82 @@ async function injectNativeCharts(
   let contentTypes = await zip.file(contentTypesPath)?.async('string') ?? null
   if (!contentTypes) throw new Error('[Content_Types].xml missing')
 
-  let chartIdx = 0
+  // GROUP charts by their anchor sheet: a worksheet holds exactly ONE
+  // <drawing> part, but that part may carry MANY anchors. The old code wrote
+  // one drawing part per chart and skipped the sheet patch when a drawing
+  // already existed — orphaning the 2nd/3rd chart parts (Excel repair risk).
+  const bySheet = new Map<string, SheetChart[]>()
   for (const chart of requests) {
     const anchorSheet = chart.anchorSheetName ?? chart.sheetName
-    const target = sheetNameToFile[anchorSheet]
-    if (!target) continue
-    chartIdx++
-    const chartPath = `xl/charts/chart${chartIdx}.xml`
-    const drawingPath = `xl/drawings/drawing${chartIdx}.xml`
-    const drawingRelsPath = `xl/drawings/_rels/drawing${chartIdx}.xml.rels`
-    const sheetRelsPath = `xl/worksheets/_rels/sheet${target.index}.xml.rels`
+    if (!sheetNameToFile[anchorSheet]) continue
+    const list = bySheet.get(anchorSheet) ?? []
+    list.push(chart)
+    bySheet.set(anchorSheet, list)
+  }
 
-    zip.file(chartPath, buildChartXml(chart, chartIdx))
+  let chartIdx = 0
+  let drawingIdx = 0
+  for (const [anchorSheet, charts] of bySheet) {
+    const target = sheetNameToFile[anchorSheet]
+    const sheetRelsPath = `xl/worksheets/_rels/sheet${target.index}.xml.rels`
+    drawingIdx++
+    const drawingPath = `xl/drawings/drawing${drawingIdx}.xml`
+    const drawingRelsPath = `xl/drawings/_rels/drawing${drawingIdx}.xml.rels`
+
+    // Chart parts + relationship list for THIS sheet's drawing.
+    const chartRels: string[] = []
+    const anchors: string[] = []
+    charts.forEach((chart) => {
+      chartIdx++
+      const chartPath = `xl/charts/chart${chartIdx}.xml`
+      zip.file(chartPath, buildChartXml(chart, chartIdx))
+      chartRels.push(
+        `<Relationship Id="rId${chartRels.length + 1}" Type="${NS_R}/chart" Target="../charts/chart${chartIdx}.xml"/>`
+      )
+      anchors.push(buildAnchorXml(chart, chartRels.length, chart.anchorRow, chart.anchorRow + 15))
+    })
+
     zip.file(
       drawingPath,
-      buildDrawingXml(chart, chart.anchorRow, chart.anchorRow + 15)
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<xdr:wsDr xmlns:xdr="http://schemas.openxmlformats.org/drawingml/2006/spreadsheetDrawing" xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main">${anchors.join('')}</xdr:wsDr>`
     )
     zip.file(
       drawingRelsPath,
-      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="${NS_R}/chart" Target="../charts/chart${chartIdx}.xml"/></Relationships>`
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${chartRels.join('')}</Relationships>`
     )
 
-    // sheet rels: merge with existing or create
-    const existingRels = await zip.file(sheetRelsPath)?.async('string') ?? null
-    const drawingRelId = existingRels ? `rIdDrawing${chartIdx}` : 'rId1'
+    // Sheet rels: merge with existing or create (one drawing rel per sheet).
+    const existingRels = (await zip.file(sheetRelsPath)?.async('string')) ?? null
+    const drawingRelId = existingRels ? `rIdDrawing${drawingIdx}` : 'rId1'
+    const drawingRel = `<Relationship Id="${drawingRelId}" Type="${NS_R}/drawing" Target="../drawings/drawing${drawingIdx}.xml"/>`
     if (existingRels) {
-      const merged = existingRels.replace(
-        '</Relationships>',
-        `<Relationship Id="${drawingRelId}" Type="${NS_R}/drawing" Target="../drawings/drawing${chartIdx}.xml"/></Relationships>`
-      )
-      zip.file(sheetRelsPath, merged)
+      zip.file(sheetRelsPath, existingRels.replace('</Relationships>', `${drawingRel}</Relationships>`))
     } else {
       zip.file(
         sheetRelsPath,
-        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="${drawingRelId}" Type="${NS_R}/drawing" Target="../drawings/drawing${chartIdx}.xml"/></Relationships>`
+        `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">${drawingRel}</Relationships>`
       )
     }
 
-    // sheet XML: add <drawing r:id> just before </worksheet>
+    // Sheet XML: ensure xmlns:r, then a SINGLE <drawing r:id> element.
     const sheetXml = await zip.file(target.path)?.async('string')
     if (!sheetXml) throw new Error(`worksheet part missing: ${target.path}`)
-    if (sheetXml.includes('<drawing ')) continue // already has a drawing — skip (shouldn't happen)
-    const xmlnsR = /xmlns:r=/.test(sheetXml)
+    if (sheetXml.includes('<drawing ')) throw new Error(`worksheet ${target.path} already has a drawing — refusing to double-patch`)
+    const withNs = /xmlns:r=/.test(sheetXml)
       ? sheetXml
-      : sheetXml.replace(
-          /<worksheet /,
-          `<worksheet xmlns:r="${NS_R}" `
-        )
-    const patched = xmlnsR.replace('</worksheet>', `<drawing r:id="${drawingRelId}"/></worksheet>`)
-    zip.file(target.path, patched)
+      : sheetXml.replace(/<worksheet /, `<worksheet xmlns:r="${NS_R}" `)
+    zip.file(target.path, withNs.replace('</worksheet>', `<drawing r:id="${drawingRelId}"/></worksheet>`))
 
-    // content types
+    // Content types: one override per chart part + one per drawing part.
+    for (let c = chartIdx - charts.length + 1; c <= chartIdx; c++) {
+      contentTypes = contentTypes!.replace(
+        '</Types>',
+        `<Override PartName="/xl/charts/chart${c}.xml" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/></Types>`
+      )
+    }
     contentTypes = contentTypes!.replace(
       '</Types>',
-      `<Override PartName="/${chartPath}" ContentType="application/vnd.openxmlformats-officedocument.drawingml.chart+xml"/><Override PartName="/${drawingPath}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>`
+      `<Override PartName="/${drawingPath}" ContentType="application/vnd.openxmlformats-officedocument.drawing+xml"/></Types>`
     )
   }
 

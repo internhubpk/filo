@@ -27,6 +27,8 @@ import {
   hex6,
   renderComponentImage,
 } from './shared'
+import { parseInlineMarkdown } from '@/services/typography/inline'
+import { highlightCode } from '@/services/typography/code'
 
 const SLIDE_W = 10 // inches (16:9)
 const SLIDE_H = 5.625
@@ -35,6 +37,15 @@ const CONTENT_W = SLIDE_W - MARGIN * 2
 const MIN_BODY_PT = 12
 const MAX_BULLETS = 6
 const MAX_TABLE_COLS = 6
+
+
+/** Lighten a hex color toward white (PPTX dark themes keep code readable). */
+function lightenHex(hexIn: string, factor = 0.45): string {
+  const h = String(hexIn || '').replace('#', '')
+  if (!/^[0-9a-fA-F]{6}$/.test(h)) return hexIn
+  const ch = (i: number) => Math.round(parseInt(h.slice(i, i + 2), 16) + (255 - parseInt(h.slice(i, i + 2), 16)) * factor)
+  return [ch(0), ch(2), ch(4)].map((v) => v.toString(16).padStart(2, '0')).join('').toUpperCase()
+}
 
 export class PptxRenderer implements DocumentRenderer {
   format = 'PPTX' as const
@@ -609,19 +620,34 @@ export class PptxRenderer implements DocumentRenderer {
         const items = asStringArray(component.content).slice(0, MAX_BULLETS)
         if (items.length === 0) return 0
         const h = Math.min(availH, 0.25 + items.length * 0.34)
-        slide.addText(
-          items.map((t) => ({ text: t.slice(0, 160), options: { bullet: { characterCode: '2022' }, breakLine: true } })),
-          {
-            x: MARGIN + 0.1,
-            y,
-            w: CONTENT_W - 0.2,
-            h,
-            fontSize: Math.max(MIN_BODY_PT, 14),
-            color: colors.dark ? 'E2E8F0' : colors.fg,
-            fontFace: fonts.bodyFont,
-            valign: 'top',
-          }
-        )
+        // Inline markdown → styled runs per bullet (**bold**, *italic*, `code`).
+        const bulletRuns: Array<{ text: string; options?: Record<string, unknown> }> = []
+        for (const item of items) {
+          const segments = parseInlineMarkdown(item).slice(0, 12)
+          segments.forEach((seg, si) => {
+            if (!seg.text) return
+            bulletRuns.push({
+              text: si === 0 ? seg.text.slice(0, 170) : seg.text.slice(0, 170),
+              options: {
+                bullet: si === 0 ? { characterCode: '2022' } : undefined,
+                bold: seg.style === 'bold' || undefined,
+                italic: seg.style === 'italic' || undefined,
+                fontFace: seg.style === 'code' ? 'Consolas' : fonts.bodyFont,
+                breakLine: si === segments.length - 1,
+              },
+            })
+          })
+        }
+        slide.addText(bulletRuns, {
+          x: MARGIN + 0.1,
+          y,
+          w: CONTENT_W - 0.2,
+          h,
+          fontSize: Math.max(MIN_BODY_PT, 14),
+          color: colors.dark ? 'E2E8F0' : colors.fg,
+          fontFace: fonts.bodyFont,
+          valign: 'top',
+        })
         return h + 0.15
       }
 
@@ -851,11 +877,17 @@ export class PptxRenderer implements DocumentRenderer {
       }
 
       case 'code': {
-        // CODE BLOCK slide element: monospace panel with a language tag.
+        // CODE BLOCK slide element: syntax-highlighted monospace panel
+        // (bundled Shiki tokens) with a language tag.
         const block = asCodeBlock(component.content)
         if (!block) return 0
-        const lines = block.code.split('\n').slice(0, 16)
-        const truncated = block.code.split('\n').length - lines.length
+        const tokenLines = await highlightCode(block.code, block.language).catch(() => null)
+        const allLines: Array<Array<{ text: string; color: string }>> =
+          tokenLines && tokenLines.length > 0
+            ? tokenLines
+            : block.code.split('\n').map((l) => [{ text: l, color: '24292E' }])
+        const lines = allLines.slice(0, 16)
+        const truncated = allLines.length - lines.length
         const lineCount = lines.length + (truncated > 0 ? 1 : 0)
         const h = Math.min(availH, 0.34 + lineCount * 0.21)
         slide.addShape('roundRect', {
@@ -872,8 +904,21 @@ export class PptxRenderer implements DocumentRenderer {
         if (block.language) {
           runs.push({ text: block.language.toUpperCase(), options: { fontSize: 9, bold: true, color: colors.muted, breakLine: true } })
         }
-        for (const l of lines) {
-          runs.push({ text: l.length ? l : ' ', options: { breakLine: true } })
+        for (const line of lines) {
+          if (line.length === 0 || line.every((t) => !t.text)) {
+            runs.push({ text: ' ', options: { breakLine: true } })
+            continue
+          }
+          line.forEach((tok, ti) => {
+            if (!tok.text) return
+            runs.push({
+              text: tok.text,
+              options: {
+                color: colors.dark ? lightenHex(tok.color) : tok.color,
+                breakLine: ti === line.length - 1,
+              },
+            })
+          })
         }
         if (truncated > 0) {
           runs.push({ text: `… ${truncated} more lines`, options: { fontSize: 9, italic: true, color: colors.muted, breakLine: true } })
@@ -947,8 +992,21 @@ export class PptxRenderer implements DocumentRenderer {
             color: colors.muted,
           })
           consumed = h + 0.32
-        } else if (moreRows > 0) {
-          slide.addText(`${moreRows} more rows in the source data`, {
+        } else if (moreRows > 0 && ctx.addContinuationSlide) {
+          // Single column-group: leftover rows get continuation slides too —
+          // the old code only left an italic "N more rows" note, silently
+          // dropping the data from the deck.
+          let remaining = dataRows.slice(maxDataRows)
+          let part = 1
+          while (remaining.length > 0) {
+            const slice = remaining.slice(0, maxDataRows)
+            remaining = remaining.slice(maxDataRows)
+            const label = ` (rows ${maxDataRows * part + 1}–${maxDataRows * part + slice.length})`
+            const rowsSlice = slice
+            ctx.addContinuationSlide((s) => drawChunk(s, colGroups[0], rowsSlice), label)
+            part++
+          }
+          slide.addText('table continues on the following slide(s)', {
             x: MARGIN,
             y: y + h + 0.02,
             w: CONTENT_W,
@@ -1006,9 +1064,23 @@ export class PptxRenderer implements DocumentRenderer {
       }
 
       default: {
-        const text = asString(component.content) || (component.content && typeof component.content === 'object' ? '' : '')
-        if (!text) return 0
-        return this.addComponent(slide, { ...component, type: 'paragraph' }, ctx)
+        // Honest fallback: unknown/custom types render as a labeled muted
+        // note (never silently dropped, never raw JSON on a slide).
+        const text = asString(component.content)
+        if (text) return this.addComponent(slide, { ...component, type: 'paragraph' }, ctx)
+        const serialized = component.content && typeof component.content === 'object' ? JSON.stringify(component.content) : ''
+        if (!serialized || serialized === 'null' || serialized === '{}' || serialized === '[]') return 0
+        slide.addText(`[Unsupported component: ${component.type}]`, {
+          x: MARGIN,
+          y,
+          w: CONTENT_W,
+          h: 0.3,
+          fontSize: 10,
+          italic: true,
+          color: colors.muted,
+          fontFace: fonts.bodyFont,
+        })
+        return 0.38
       }
     }
   }

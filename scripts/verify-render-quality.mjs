@@ -110,12 +110,23 @@ function buildRichSpec(themeId) {
     ], []),
     S('c2', 'Consensus Is Not a Backup Strategy', 'chapter', '2', [
       { type: 'paragraph', content: para(110) },
-      { type: 'diagram', content: { kind: 'flowchart', title: 'Leader election and failover path', steps: [
-        { label: 'Health probe fails', description: 'Quorum detector marks leader suspect' },
-        { label: 'Quorum vote', description: 'Two of three replicas elect successor' },
-        { label: 'Lease handoff', description: 'Fencing token version bumped' },
-        { label: 'Client redirect', description: 'Writes retried with new token' },
-      ] } },
+      { type: 'diagram', content: {
+        kind: 'flowchart', direction: 'TB', title: 'Leader election and failover path — α ≤ ∑',
+        nodes: [
+          { id: 'probe', label: 'Health probe fails → suspect', description: 'Quorum detector marks leader suspect' },
+          { id: 'vote', label: 'Quorum vote ≥ 2 of 3?' },
+          { id: 'elect', label: 'Elect successor', description: 'Lease handoff, fencing token bumped' },
+          { id: 'wait', label: 'Remain follower', description: 'Retry probe in 500ms' },
+          { id: 'redirect', label: 'Client redirect ✓', description: 'Writes retried with new token' },
+        ],
+        edges: [
+          { from: 'probe', to: 'vote' },
+          { from: 'vote', to: 'elect', label: 'Yes' },
+          { from: 'vote', to: 'wait', label: 'No', dashed: true },
+          { from: 'elect', to: 'redirect' },
+          { from: 'wait', to: 'probe', dashed: true },
+        ],
+      } },
       { type: 'paragraph', content: para(95) },
       { type: 'two_column', content: { leftTitle: 'Sync replication', leftPoints: ['Zero data loss on failover', 'Higher write latency', 'Tighter coupling'], rightTitle: 'Async replication', rightPoints: ['Lower latency', 'Replication lag risk', 'Eventual consistency'] } },
     ], [{ kind: 'diagram' }, { kind: 'two_column' }]),

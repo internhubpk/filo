@@ -23,7 +23,17 @@ const nextConfig: NextConfig = {
   // those paths become /ROOT/node_modules/... and every PDF render crashes
   // with ENOENT. Marking it external keeps the real package on disk so the
   // metrics load — this is what made every PDF job fail in the render step.
-  serverExternalPackages: ["pdfkit"],
+  serverExternalPackages: ["pdfkit", "fontkit", "sharp"],
+  // The bundled document fonts (assets/fonts) are resolved at RUNTIME by
+  // services/typography/fonts.ts. Trace them into the serverless bundle for
+  // every route that can render artifacts, so PDF/SVG rasterization stays
+  // deterministic on any deployment.
+  outputFileTracingIncludes: {
+    "/api/generation/render": ["./assets/fonts/**"],
+    "/api/artifacts/[id]/export": ["./assets/fonts/**"],
+    "/api/artifacts/export-zip": ["./assets/fonts/**"],
+    "/api/artifacts/agent-generate": ["./assets/fonts/**"],
+  },
 };
 
 export default nextConfig;

@@ -35,6 +35,9 @@ import {
 } from './shared'
 import { evaluateFormula } from '@/services/formula-evaluator'
 import type { CellMatrix } from '@/services/formula-evaluator'
+import { resolvePdfFonts } from '@/services/typography/fonts'
+import { parseInlineMarkdown } from '@/services/typography/inline'
+import { highlightCode, type CodeToken } from '@/services/typography/code'
 import { existsSync, readFileSync } from 'node:fs'
 
 const PAGE_SIZES: Record<string, [number, number]> = {
@@ -48,35 +51,20 @@ interface FontPair {
   bold: string
 }
 
-/** Theme-matched Latin font candidates, best-first (metric-compatible with the DOCX twins). */
-const THEME_FONTS = {
-  serif: [
-    { regular: '/usr/share/fonts/truetype/english/Tinos-Regular.ttf', bold: '/usr/share/fonts/truetype/english/Tinos-Bold.ttf' },
-    { regular: '/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf', bold: '/usr/share/fonts/truetype/liberation/LiberationSerif-Bold.ttf' },
-  ],
-  sans: [
-    { regular: '/usr/share/fonts/truetype/english/Carlito-Regular.ttf', bold: '/usr/share/fonts/truetype/english/Carlito-Bold.ttf' },
-    { regular: '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', bold: '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf' },
-  ],
-  mono: [
-    { regular: '/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf', bold: '/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf' },
-    { regular: '/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf', bold: '/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf' },
-  ],
-} as const
-
-const SERIF_BODY_FONTS = /georgia|times|palatino|garamond|book|serif|cambria|minion/i
-const CJK_RE = /[\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff\uac00-\ud7af]/
-
 /**
- * True when the file at `path` is a real font (TTF/OTF magic bytes). Some
- * deployments ship broken 'fonts' that are actually HTML error pages —
- * fontkit then crashes the whole render with 'Unknown font format'.
+ * FONT RESOLUTION moved to services/typography/fonts.ts — the bundled,
+ * glyph-coverage-aware registry. The old implementation scanned absolute
+ * /usr/share/fonts paths and silently fell back to Helvetica (Latin-1 only)
+ * whenever they were missing — arrows, Greek, math symbols and CJK became
+ * missing glyphs. Filo now ships its fonts and verifies the ENTIRE document
+ * charset against the embedded font's cmap before using it.
  */
+const SERIF_BODY_FONTS = /georgia|times|palatino|garamond|book|serif|cambria|minion/i
+
 function isRealFontFile(p: string): boolean {
   try {
     const fd = readFileSync(p)
     if (fd.length < 8) return false
-    // TTF: 00 01 00 00 · OTF: 'OTTO' · TTC: 'ttcf' · WOFF: 'wOFF'
     const sig = fd.subarray(0, 4).toString('latin1')
     return sig === '\u0000\u0001\u0000\u0000' || sig === 'OTTO' || sig === 'ttcf' || sig === 'wOFF'
   } catch {
@@ -84,38 +72,28 @@ function isRealFontFile(p: string): boolean {
   }
 }
 
-function firstValidPair(candidates: ReadonlyArray<{ regular: string; bold: string }>): FontPair | null {
-  for (const c of candidates) {
-    if (isRealFontFile(c.regular) && isRealFontFile(c.bold)) return c
-  }
-  return null
+function toFontPair(pair: { regular: string; bold: string; family: string } | null): FontPair | null {
+  return pair ? { regular: pair.regular, bold: pair.bold } : null
 }
 
 /**
- * Locate fonts for pdfkit embedding, matched to the THEME's typography so a
- * PDF twin of a Georgia DOCX also reads as a serif document (the old code
- * shipped Helvetica for every theme). Any CJK content forces the Noto CJK
- * fallback — base-14 fonts are Latin-1 only and would mojibake it.
+ * Resolve fonts for pdfkit embedding:
+ *   1. FILO_PDF_FONT_PATH env override (deployment escape hatch)
+ *   2. CJK detection → best available CJK font (env/host)
+ *   3. theme metric twin (Liberation Serif / Carlito — BUNDLED) when its
+ *      cmap covers the document charset
+ *   4. DejaVu floor (BUNDLED) for full Latin/Greek/Cyrillic/arrows/math
+ *   5. null → caller falls back to base-14 (QA-warning surfaced)
  */
-function resolveDocumentFonts(themeBodyFont: string, sampleText: string): { pair: FontPair | null; mono: FontPair | null } {
-  const cjkCandidates: FontPair[] = [
-    { regular: '/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Regular.ttf', bold: '/usr/share/fonts/truetype/noto-serif-sc/NotoSerifSC-Bold.ttf' },
-    { regular: '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc', bold: '/usr/share/fonts/opentype/noto/NotoSansCJK-Bold.ttc' },
-    { regular: '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc', bold: '/usr/share/fonts/truetype/noto/NotoSansCJK-Bold.ttc' },
-  ]
+function resolveDocumentFonts(themeBodyFont: string, sampleText: string): { pair: FontPair | null; mono: FontPair | null; reason: string; coverageFallback: boolean } {
   const env = process.env.FILO_PDF_FONT_PATH
-  const pair: FontPair | null = CJK_RE.test(sampleText)
-    ? (cjkCandidates.find((p) => isRealFontFile(p.regular) && isRealFontFile(p.bold)) ?? null)
-    : (() => {
-        if (env && isRealFontFile(env)) {
-          const boldCandidate = env.replace(/\.ttf$/i, '-Bold.ttf')
-          return { regular: env, bold: isRealFontFile(boldCandidate) ? boldCandidate : env }
-        }
-        const chosen = SERIF_BODY_FONTS.test(themeBodyFont) ? THEME_FONTS.serif : THEME_FONTS.sans
-        return firstValidPair(chosen)
-      })()
-  const mono: FontPair | null = firstValidPair([...THEME_FONTS.mono])
-  return { pair, mono }
+  if (env && isRealFontFile(env)) {
+    const boldCandidate = env.replace(/\.ttf$/i, '-Bold.ttf')
+    const pair = { regular: env, bold: isRealFontFile(boldCandidate) ? boldCandidate : env }
+    return { pair, mono: toFontPair(resolvePdfFonts(themeBodyFont, sampleText).mono), reason: 'FILO_PDF_FONT_PATH override', coverageFallback: false }
+  }
+  const resolved = resolvePdfFonts(themeBodyFont, sampleText)
+  return { pair: toFontPair(resolved.body), mono: toFontPair(resolved.mono), reason: resolved.reason, coverageFallback: resolved.coverageFallback }
 }
 
 /** Parse '72pt' / '1in' / '96px' into PDF points. */
@@ -137,6 +115,55 @@ function parseMarginPt(v: string | undefined, fallback: number): number {
 function currentPageNo(doc: any): number {
   const r = doc.bufferedPageRange()
   return (r.start ?? 0) + (r.count ?? 0)
+}
+
+/**
+ * Inline-markdown-aware text drawing for pdfkit. Plain text takes the fast
+ * path; styled prose renders as continued runs (bold/italic/code/link) with
+ * per-segment fonts/colors. Height measurement uses the plain text — styling
+ * never changes font size, so metrics stay within a line's tolerance.
+ */
+function hasInlineStyling(text: string): boolean {
+  return /\*\*|__|~~|`|\[[^\]]+\]\(https?:|(?<![\w*])\*(?![\s*])/.test(text)
+}
+
+function drawStyledText(
+  doc: any,
+  text: string,
+  x: number,
+  yPos: number,
+  opts: { width: number; align?: 'left' | 'justify' | 'center'; lineGap?: number; bodyFont: string; monoFont?: string; baseColor: string; size?: number }
+): number {
+  if (!hasInlineStyling(text)) {
+    doc.text(text, x, yPos, { width: opts.width, align: opts.align, lineGap: opts.lineGap })
+    return doc.y
+  }
+  const segments = parseInlineMarkdown(text)
+  const mono = opts.monoFont
+  let first = true
+  for (const seg of segments) {
+    const runOpts: Record<string, unknown> = {
+      width: opts.width,
+      align: opts.align,
+      lineGap: opts.lineGap,
+      continued: first ? undefined : true,
+    }
+    if (first) runOpts.x = x
+    if (first && yPos !== undefined) runOpts.y = yPos
+    if (seg.style === 'code' && mono) {
+      doc.font(mono).fontSize(Math.max((opts.size ?? 10.5) - 0.5, 7)).fillColor('#0F172A')
+    } else if (seg.style === 'bold') {
+      const boldName = opts.bodyFont === 'FiloBody' ? 'FiloBodyBold' : `${opts.bodyFont}-Bold`
+      doc.font(boldName).fontSize(opts.size).fillColor(opts.baseColor)
+    } else if (seg.style === 'link') {
+      doc.font(opts.bodyFont).fontSize(opts.size).fillColor('#2563EB')
+    } else {
+      doc.font(opts.bodyFont).fontSize(opts.size).fillColor(opts.baseColor)
+    }
+    doc.text(seg.text, runOpts)
+    first = false
+  }
+  return doc.y
 }
 
 interface PdfThemeColors {
@@ -172,13 +199,26 @@ export class PdfRenderer implements DocumentRenderer {
     const contentSections = coverSection ? sections.slice(1) : sections
     const hasParts = contentSections.some((s) => (s.level || 'chapter') === 'part')
 
-    // Sample text drives CJK font detection + body size / line height tokens.
-    const sampleText = [
-      spec.title,
-      spec.description,
-      ...contentSections.map((s) => s.title),
-      ...document.sections.slice(0, 12).flatMap((s) => s.components.slice(0, 4).map((c) => (typeof c.content === 'string' ? c.content : ''))),
-    ].join('\n')
+    // Sample text drives CJK font detection + glyph-coverage checks + body
+    // size / line height tokens. Coverage runs over the FULL document text —
+    // every string component, every table cell, every label — so the embedded
+    // font provably contains a glyph for every character that will be drawn.
+    const sampleParts: string[] = [spec.title, spec.description ?? '']
+    for (const s of document.sections) {
+      sampleParts.push(s.title)
+      for (const c of s.components) {
+        if (typeof c.content === 'string') sampleParts.push(c.content)
+        else if (Array.isArray(c.content)) {
+          for (const row of c.content) {
+            if (Array.isArray(row)) sampleParts.push(row.map(String).join(' '))
+            else sampleParts.push(String(row))
+          }
+        } else if (c.content && typeof c.content === 'object') {
+          sampleParts.push(JSON.stringify(c.content))
+        }
+      }
+    }
+    const sampleText = sampleParts.join('\n').slice(0, 400_000)
     const bodyFontSize = Math.min(12, Math.max(9.5, theme.typography?.bodySize ? theme.typography.bodySize - 0.5 : 10.5))
     const bodyLineGap = Math.max(2, Math.round((theme.typography?.lineHeight ?? 1.45) * bodyFontSize - bodyFontSize - 1))
 
@@ -209,6 +249,7 @@ export class PdfRenderer implements DocumentRenderer {
       try {
         if (pair) {
           doc.registerFont('FiloBody', pair.regular)
+          doc.registerFont('FiloBodyBold', pair.bold)
           doc.registerFont('FiloHeading', pair.bold)
           bodyFont = 'FiloBody'
           headingFont = 'FiloHeading'
@@ -787,11 +828,11 @@ export class PdfRenderer implements DocumentRenderer {
         // A paragraph taller than one page: flow it with pdfkit's own
         // pagination instead of ensureSpace (which would loop forever).
         if (height > opts.contentBottom - margin - 8) {
-          doc.text(text, margin, y, { width, align: 'justify', lineGap: bodyLineGap })
+          drawStyledText(doc, text, margin, y, { width, align: 'justify', lineGap: bodyLineGap, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: bodyFontSize })
           return doc.y + 10
         }
         y = ensureSpace(y, height + 10)
-        doc.text(text, margin, y, { width, align: 'justify', lineGap: bodyLineGap })
+        drawStyledText(doc, text, margin, y, { width, align: 'justify', lineGap: bodyLineGap, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: bodyFontSize })
         return doc.y + 10
       }
 
@@ -875,8 +916,14 @@ export class PdfRenderer implements DocumentRenderer {
         if (!block) return y
         const mono = opts.monoFont || 'Courier'
         const monoLabel = opts.monoFont ? 'FiloMonoBold' : 'Courier-Bold'
-        const lines = block.code.split('\n').slice(0, 400)
-        const truncated = block.code.split('\n').length - lines.length
+        // Bundled Shiki token stream — colors render in the PDF text layer.
+        const tokenLines = await highlightCode(block.code, block.language).catch(() => null)
+        const allLines: Array<Array<{ text: string; color: string }>> =
+          tokenLines && tokenLines.length > 0
+            ? tokenLines
+            : block.code.split('\n').map((l) => [{ text: l, color: fg.replace('#', '').toUpperCase() }])
+        const lines = allLines.slice(0, 400)
+        const truncated = allLines.length - lines.length
         const fontSize = 8.5
         const lineGap = 2.5
         const padX = 14
@@ -885,7 +932,10 @@ export class PdfRenderer implements DocumentRenderer {
         doc.font(mono).fontSize(fontSize)
         // Measure every source line's wrapped height ONCE (heightOfString
         // draws nothing — safe for measurement).
-        const lineHeights = lines.map((l) => (l.length ? doc.heightOfString(l, { width: textW, lineGap }) : fontSize))
+        const lineHeights = lines.map((line) => {
+          const raw = Array.isArray(line) ? line.map((t) => t.text).join('') : String(line)
+          return raw.length ? doc.heightOfString(raw, { width: textW, lineGap }) : fontSize
+        })
         const labelH = block.language ? 16 : 0
 
         let idx = 0
@@ -917,10 +967,28 @@ export class PdfRenderer implements DocumentRenderer {
             doc.text(block.language.toUpperCase(), margin + padX, ty, { width: textW, lineBreak: false })
             ty += labelH
           }
-          doc.font(mono).fontSize(fontSize).fillColor(fg)
+          doc.font(mono).fontSize(fontSize)
           for (let k = 0; k < take; k++) {
-            const raw = lines[idx + k]
-            if (raw.length) doc.text(raw, margin + padX + 2, ty, { width: textW, lineGap })
+            const toks = lines[idx + k]
+            if (toks.length && toks.some((t) => t.text.length)) {
+              let firstTok = true
+              for (const tok of toks) {
+                if (!tok.text) continue
+                doc.fillColor(`#${tok.color}`)
+                doc.text(tok.text, margin + padX + 2, ty, {
+                  width: textW,
+                  lineGap,
+                  lineBreak: false,
+                  ...(firstTok ? {} : { continued: true }),
+                })
+                firstTok = false
+              }
+              // Close the continued run so the next line starts fresh.
+              doc.text('', { continued: false })
+            } else {
+              doc.fillColor(fg)
+              doc.text(' ', margin + padX + 2, ty, { width: textW, lineGap })
+            }
             ty += lineHeights[idx + k]
           }
           idx += take
@@ -1007,10 +1075,22 @@ export class PdfRenderer implements DocumentRenderer {
       }
 
       default: {
+        // Honest fallback: string content renders as prose; object content
+        // from unknown component types renders as a labeled muted block —
+        // never a raw JSON dump, never a silent drop.
         const text = asString(component.content)
-        if (!text) return y
-        doc.font(bodyFont).fontSize(10.5).fillColor(fg)
-        doc.text(text, margin, y, { width, lineGap: 3 })
+        if (text) {
+          doc.font(bodyFont).fontSize(10.5).fillColor(fg)
+          doc.text(text, margin, y, { width, lineGap: 3 })
+          return doc.y + 10
+        }
+        const serialized = component.content && typeof component.content === 'object' ? JSON.stringify(component.content) : ''
+        if (!serialized || serialized === 'null' || serialized === '{}' || serialized === '[]') return y
+        y = ensureSpace(y, 44)
+        doc.font(bodyFont).fontSize(8.5).fillColor(mutedFg)
+        doc.text(`[Unsupported component: ${component.type}]`, margin, y, { width })
+        doc.font(bodyFont).fontSize(8).fillColor(mutedFg)
+        doc.text(serialized.slice(0, 800), margin, doc.y + 2, { width })
         return doc.y + 10
       }
     }

@@ -67,7 +67,7 @@ COMPONENT VOCABULARY (use these types in section components):
 - chart: data visualization (object {chartType: "bar|line|pie|donut|area|hbar|stacked|scatter", title, categories: string[], series: [{name, data: number[]}], note?, xLabel?, yLabel?}) — ONLY where the content is genuinely quantitative; every chart must visualize real data from this section
 - code: source code / SQL / config / commands / algorithm (object {language: "python|javascript|typescript|java|c|cpp|go|rust|sql|bash|json|yaml|html|css|text", code: string}) — ALWAYS use for any code, snippet, query or terminal output; NEVER paste code into paragraphs or lists; renderers produce a styled monospace code block
 - timeline: chronological steps (array of {label, description})
-- diagram: structural visual (object {kind: "flowchart|process|hierarchy", title?, steps: [{label, description?}]}) — use for workflows, decision flows, org structures, architectures
+- diagram: STRUCTURAL VISUAL — describe the SEMANTICS (nodes + edges), never draw anything. Shape: {"kind": "flowchart|decision_tree|hierarchy|org_chart|timeline|sequence|architecture|network|er|comparison|process", "direction": "TB|LR", "title": "…", "nodes": [{"id": "a", "label": "≤6 words", "description": "optional ≤12 words", "group": "optional layer/lane for architecture"}], "edges": [{"from": "a", "to": "b", "label": "optional — Yes/No, cardinality 1..*", "dashed": false}]}. The renderer computes ALL layout (positions, routing, shapes). Decision points get "?" labels and Yes/No edge labels. Use for workflows, decision flows, org structures, architectures, schemas, sequences
 - equation: real mathematical formula (object {latex: "LaTeX source", display: true}) — use for scientific/mathematical/financial content: fractions, powers, roots, summations, integrals, Greek symbols
 - key_takeaways: executive summary bullets (array of strings)
 - two_column: side-by-side comparison (object {leftTitle, leftPoints: string[], rightTitle, rightPoints: string[]})
@@ -181,7 +181,7 @@ export function buildSectionContentPrompt(input: SectionPromptInput): {
         break
       case 'diagram':
         visualRules.push(
-          `MANDATORY diagram component — ${v.hint || 'the structure/flow described'}. Shape: {"type":"diagram","content":{"kind":"flowchart|process|hierarchy","title":"…","steps":[{"label":"…","description":"…"}]}} (4-7 steps).`
+          `MANDATORY diagram component — ${v.hint || 'the structure/flow described'}. Semantic shape: {"type":"diagram","content":{"kind":"flowchart|decision_tree|hierarchy|org_chart|timeline|sequence|architecture|network|er|process","direction":"TB|LR","title":"…","nodes":[{"id":"a","label":"≤6 words","description":"optional"}],"edges":[{"from":"a","to":"b","label":"Yes|No|1..*"}]}}. 4-9 nodes; decision points end with "?" and carry labeled Yes/No edges; the renderer owns ALL visual layout.`
         )
         break
       case 'metrics':
@@ -220,7 +220,7 @@ ABSOLUTE CONTENT RULES:
 9. For callout type: return a string — one high-impact insight or note
 10. For chart type: return an object {"chartType": "bar|line|pie|donut|area|hbar|stacked|scatter", "title": "Chart title", "categories": ["Q1","Q2","Q3","Q4"], "series": [{"name": "Revenue", "data": [120, 135, 150, 180]}], "note": "optional caption", "xLabel": "optional", "yLabel": "optional"}. ${isDeck ? 'For decks omit xLabel/yLabel.' : 'Include xLabel/yLabel when axes carry units.'}
 11. For timeline type: return an array of {"label": "Phase name", "description": "what happens"}
-12. For diagram type: return an object {"kind": "flowchart|process|hierarchy", "title": "Diagram title", "steps": [{"label": "Step", "description": "details"}]} — minimum 3 steps, labels ≤4 words, descriptions ≤14 words
+12. For diagram type: return SEMANTIC structure — {"kind": "flowchart|decision_tree|hierarchy|org_chart|timeline|sequence|architecture|network|er|comparison|process", "direction": "TB|LR", "title": "…", "nodes": [{"id": "n1", "label": "≤6 words", "description": "≤14 words", "group": "layer/lane for architecture"}], "edges": [{"from": "n1", "to": "n2", "label": "Yes|No|1..*", "dashed": false}]}. Minimum 3 nodes. NEVER emit SVG/HTML/CSS — the renderer computes layout. Decision nodes are questions ending in "?" with labeled Yes/No branches. Pick the kind that matches the CONTENT: flows→flowchart, choices→decision_tree, reporting lines→org_chart, phases→timeline, message order→sequence, layers/tiers→architecture, schema→er, trade-offs→comparison
 13. For equation type: return an object {"latex": "x = \\frac{-b \\pm \\sqrt{b^2-4ac}}{2a}", "display": true} — VALID LaTeX; fractions as \\frac{}{}, powers as ^, subscripts as _, summation as \\sum_{}^{}, Greek as \\alpha etc. NEVER write math as plain text
 14. For key_takeaways type: return an array of 3-5 concise strings
 15. For two_column type: return {"leftTitle": "...", "leftPoints": ["..."], "rightTitle": "...", "rightPoints": ["..."]}

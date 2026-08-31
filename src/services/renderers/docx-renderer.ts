@@ -22,6 +22,7 @@ import {
   AlignmentType,
   BorderStyle,
   Document,
+  ExternalHyperlink,
   Footer,
   Header,
   HeadingLevel,
@@ -65,9 +66,48 @@ import {
 import type { ColorPalette } from '@/types'
 import { evaluateFormula } from '@/services/formula-evaluator'
 import type { CellMatrix } from '@/services/formula-evaluator'
+import { parseInlineMarkdown, inlineToPlainText } from '@/services/typography/inline'
+import { highlightCode, type CodeToken } from '@/services/typography/code'
 
 const TWIPS_PER_INCH = 1440
 type DocxColor = ReturnType<typeof deriveTheme>['colors']
+
+/**
+ * Inline markdown → styled TextRuns (bold / italic / code / links / strike).
+ * `code` segments render in the mono face with a subtle tint so inline code
+ * is distinguishable in print. Deterministic; never throws.
+ */
+function inlineRuns(
+  text: string,
+  opts: { font?: string; color?: string; italicsBase?: boolean; size?: number; monoFont?: string }
+): TextRun[] {
+  const monoFont = opts.monoFont || 'Consolas'
+  const baseColor = opts.color ?? '1F2937'
+  return parseInlineMarkdown(text).map((seg) => {
+    const common = {
+      font: seg.style === 'code' ? monoFont : opts.font,
+      color: seg.style === 'link' ? '2563EB' : baseColor,
+      size: opts.size,
+    }
+    switch (seg.style) {
+      case 'bold':
+        return new TextRun({ text: seg.text, bold: true, italics: opts.italicsBase, ...common })
+      case 'italic':
+        return new TextRun({ text: seg.text, italics: true, ...common })
+      case 'code':
+        return new TextRun({ text: seg.text, font: monoFont, size: opts.size ? Math.max(opts.size - 2, 14) : undefined, shading: { type: ShadingType.CLEAR, fill: 'F1F5F9' }, color: '0F172A' })
+      case 'link':
+        return new ExternalHyperlink({
+          children: [new TextRun({ text: seg.text, ...common, style: 'Hyperlink' })],
+          link: seg.href || seg.text,
+        }) as unknown as TextRun
+      case 'strike':
+        return new TextRun({ text: seg.text, strike: true, ...common })
+      default:
+        return new TextRun({ text: seg.text, italics: opts.italicsBase, ...common })
+    }
+  })
+}
 
 function pageMargins(layout: RenderableDocument['specification']['design']['layout']): { top: number; right: number; bottom: number; left: number } {
   const parse = (v: string | undefined, fallback: number) => {
@@ -749,7 +789,7 @@ export class DocxRenderer implements DocumentRenderer {
         if (text) {
           out.push(
             new Paragraph({
-              text,
+              children: inlineRuns(text, { font: bodyFont, color: undefined }),
               spacing: { after: paraAfter, line: lineTwips, lineRule: LineRuleType.AUTO },
               alignment: AlignmentType.JUSTIFIED,
             })
@@ -762,7 +802,7 @@ export class DocxRenderer implements DocumentRenderer {
         items.forEach((item) => {
           out.push(
             new Paragraph({
-              text: item,
+              children: inlineRuns(item, { font: bodyFont }),
               bullet: { level: 0 },
               spacing: { after: 80 },
             })
@@ -786,7 +826,7 @@ export class DocxRenderer implements DocumentRenderer {
               spacing: { before: 160, after: 160 },
               indent: { left: 720 },
               border: { left: { style: BorderStyle.SINGLE, size: 18, color: hex6(colors.accent, '3B82F6'), space: 12 } },
-              children: [new TextRun({ text, italics: true, size: 24, color: hex6(colors.primary, '1E3A5F'), font: bodyFont })],
+              children: inlineRuns(text, { font: bodyFont, color: hex6(colors.primary, '1E3A5F'), italicsBase: true, size: 24 }),
             })
           )
         }
@@ -809,11 +849,13 @@ export class DocxRenderer implements DocumentRenderer {
         break
       }
       case 'code': {
-        // FIRST-CLASS CODE BLOCK: monospace, theme-shaded, accent-ruled,
-        // language-labeled. Code is NEVER dumped as a body paragraph.
+        // FIRST-CLASS CODE BLOCK: syntax-highlighted (bundled Shiki token
+        // stream), monospace, theme-shaded, accent-ruled, language-labeled.
+        // Code is NEVER dumped as a body paragraph.
         const block = asCodeBlock(component.content)
         if (block) {
-          out.push(this.codeBlockTable(block, colors, ctx?.monoFont || 'Consolas'))
+          const tokens = await highlightCode(block.code, block.language)
+          out.push(this.codeBlockTable(block, colors, ctx?.monoFont || 'Consolas', tokens))
           out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
         }
         break
@@ -911,9 +953,30 @@ export class DocxRenderer implements DocumentRenderer {
         break
       }
       default: {
-        const text = asString(component.content) || JSON.stringify(component.content)
-        if (text && text !== 'null' && text !== '""' && text !== '[]' && text !== '{}') {
-          out.push(new Paragraph({ text, spacing: { after: 160 } }))
+        // HONEST FALLBACK for unknown/unsupported component types: a labeled
+        // muted block (never raw JSON silently dumped into the page).
+        const raw = component.content
+        const text = asString(raw)
+        if (text) {
+          out.push(new Paragraph({ children: inlineRuns(text, { font: bodyFont }), spacing: { after: 160 } }))
+        } else if (raw !== null && raw !== undefined) {
+          const serialized = JSON.stringify(raw)
+          if (serialized && serialized !== 'null' && serialized !== '""' && serialized !== '[]' && serialized !== '{}') {
+            out.push(
+              new Paragraph({
+                children: [
+                  new TextRun({ text: `[Unsupported component: ${component.type}]`, bold: true, size: 18, color: hex6(colors.mutedForeground, '64748B') }),
+                ],
+                spacing: { after: 60 },
+              })
+            )
+            out.push(
+              new Paragraph({
+                children: [new TextRun({ text: serialized.slice(0, 2000), font: ctx?.monoFont || 'Consolas', size: 16, color: hex6(colors.mutedForeground, '64748B') })],
+                spacing: { after: 160 },
+              })
+            )
+          }
         }
       }
     }
@@ -928,19 +991,20 @@ export class DocxRenderer implements DocumentRenderer {
    * border, an accent left rule, an optional language label, and one
    * Paragraph per source line (whitespace-preserving, wrap-safe).
    */
-  private codeBlockTable(block: { language: string; code: string }, colors: DocxColor, monoFont: string): Table {
+  private codeBlockTable(block: { language: string; code: string }, colors: DocxColor, monoFont: string, tokens?: CodeToken[][]): Table {
     const fill = tint(colors.primary, 0.96).slice(1).toUpperCase()
     const accent = hex6(colors.accent, '3B82F6')
     const border = { style: BorderStyle.SINGLE, size: 4, color: hex6(colors.border, 'E2E8F0') }
-    const lines = block.code.split('\n').slice(0, 400)
-    const truncated = block.code.split('\n').length - lines.length
+    const allLines = tokens && tokens.length > 0 ? tokens : block.code.split('\n').map((line) => [{ text: line, color: hex6(colors.foreground, '1F2937') }])
+    const lines = allLines.slice(0, 400)
+    const truncated = allLines.length - lines.length
     const codeParagraphs = lines.map(
       (line) =>
         new Paragraph({
           spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
-          children: [
-            new TextRun({ text: line.length ? line : ' ', font: monoFont, size: 18, color: hex6(colors.foreground, '1F2937') }),
-          ],
+          children: line.length
+            ? line.map((tok) => new TextRun({ text: tok.text, font: monoFont, size: 18, color: tok.color }))
+            : [new TextRun({ text: ' ', font: monoFont, size: 18 })],
         })
     )
     if (truncated > 0) {
