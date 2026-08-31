@@ -6,21 +6,18 @@
 // =============================================================================
 
 import { useMemo, useState } from "react";
-import { toast } from "sonner";
 import { apiClient } from "@/lib/api-client";
 import { useApi } from "@/hooks/use-api";
 import { formatDate, formatPkr } from "@/lib/format";
 import { SUBSCRIPTION_STATUS } from "@/lib/billing-shared";
 import { AdminPageHeader, AdminTable, FilterChip } from "@/components/admin/admin-ui";
 import { StatusBadge } from "@/components/shared";
-import { Button } from "@/components/ui/button";
-import { Loader2, ShieldCheck, Zap } from "lucide-react";
+import { ShieldCheck } from "lucide-react";
 
 const FILTERS = ["all", "active", "pending", "past_due", "paused", "unpaid", "canceled", "ended", "failed"] as const;
 
 export default function AdminSubscriptionsPage() {
   const [filter, setFilter] = useState<(typeof FILTERS)[number]>("all");
-  const [activatingId, setActivatingId] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const subs = useApi<any[]>(
     () => apiClient.adminSubscriptions(filter === "all" ? undefined : filter).then((r) => (r.success ? (r.data as unknown as any[]) : null)),
@@ -39,42 +36,6 @@ export default function AdminSubscriptionsPage() {
         String(s.safepaySubscriptionId ?? "").toLowerCase().includes(q)
     );
   }, [subs.data, query]);
-
-  /**
-   * Manual activation for a pending checkout the operator has VERIFIED as
-   * "Complete" in the Safepay dashboard. Audited (billing.manual_activation);
-   * only a pending payment can transition (idempotent).
-   */
-  async function activatePending(s: any) {
-    const label = `${s.userName ?? s.userEmail ?? "this subscriber"}'s ${s.planName ?? ""} checkout`;
-    if (
-      !window.confirm(
-        `Activate ${label}?\n\nOnly do this after confirming the payment is marked "Complete" in the Safepay dashboard. The action is recorded in the audit log under your admin account.`
-      )
-    ) {
-      return;
-    }
-    setActivatingId(String(s._id));
-    try {
-      const res = await apiClient.adminActivatePendingCheckout({
-        subscriptionId: String(s._id),
-        ...(s.userId ? { userId: String(s.userId) } : {}),
-        note: `Verified Complete in Safepay dashboard (order ${s.safepaySubscriptionId ?? "n/a"})`,
-      });
-      if (!res.success) {
-        toast.error("Could not activate", { description: res.error });
-        return;
-      }
-      toast.success("Subscription activated", {
-        description: "Payment marked succeeded and entitlements synced. Audit-logged.",
-      });
-      await subs.refresh();
-    } catch {
-      toast.error("Activation failed — check the server logs.");
-    } finally {
-      setActivatingId(null);
-    }
-  }
 
   return (
     <div className="mx-auto max-w-7xl space-y-6">
@@ -124,20 +85,12 @@ export default function AdminSubscriptionsPage() {
             <td className="px-4 py-3 text-xs text-muted-foreground">{formatDate(s.createdAt)}</td>
             <td className="px-4 py-3">
               {String(s.status) === "pending" ? (
-                <Button
-                  size="sm"
-                  variant="outline"
-                  disabled={activatingId === String(s._id)}
-                  onClick={() => void activatePending(s)}
-                  title="Mark this checkout as paid after verifying it in the Safepay dashboard"
+                <span
+                  className="text-xs text-muted-foreground"
+                  title="Activates automatically as soon as Safepay confirms the payment via a verified signal"
                 >
-                  {activatingId === String(s._id) ? (
-                    <Loader2 className="mr-1.5 size-3.5 animate-spin" />
-                  ) : (
-                    <Zap className="mr-1.5 size-3.5" />
-                  )}
-                  Activate
-                </Button>
+                  Awaiting payment…
+                </span>
               ) : (
                 <span className="text-xs text-muted-foreground">—</span>
               )}
@@ -148,7 +101,9 @@ export default function AdminSubscriptionsPage() {
 
       <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
         <ShieldCheck className="size-3.5 text-emerald-500" />
-        Status changes originate from verified Safepay signals (webhook, signed return, tracker API). The "Activate" action is an admin-verified, audit-logged fallback for payments you have personally confirmed as Complete in the Safepay dashboard.
+        Status changes originate exclusively from verified Safepay signals (webhook, signed return, tracker API).
+        There is no manual activation — use Billing diagnostics / Webhook self-test to troubleshoot a stuck
+        checkout, never a hand-applied status.
       </p>
     </div>
   );

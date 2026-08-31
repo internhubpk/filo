@@ -60,7 +60,18 @@ function rotr(x: number, n: number): number {
 }
 
 export function sha256Hex(input: string): string {
-  const message = utf8Bytes(input);
+  const digest = sha256FromBytes(utf8Bytes(input));
+  // digest is 32 BYTES (big-endian expansion of the 8 words) → 64 hex chars.
+  return digest.map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+/**
+ * Core SHA-256 over an arbitrary byte array (values 0-255). Shared by
+ * sha256Hex (UTF-8 strings) and lib/session.ts (HMAC needs byte-level
+ * inner/outer block concatenation that string hashing cannot express).
+ * Returns the raw 32-byte digest as 32 number[] entries.
+ */
+export function sha256FromBytes(message: number[]): number[] {
   const bitLenHi = Math.floor(message.length / 0x20000000);
   const bitLenLo = (message.length << 3) >>> 0;
 
@@ -105,7 +116,11 @@ export function sha256Hex(input: string): string {
     h4 = (h4 + e) | 0; h5 = (h5 + f) | 0; h6 = (h6 + g) | 0; h7 = (h7 + h) | 0;
   }
 
-  return [h0, h1, h2, h3, h4, h5, h6, h7]
-    .map((n) => (n >>> 0).toString(16).padStart(8, "0"))
-    .join("");
+  const out: number[] = [];
+  for (const n of [h0, h1, h2, h3, h4, h5, h6, h7]) {
+    const u = n >>> 0;
+    // Big-endian byte expansion: one word → four bytes (0-255).
+    out.push((u >>> 24) & 0xff, (u >>> 16) & 0xff, (u >>> 8) & 0xff, u & 0xff);
+  }
+  return out;
 }

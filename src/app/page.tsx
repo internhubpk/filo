@@ -186,8 +186,8 @@ export default function LandingPage() {
     };
   }, []);
 
-  const primaryHref = user ? "/create" : "/register";
-  const dashboardHref = user ? "/dashboard" : "/login";
+  const primaryHref = user ? "/chat" : "/register";
+  const dashboardHref = user ? "/chat" : "/login";
   // Hero copy states the free allowance — derive it from the LIVE free plan
   // so the landing page can never contradict the real billing limits (the
   // seeded default is 25; admins can change the plan at any time).
@@ -815,7 +815,7 @@ function SiteFooter() {
               links={[
                 ["Create an account", "/register"],
                 ["Log in", "/login"],
-                ["Dashboard", "/dashboard"],
+                ["Workspace", "/chat"],
               ]}
             />
             <FooterCol

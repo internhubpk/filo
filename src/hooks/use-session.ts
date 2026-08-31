@@ -37,10 +37,11 @@ export interface SessionUser {
 
 interface SessionSnapshot {
   user: SessionUser | null
+  token: string
   raw: string
 }
 
-const EMPTY_SNAPSHOT: SessionSnapshot = { user: null, raw: '' }
+const EMPTY_SNAPSHOT: SessionSnapshot = { user: null, token: '', raw: '' }
 
 let cachedSnapshot: SessionSnapshot = EMPTY_SNAPSHOT
 
@@ -48,15 +49,17 @@ function readSnapshot(): SessionSnapshot {
   const raw = window.localStorage.getItem('filo_session') ?? ''
   if (raw !== cachedSnapshot.raw) {
     let user: SessionUser | null = null
+    let token = ''
     if (raw) {
       try {
         const parsed = JSON.parse(raw)
         user = parsed?.user ?? null
+        token = typeof parsed?.token === 'string' ? parsed.token : ''
       } catch (e) {
         console.error('Failed to load user session:', e)
       }
     }
-    cachedSnapshot = { user, raw }
+    cachedSnapshot = { user, token, raw }
   }
   return cachedSnapshot
 }
@@ -91,6 +94,7 @@ function subscribe(onStoreChange: () => void): () => void {
  */
 export function useFiloSession(): {
   user: SessionUser | null
+  token: string
   ready: boolean
   clearSession: () => void
 } {
@@ -111,6 +115,7 @@ export function useFiloSession(): {
 
   return {
     user: snapshot.user,
+    token: snapshot.token,
     ready: ready === 1,
     clearSession: () => {
       try {

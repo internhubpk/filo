@@ -1,11 +1,11 @@
 // =============================================================================
-// FILO AI — OpenAI Provider (SECONDARY / FALLBACK)
+// FILO AI — OpenAI Provider (PRODUCTION PRIMARY)
 // =============================================================================
-// Same OpenAI-compatible chat contract as OpenRouter but pointed at
-// api.openai.com directly. Useful when you already have OpenAI credits and
-// want to bypass the OpenRouter middleman.
+// Direct OpenAI chat contract (api.openai.com or any OpenAI-compatible
+// gateway via OPENAI_BASE_URL). Selected as the PRODUCTION provider by the
+// router's strategy (AI_PROVIDER=openai or NODE_ENV=production).
 //
-// Env vars:
+// Env vars (server-side ONLY — never exposed to the browser):
 //   OPENAI_API_KEY
 //   OPENAI_BASE_URL  (optional — default https://api.openai.com/v1)
 // =============================================================================
@@ -14,10 +14,12 @@ import type {
   AiRequest,
   AiResponse,
   ProviderHealth,
+  AiStreamResult,
 } from './types'
 import type { AiProvider } from './provider'
-import { normalizeOpenAiCompatibleBaseUrl } from './provider'
+import { normalizeOpenAiCompatibleBaseUrl, parseSseStream } from './provider'
 import {
+  AiBaseError,
   ApiKeyMissingError,
   errorFromHttpStatus,
   MalformedResponseError,
@@ -136,6 +138,127 @@ export class OpenAiProvider implements AiProvider {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /**
+   * Streaming generation (OpenAI-compatible SSE, `stream: true`). Each SSE
+   * `data:` event is a JSON chunk with choices[0].delta.content carrying the
+   * incremental text; the final chunk (before [DONE]) carries usage when
+   * `stream_options: { include_usage: true }` is set.
+   */
+  async stream(request: AiRequest): Promise<AiStreamResult> {
+    const apiKey = this.getApiKey()
+    const model = request.options?.model || this.defaultModel
+    const timeoutMs = request.options?.timeoutMs ?? 120_000
+    const startedAt = Date.now()
+    const opts = request.options
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+    let response: Response
+    try {
+      response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+        body: JSON.stringify({
+          model,
+          messages: request.messages,
+          temperature: opts?.temperature ?? 0.7,
+          max_tokens: opts?.maxTokens,
+          top_p: opts?.topP,
+          frequency_penalty: opts?.frequencyPenalty,
+          presence_penalty: opts?.presencePenalty,
+          stop: opts?.stopSequences,
+          stream: true,
+          stream_options: { include_usage: true },
+        }),
+      })
+    } catch (err) {
+      clearTimeout(timer)
+      throw normalizeAiError('OPENAI', err)
+    }
+
+    if (!response.ok || !response.body) {
+      const errText = await response.text().catch(() => '')
+      clearTimeout(timer)
+      throw errorFromHttpStatus('OPENAI', response.status, errText)
+    }
+
+    const sse = parseSseStream(response.body)
+
+    async function* deltas(): AsyncGenerator<string, void, undefined> {
+      for await (const payload of sse) {
+        if (payload === '[DONE]') return
+        let chunk: {
+          choices?: Array<{ delta?: { content?: string } }>
+        }
+        try {
+          chunk = JSON.parse(payload)
+        } catch {
+          continue // keep-alive / partial event — skip, not fatal
+        }
+        const text = chunk.choices?.[0]?.delta?.content
+        if (text) yield text
+      }
+    }
+
+    const finished = (async (): Promise<AiResponse> => {
+      let content = ''
+      let finishReason: string | undefined
+      let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      try {
+        for await (const payload of sse) {
+          if (payload === '[DONE]') break
+          let chunk: {
+            choices?: Array<{
+              delta?: { content?: string }
+              finish_reason?: string | null
+            }>
+            usage?: OpenAiChatResponse['usage']
+          }
+          try {
+            chunk = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          const delta = chunk.choices?.[0]?.delta?.content
+          if (delta) content += delta
+          const fr = chunk.choices?.[0]?.finish_reason
+          if (fr) finishReason = fr
+          if (chunk.usage) {
+            usage = {
+              promptTokens: chunk.usage.prompt_tokens ?? 0,
+              completionTokens: chunk.usage.completion_tokens ?? 0,
+              totalTokens: chunk.usage.total_tokens ?? 0,
+            }
+          }
+        }
+        if (!content) {
+          throw new MalformedResponseError('OPENAI', 'stream produced no content')
+        }
+        return {
+          id: `oai_${startedAt}`,
+          content,
+          usage,
+          provider: 'OPENAI',
+          model,
+          durationMs: Date.now() - startedAt,
+          finishReason,
+        }
+      } catch (err) {
+        if (err instanceof AiBaseError) throw err
+        throw normalizeAiError('OPENAI', err)
+      } finally {
+        clearTimeout(timer)
+      }
+    })()
+
+    return { textStream: deltas(), finished }
   }
 
   async healthCheck(): Promise<ProviderHealth> {

@@ -1,12 +1,12 @@
 // =============================================================================
 // POST /api/admin/users/[userId]/activate
 // =============================================================================
-// Admin-only endpoint. Manually activates a user account, granting them
-// access to AI generation. Typically called after the admin has reviewed
-// the user's payment verification and confirmed the payment.
-//
+// Admin-only endpoint. LIFTS A SUSPENSION (suspended → active) after the
+// admin has reviewed a moderation case. It CANNOT grant paid plans: manual
+// plan activation was removed in the rebuild — entitlements flow only from
+// verified payment signals. A planId in the body is rejected with 400.
 // Body (optional):
-//   { planId?: string, note?: string }
+//   { note?: string }
 // =============================================================================
 
 import { NextRequest, NextResponse } from 'next/server'
@@ -38,16 +38,30 @@ export async function POST(
     try {
       body = await request.json()
     } catch {
-      // No body or invalid JSON is fine - planId/note are optional
+      // No body or invalid JSON is fine - note is optional
     }
+    // POLICY (rebuild v2): manual plan grants are REMOVED. If a client still
+    // sends planId it is rejected rather than silently ignored — admins must
+    // not create unpaid entitlements. Paid plans are activated exclusively
+    // by verified Safepay signals (webhook / signed return / tracker).
     const { planId, note } = body
+    if (planId) {
+      return NextResponse.json(
+        {
+          success: false,
+          error:
+            'Manual plan activation is not allowed. Paid entitlements are activated automatically by verified payments.',
+          code: 'MANUAL_PLAN_ACTIVATION_DISABLED',
+        },
+        { status: 400 }
+      )
+    }
 
     const { getConvexClient } = await import('@/lib/convex-server')
     const convex = getConvexClient()
 
     const updated = await convex.mutation(api.users.activateUser, {
       userId: userId as any,
-      planId: planId ?? undefined,
       note: note ?? undefined,
     })
 

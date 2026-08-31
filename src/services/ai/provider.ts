@@ -15,6 +15,7 @@ import type {
   AiResponse,
   ProviderHealth,
   ProviderId,
+  AiStreamResult,
 } from './types'
 import { ApiKeyMissingError } from './errors'
 import { AgentRouterModule } from './agentrouter'
@@ -47,8 +48,61 @@ export interface AiProvider {
   /** Run a single generation. */
   generate(request: AiRequest): Promise<AiResponse>
 
+  /**
+   * Stream a generation as text deltas over SSE. Providers that support
+   * streaming implement this; the router's streaming path uses it directly.
+   * Implementations MUST reject the returned promise (and `finished`) with
+   * an AiBaseError subclass on auth/config/HTTP failure.
+   */
+  stream?(request: AiRequest): Promise<AiStreamResult>
+
   /** Lightweight reachability probe (used by health checks + fallback ordering). */
   healthCheck(): Promise<ProviderHealth>
+}
+
+// ==================== SHARED SSE HELPERS ====================
+
+/**
+ * Parse an SSE byte stream into `data:` payload strings. Handles multi-line
+ * events (joins data lines), CRLF, comment lines (`:` prefix) and the
+ * `[DONE]` sentinel used by OpenAI-compatible APIs. Used by both streaming
+ * provider implementations — one parser, one set of edge-case fixes.
+ */
+export async function* parseSseStream(
+  body: ReadableStream<Uint8Array>
+): AsyncGenerator<string, void, undefined> {
+  const reader = body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  try {
+    while (true) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      // SSE events are separated by a blank line.
+      let separator = buffer.search(/\r?\n\r?\n/)
+      while (separator !== -1) {
+        const rawEvent = buffer.slice(0, separator)
+        buffer = buffer.slice(separator + (buffer[separator] === '\r' ? 4 : 2))
+        const dataLines = rawEvent
+          .split(/\r?\n/)
+          .filter((line) => line.startsWith('data:'))
+          .map((line) => line.slice(5).replace(/^ /, ''))
+        if (dataLines.length > 0) {
+          yield dataLines.join('\n')
+        }
+        separator = buffer.search(/\r?\n\r?\n/)
+      }
+    }
+    // Flush a trailing event that lacks the final blank line.
+    const tail = buffer
+      .split(/\r?\n/)
+      .filter((line) => line.startsWith('data:'))
+      .map((line) => line.slice(5).replace(/^ /, ''))
+    if (tail.length > 0) yield tail.join('\n')
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 // ==================== REGISTRY ====================

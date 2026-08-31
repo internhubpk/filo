@@ -717,7 +717,10 @@ test('§42/§43 export/conversion route: matrix + version append + no AI spend',
 })
 
 test('§41 quick-edit actions appear when files are attached', () => {
-  const page = read('src', 'app', '(app)', 'create', 'page.tsx')
+  // REBUILD v2: the create page was replaced by the chat workspace + the
+  // unified Documents library. Quick-edit now lives in the library's
+  // "Edit with AI" dialog.
+  const page = read('src', 'components', 'shared', 'artifacts-workspace.tsx')
   assert.match(page, /QUICK_EDIT_ACTIONS/, 'action chips defined')
   for (const action of ['Rewrite', 'Improve', 'Redesign', 'Summarize', 'Expand', 'Convert', 'Fix grammar', 'Analyze']) {
     assert.ok(page.includes(`label: "${action}"`), `action "${action}" available`)

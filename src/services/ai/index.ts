@@ -13,13 +13,15 @@ export {
   aiRouter,
   MODEL_MATRIX,
   PROVIDER_FALLBACK_ORDER,
+  resolveProviderStrategy,
+  activeProviderChain,
   DEFAULT_RETRY_POLICY,
   MAX_ATTEMPTS_PER_PROVIDER,
   PROVIDER_FATAL_CODES,
   MAX_CONSECUTIVE_NETWORK_FAILURES,
   providerHealthSnapshot,
 } from './router'
-export type { GenerateOptions, AiTask } from './router'
+export type { GenerateOptions, AiTask, AiProviderStrategy } from './router'
 
 export {
   registerProvider,

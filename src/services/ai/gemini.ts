@@ -43,8 +43,10 @@ import type {
   AiRequest,
   AiResponse,
   ProviderHealth,
+  AiStreamResult,
 } from './types'
 import type { AiProvider } from './provider'
+import { parseSseStream } from './provider'
 import {
   AiBaseError,
   ApiKeyMissingError,
@@ -251,6 +253,142 @@ export class GeminiProvider implements AiProvider {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /**
+   * Streaming generation (SSE). Wire protocol: the same request body as
+   * generateContent, POSTed to `:streamGenerateContent?alt=sse`. Every SSE
+   * `data:` event is a JSON chunk shaped like the non-streaming response —
+   * text lives in candidates[0].content.parts[].text and the FINAL chunk
+   * carries usageMetadata. Safety blocks arrive as promptFeedback.blockReason.
+   */
+  async stream(request: AiRequest): Promise<AiStreamResult> {
+    const apiKey = this.getApiKey()
+    const model = request.options?.model || this.defaultModel
+    const timeoutMs = request.options?.timeoutMs ?? 120_000
+    const startedAt = Date.now()
+    const opts = request.options
+
+    const systemText = request.messages
+      .filter((m) => m.role === 'system')
+      .map((m) => m.content)
+      .join('\n\n')
+    const contents = request.messages
+      .filter((m) => m.role !== 'system')
+      .map((m) => ({
+        role: m.role === 'assistant' ? 'model' : 'user',
+        parts: [{ text: m.content }],
+      }))
+
+    const thinkingLevel = /pro/i.test(model) ? 'low' : 'minimal'
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+    const url = `${this.baseUrl}/models/${encodeURIComponent(model)}:streamGenerateContent?alt=sse`
+    const headers = {
+      'Content-Type': 'application/json',
+      'x-goog-api-key': apiKey,
+    }
+    const body = JSON.stringify({
+      contents,
+      ...(systemText ? { systemInstruction: { parts: [{ text: systemText }] } } : {}),
+      generationConfig: {
+        temperature: opts?.temperature,
+        maxOutputTokens: opts?.maxTokens,
+        topP: opts?.topP,
+        stopSequences: opts?.stopSequences,
+        ...( { thinkingConfig: { thinkingLevel } } ),
+      },
+    })
+
+    let response: Response
+    try {
+      response = await fetch(url, { method: 'POST', headers, signal: controller.signal, body })
+    } catch (err) {
+      clearTimeout(timer)
+      throw normalizeAiError('GEMINI', err)
+    }
+
+    if (!response.ok || !response.body) {
+      const errText = await response.text().catch(() => '')
+      clearTimeout(timer)
+      throw errorFromHttpStatus('GEMINI', response.status, errText)
+    }
+
+    const sse = parseSseStream(response.body)
+
+      async function* deltas(): AsyncGenerator<string, void, undefined> {
+        for await (const payload of sse) {
+          if (payload === '[DONE]') return
+          let chunk: GeminiGenerateContentResponse
+          try {
+            chunk = JSON.parse(payload) as GeminiGenerateContentResponse
+          } catch {
+            continue // keep-alive / partial event — skip, not fatal
+          }
+          const block = chunk.promptFeedback?.blockReason
+          if (block && block !== 'BLOCK_REASON_UNSPECIFIED') {
+            throw new ContentFilteredError('GEMINI', `prompt blocked: ${block}`)
+          }
+          const parts = chunk.candidates?.[0]?.content?.parts ?? []
+          for (const p of parts) {
+            if (p.text) yield p.text
+          }
+        }
+      }
+
+    const finished = (async (): Promise<AiResponse> => {
+      let content = ''
+      let finishReason: string | undefined
+      let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      try {
+        for await (const payload of sse) {
+          if (payload === '[DONE]') break
+          let chunk: GeminiGenerateContentResponse
+          try {
+            chunk = JSON.parse(payload) as GeminiGenerateContentResponse
+          } catch {
+            continue
+          }
+          const block = chunk.promptFeedback?.blockReason
+          if (block && block !== 'BLOCK_REASON_UNSPECIFIED') {
+            throw new ContentFilteredError('GEMINI', `prompt blocked: ${block}`)
+          }
+          const parts = chunk.candidates?.[0]?.content?.parts ?? []
+          for (const p of parts) {
+            if (p.text) content += p.text
+          }
+          const fr = chunk.candidates?.[0]?.finishReason
+          if (fr && fr !== 'FINISH_REASON_UNSPECIFIED') finishReason = fr
+          if (chunk.usageMetadata) {
+            usage = {
+              promptTokens: chunk.usageMetadata.promptTokenCount ?? usage.promptTokens,
+              completionTokens: chunk.usageMetadata.candidatesTokenCount ?? usage.completionTokens,
+              totalTokens: chunk.usageMetadata.totalTokenCount ?? usage.totalTokens,
+            }
+          }
+        }
+      } finally {
+        clearTimeout(timer)
+      }
+      if (!content && !finishReason) {
+        throw new MalformedResponseError('GEMINI', 'stream produced no content')
+      }
+      return {
+        id: `gem_${startedAt}`,
+        content,
+        usage,
+        provider: 'GEMINI',
+        model,
+        durationMs: Date.now() - startedAt,
+        finishReason,
+      }
+    })()
+
+    // Surface pre-flight failures to the caller immediately.
+    finished.catch(() => {})
+    return { textStream: deltas(), finished }
   }
 
   async healthCheck(): Promise<ProviderHealth> {

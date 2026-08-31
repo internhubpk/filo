@@ -9,6 +9,19 @@ const isVercelBuild = process.env.VERCEL === "1";
 
 const nextConfig: NextConfig = {
   ...(isVercelBuild ? {} : { output: "standalone" as const }),
+  // The pre-rebuild IA (Dashboard / Create / Spreadsheets / Presentations /
+  // Files) was replaced by the chat-centered workspace. Permanent redirects
+  // keep old bookmarks and shared links working — they land on the closest
+  // destination in the new IA.
+  async redirects() {
+    return [
+      { source: "/dashboard", destination: "/chat", permanent: true },
+      { source: "/create", destination: "/chat", permanent: true },
+      { source: "/spreadsheets", destination: "/documents?type=spreadsheet", permanent: true },
+      { source: "/presentations", destination: "/documents?type=presentation", permanent: true },
+      { source: "/files", destination: "/documents", permanent: true },
+    ];
+  },
   // NOTE: `ignoreBuildErrors` was previously `true`, which masked ~138 real
   // TypeScript errors across the codebase. Phase 1 of the production-readiness
   // hardening pass fixed every one of them, so we now enforce strict type
@@ -18,6 +31,11 @@ const nextConfig: NextConfig = {
     ignoreBuildErrors: false,
   },
   reactStrictMode: false,
+  // The dev-tools indicator badge sits in the bottom-left corner — exactly
+  // where the workspace's personal menu lives — and its portal intercepts
+  // pointer events in dev. Disabled: it is a development artifact, not part
+  // of the product. Production builds never render it.
+  devIndicators: false,
   // pdfkit resolves its .afm font-metric files at runtime via __dirname
   // (node_modules/pdfkit/js/data/*.afm). When the bundler inlines pdfkit,
   // those paths become /ROOT/node_modules/... and every PDF render crashes

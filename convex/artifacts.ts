@@ -23,6 +23,7 @@
 import { v } from "convex/values";
 import { action, mutation, query } from "./_generated/server";
 import { api } from "./_generated/api";
+import { requireUser } from "./lib/session";
 import {
   aiRouter,
   buildBlueprintPrompt,
@@ -33,6 +34,28 @@ import {
 import type { Blueprint, GeneratedSection } from "../src/services/ai/index";
 
 // ==================== QUERIES ====================
+
+/**
+ * List artifacts for a user (most recent first) — SESSION-VERIFIED.
+ * The caller presents their HMAC session token which is verified HERE in
+ * Convex (lib/session.requireUser); a bare userId is never trusted from the
+ * browser. Ownership is enforced by construction: the query only ever reads
+ * rows belonging to the authenticated user.
+ */
+export const listUserArtifactsSession = query({
+  args: {
+    session: v.string(),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.session);
+    return await ctx.db
+      .query("artifacts")
+      .withIndex("by_userId", (q) => q.eq("userId", user._id))
+      .order("desc")
+      .take(args.limit ?? 50);
+  },
+});
 
 /**
  * List artifacts for a user (most recent first).
@@ -62,6 +85,17 @@ export const getArtifactForUser = query({
   handler: async (ctx, args) => {
     const artifact = await ctx.db.get(args.artifactId);
     if (!artifact || artifact.userId !== args.userId) return null;
+    return artifact;
+  },
+});
+
+/** SESSION-VERIFIED single artifact read (client document viewer). */
+export const getArtifactForUserSession = query({
+  args: { session: v.string(), artifactId: v.id("artifacts") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.session);
+    const artifact = await ctx.db.get(args.artifactId);
+    if (!artifact || artifact.userId !== user._id) return null;
     return artifact;
   },
 });

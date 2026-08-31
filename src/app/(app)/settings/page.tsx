@@ -29,7 +29,7 @@ export default function SettingsPage() {
   const { user, ready } = useFiloSession();
 
   return (
-    <div className="mx-auto max-w-3xl space-y-8">
+    <div className="mx-auto h-full max-w-3xl space-y-8 overflow-y-auto pb-10">
       <PageHeader title="Settings" description="Your account, security, and workspace preferences." />
       {!ready ? (
         <div className="space-y-4">

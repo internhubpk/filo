@@ -413,7 +413,7 @@ function BillingContent() {
   const showPendingHint = pendingBadge || (returnedFromCheckout && sub?.status !== "active");
 
   return (
-    <div className="mx-auto max-w-6xl space-y-8">
+    <div className="mx-auto h-full max-w-6xl space-y-8 overflow-y-auto pb-10">
       <PageHeader
         title="Billing & plan"
         description="Manage your subscription, payment method history, and usage."

@@ -129,20 +129,35 @@ const TYPE_FILTERS = [
   { id: "presentation", label: "Presentations" },
 ] as const;
 
+// Quick-edit actions for the AI edit dialog — one tap fills the instruction.
+const QUICK_EDIT_ACTIONS = [
+  { label: "Rewrite", prompt: "Rewrite the content for clarity and impact while keeping the structure." },
+  { label: "Improve", prompt: "Improve the overall quality: tighter wording, better flow, stronger headings." },
+  { label: "Redesign", prompt: "Redesign the visual layout — better theme, spacing and component variety." },
+  { label: "Summarize", prompt: "Summarize the material into a shorter, executive-level version." },
+  { label: "Expand", prompt: "Expand each section with more depth, examples and supporting detail." },
+  { label: "Convert", prompt: "Restructure this content for a different audience and use case." },
+  { label: "Fix grammar", prompt: "Fix grammar, spelling and punctuation throughout without changing meaning." },
+  { label: "Analyze", prompt: "Add an analytical section with key findings and recommendations." },
+] as const;
+
 export function ArtifactsWorkspace({
   title = "Artifacts",
   description = "Everything you've generated — filter, select and manage your files.",
   variant = "page",
   pageSize = 24,
+  initialType = "all",
 }: {
   title?: string;
   description?: string;
   /** "dashboard" = tighter vertical rhythm inside the dashboard; "page" = standalone. */
   variant?: "dashboard" | "page";
   pageSize?: number;
+  /** Pre-selected type filter ("all" | "document" | "spreadsheet" | "presentation"). */
+  initialType?: string;
 }) {
   const [query, setQuery] = useState("");
-  const [typeFilter, setTypeFilter] = useState<string>("all");
+  const [typeFilter, setTypeFilter] = useState<string>(initialType);
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [sort, setSort] = useState<"newest" | "oldest" | "title">("newest");
   const [view, setView] = useState<"grid" | "list">("grid");
@@ -687,8 +702,8 @@ export function ArtifactsWorkspace({
             description="Describe what you need and Filo will build it — a report, a budget model, a deck."
             action={
               <Button asChild className="press shadow-lg shadow-primary/25">
-                <Link href="/create">
-                  <Sparkles className="mr-1.5 size-4" /> Create your first document
+                <Link href="/chat">
+                  <Sparkles className="mr-1.5 size-4" /> Start with Filo Chat
                 </Link>
               </Button>
             }
@@ -923,6 +938,19 @@ export function ArtifactsWorkspace({
               new version in {editFor?.format || "the original format"}.
             </DialogDescription>
           </DialogHeader>
+          {/* Quick-edit actions — one tap fills the instruction */}
+          <div className="flex flex-wrap gap-1.5" aria-label="Quick edit actions">
+            {QUICK_EDIT_ACTIONS.map((a) => (
+              <button
+                key={a.label}
+                type="button"
+                onClick={() => setEditInstruction(a.prompt)}
+                className="rounded-full border bg-muted/40 px-2.5 py-1 text-[11px] font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:bg-primary/5 hover:text-primary"
+              >
+                {a.label}
+              </button>
+            ))}
+          </div>
           <textarea
             value={editInstruction}
             onChange={(e) => setEditInstruction(e.target.value)}

@@ -314,12 +314,11 @@ export const createUserInternal = internalMutation({
 
 // ==================== ADMIN MUTATIONS ====================
 
-// Admin: activate a user account (e.g. re-activating a previously suspended
-// or legacy pending account)
+// Admin: re-activate a previously SUSPENDED account (suspension lift only —
+// plan entitlements come exclusively from verified payments)
 export const activateUser = mutation({
   args: {
     userId: v.id("users"),
-    planId: v.optional(v.id("plans")),
     note: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -328,16 +327,22 @@ export const activateUser = mutation({
       throw new Error("User not found");
     }
 
+    // POLICY (rebuild v2): admins may only lift a SUSPENSION. Paid plans and
+    // their entitlements are granted EXCLUSIVELY by the billing webhook /
+    // verified Safepay signals — a manual plan change here would create an
+    // unpaid entitlement (the exact flow the rebuild removed).
+    if (user.status !== "suspended") {
+      throw new Error(
+        "Only suspended accounts can be re-activated by an admin. Subscriptions and plan entitlements are activated automatically by verified payments."
+      );
+    }
+
     const updates: Record<string, unknown> = {
       status: "active",
       activatedAt: Date.now(),
       activationNote: args.note,
       updatedAt: Date.now(),
     };
-
-    if (args.planId) {
-      updates.planId = args.planId;
-    }
 
     await ctx.db.patch(args.userId, updates);
     return await ctx.db.get(args.userId);

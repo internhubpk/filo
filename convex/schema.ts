@@ -105,13 +105,19 @@ export default defineSchema({
     versionCount: v.number(),
     metadata: v.optional(v.any()),
     brandId: v.optional(v.id("brands")),
+    // ---- Sharing (secure public links) ----
+    // 32-byte random base64url token. Null = not shared. Public viewers get
+    // metadata + preview + download through token-scoped endpoints only.
+    shareToken: v.optional(v.string()),
+    sharedAt: v.optional(v.number()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
     .index("by_userId", ["userId"])
     .index("by_status", ["status"])
     .index("by_userId_status", ["userId", "status"])
-    .index("by_workspaceId", ["workspaceId"]),
+    .index("by_workspaceId", ["workspaceId"])
+    .index("by_shareToken", ["shareToken"]),
 
   // Files (R2 storage references - metadata only)
   files: defineTable({
@@ -215,6 +221,57 @@ export default defineSchema({
   })
     .index("by_userId", ["userId"])
     .index("by_workspaceId", ["workspaceId"]),
+
+  // =============================================================================
+  // UNIFIED CHAT WORKSPACE
+  // =============================================================================
+  // Chat is the center of the Filo experience. A chat holds the conversation
+  // transcript AND doubles as the launchpad for Document Mode generation:
+  // the AI plans the document from the conversation context, the durable
+  // generation pipeline renders it, and the finished artifact links back to
+  // the chat message that started it (messages.metadata.artifactId).
+  // =============================================================================
+
+  chats: defineTable({
+    userId: v.id("users"),
+    title: v.string(),
+    // "chat" — plain conversation; "document" — the last send produced (or
+    // is producing) a document from the conversation context. Per-message
+    // mode lives on messages.metadata; this reflects the chat's latest use.
+    lastMode: v.union(v.literal("chat"), v.literal("document")),
+    // Denormalized for cheap sidebar sorting without a messages scan.
+    lastMessagePreview: v.optional(v.string()),
+    lastMessageAt: v.number(),
+    messageCount: v.number(),
+    // ---- Sharing (secure public links) ----
+    // 32-byte random base64url token. Null = not shared. Revocation clears
+    // the token (old links die immediately) and rotate generates a new one.
+    shareToken: v.optional(v.string()),
+    sharePermission: v.optional(v.union(v.literal("view"), v.literal("edit"))),
+    sharedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index("by_userId", ["userId"])
+    .index("by_userId_lastMessageAt", ["userId", "lastMessageAt"])
+    .index("by_shareToken", ["shareToken"]),
+
+  messages: defineTable({
+    chatId: v.id("chats"),
+    userId: v.id("users"), // denormalized owner for cheap authz checks
+    role: v.union(v.literal("user"), v.literal("assistant")),
+    content: v.string(),
+    // Optional structured metadata:
+    //   { model, provider, usage, durationMs }        — assistant text replies
+    //   { kind: "generation", jobId, artifactId,
+    //     artifactType, outputFormat, title }         — Document Mode turns
+    //   { error: string }                             — failed turns
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index("by_chatId", ["chatId"])
+    .index("by_chatId_createdAt", ["chatId", "createdAt"])
+    .index("by_userId", ["userId"]),
 
   // =============================================================================
   // DURABLE GENERATION PIPELINE (Phase 3)

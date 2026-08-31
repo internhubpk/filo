@@ -11,14 +11,14 @@ import {
   FileText,
   FileSpreadsheet,
   Presentation,
-  FolderOpen,
   Settings as SettingsIcon,
-  LayoutDashboard,
   Sparkles,
   CreditCard,
   Moon,
   Sun,
   LogOut,
+  MessageSquare,
+  MessageSquarePlus,
   CornerDownLeft,
 } from "lucide-react";
 import { useTheme } from "next-themes";
@@ -89,32 +89,23 @@ export function CommandPalette({
         <CommandEmpty>No results found.</CommandEmpty>
 
         <CommandGroup heading="Quick actions">
-          <CommandItem onSelect={() => go("/create")}>
-            <Sparkles className="mr-2 size-4" /> New AI generation
-            <CommandShortcut>N</CommandShortcut>
+          <CommandItem onSelect={() => go("/chat")}>
+            <MessageSquarePlus className="mr-2 size-4" /> New chat
+            <CommandShortcut>C</CommandShortcut>
           </CommandItem>
-          <CommandItem onSelect={() => go("/files")}>
-            <FolderOpen className="mr-2 size-4" /> Upload a file
+          <CommandItem onSelect={() => go("/chat?mode=document")}>
+            <Sparkles className="mr-2 size-4" /> Generate a document
           </CommandItem>
         </CommandGroup>
 
         <CommandSeparator />
 
         <CommandGroup heading="Navigate">
-          <CommandItem onSelect={() => go("/dashboard")}>
-            <LayoutDashboard className="mr-2 size-4" /> Dashboard
+          <CommandItem onSelect={() => go("/chat")}>
+            <MessageSquare className="mr-2 size-4" /> Chat
           </CommandItem>
           <CommandItem onSelect={() => go("/documents")}>
             <FileText className="mr-2 size-4" /> Documents
-          </CommandItem>
-          <CommandItem onSelect={() => go("/spreadsheets")}>
-            <FileSpreadsheet className="mr-2 size-4" /> Spreadsheets
-          </CommandItem>
-          <CommandItem onSelect={() => go("/presentations")}>
-            <Presentation className="mr-2 size-4" /> Presentations
-          </CommandItem>
-          <CommandItem onSelect={() => go("/files")}>
-            <FolderOpen className="mr-2 size-4" /> Files
           </CommandItem>
           <CommandItem onSelect={() => go("/billing")}>
             <CreditCard className="mr-2 size-4" /> Billing & plan

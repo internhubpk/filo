@@ -442,7 +442,7 @@ test('§10 the router logs a startup config diagnostics line per provider', () =
   const boot = router.match(/private ensureProviders\(\): void \{[\s\S]*?\n  \}/)?.[0] ?? ''
   assert.ok(boot.length > 0, 'ensureProviders found')
   assert.match(boot, /provider diagnostics/, 'logs the diagnostics banner')
-  assert.match(boot, /fallback order/, 'logs the fallback order')
+  assert.match(boot, /strategy:/, 'logs the SINGLE-provider strategy (rebuild v2 — no fallback chains)')
   assert.match(boot, /NOT configured/, 'unconfigured providers are visible at a glance')
   assert.doesNotMatch(boot, /API_KEY|apiKey|Bearer/, 'never logs key material')
 })
@@ -465,7 +465,10 @@ test('§24 .env.example pins the verified co.agentrouter.org/v1 API base', () =>
   assert.match(envExample, /co\.agentrouter\.org\/v1/, 'the verified API host is documented')
   assert.match(envExample, /GEMINI_API_KEY=/, 'Gemini fallback #1 documented')
   assert.match(envExample, /generativelanguage\.googleapis\.com/, 'Gemini base URL documented')
-  assert.match(envExample, /INDEPENDENT PROVIDERS/, 'fallback-across-providers contract documented')
+  // REBUILD v2: ONE provider per environment — the strategy contract is
+  // documented instead of the old cross-provider fallback chain.
+  assert.match(envExample, /AI_PROVIDER/, 'explicit provider strategy override documented')
+  assert.match(envExample, /no\s+cross-provider fallback/i, 'single-provider strategy documented')
   // exactly ONE OpenAI_API_KEY assignment (no duplicated lines)
   const dupes = envExample.match(/^OPENAI_API_KEY=.*$/gm) ?? []
   assert.equal(dupes.length, 1, `OPENAI_API_KEY appears exactly once (found ${dupes.length})`)

@@ -27,6 +27,7 @@ import type {
   RetryPolicy,
   ProviderHealth,
   AiRequestOptions,
+  AiStreamResult,
 } from './types'
 import {
   registerDefaultProviders,
@@ -233,12 +234,67 @@ export function providerHealthSnapshot(): Array<{
 
 /** Provider fallback order. Genuinely independent backends; unconfigured
  *  providers are skipped at runtime. A failure of one can never imply a
- *  failure of another. */
+ *  failure of another.
+ *
+ *  NOTE: this full list is used for DIAGNOSTICS and pinned-model lookup
+ *  only. The ACTIVE serving chain is the single-provider strategy returned
+ *  by `activeProviderChain()` (see below) — production runs exactly ONE
+ *  provider with no cross-provider fallback. */
 export const PROVIDER_FALLBACK_ORDER: ProviderId[] = [
   'AGENT_ROUTER',
   'GEMINI',
   'OPENAI',
 ]
+
+// ==================== PROVIDER STRATEGY ====================
+// Filo runs ONE provider per environment — no cross-provider fallback
+// chains. This keeps cost/behavior predictable and secrets scoped:
+//
+//   AI_PROVIDER env (GEMINI | OPENAI | AGENT_ROUTER) — explicit, wins.
+//   Otherwise: exactly one key configured → that provider.
+//   Otherwise: NODE_ENV=production → OPENAI, development → GEMINI.
+//
+// Keys are read server-side only (provider implementations read env lazily
+// at call time) and never reach the browser. Switching providers is a
+// single env change — no code edits.
+export type AiProviderStrategy = ProviderId
+
+/**
+ * Resolve the provider this environment should serve AI with.
+ * `isConfiguredLookup` lets callers (e.g. the Convex worker, whose registry
+ * may not be booted yet) supply their own configured-check.
+ */
+export function resolveProviderStrategy(
+  isConfiguredLookup?: (id: ProviderId) => boolean
+): AiProviderStrategy {
+  const explicit = (process.env.AI_PROVIDER ?? '').trim().toUpperCase()
+  if (
+    explicit === 'GEMINI' ||
+    explicit === 'OPENAI' ||
+    explicit === 'AGENT_ROUTER'
+  ) {
+    return explicit
+  }
+  const configured = (id: ProviderId): boolean => {
+    if (isConfiguredLookup) return isConfiguredLookup(id)
+    const p = getProvider(id)
+    return Boolean(p?.isConfigured())
+  }
+  const configuredIds = (
+    ['GEMINI', 'OPENAI', 'AGENT_ROUTER'] as ProviderId[]
+  ).filter(configured)
+  if (configuredIds.length === 1) return configuredIds[0]
+  return process.env.NODE_ENV === 'production' ? 'OPENAI' : 'GEMINI'
+}
+
+/**
+ * The ACTIVE provider chain: exactly ONE provider (the resolved strategy),
+ * never a fallback chain. Production behavior is deterministic — every AI
+ * call goes to the strategy provider and surfaces its real errors.
+ */
+export function activeProviderChain(): ProviderId[] {
+  return [resolveProviderStrategy()]
+}
 
 // ==================== ROUTER ====================
 
@@ -272,7 +328,7 @@ class AiRouter {
           : `${id}: NOT configured — set its API key to enable`
       })
       console.info(
-        `[AI] provider diagnostics\n[AI]   ${lines.join('\n[AI]   ')}\n[AI]   fallback order: ${PROVIDER_FALLBACK_ORDER.join(' → ')}`
+        `[AI] provider diagnostics\n[AI]   ${lines.join('\n[AI]   ')}\n[AI]   strategy: ${resolveProviderStrategy()} (single provider, no fallback chain)`
       )
     }
   }
@@ -503,6 +559,68 @@ class AiRouter {
   }
 
   /**
+   * Stream a chat completion from the STRATEGY provider (no fallback — a
+   * streaming failure surfaces the real provider error so the caller can
+   * render an honest error state). Requires the active provider to implement
+   * `stream()`; falls back to a single non-streaming generate() wrapped into
+   * a one-delta stream when it does not.
+   */
+  async stream(
+    request: AiRequest,
+    generateOptions: GenerateOptions = {}
+  ): Promise<AiStreamResult> {
+    this.ensureProviders()
+
+    const messages = Array.isArray(request?.messages) ? request.messages : []
+    const hasContent = messages.some((m) => String(m?.content ?? '').trim().length > 0)
+    if (!hasContent) {
+      throw new AiBaseError(
+        'AI request rejected before any provider call: empty prompt.',
+        'INVALID_REQUEST',
+        'ROUTER',
+        false
+      )
+    }
+
+    const chain = this.buildProviderChain(generateOptions)
+    const providerId = chain[0]
+    const provider = getProvider(providerId)
+    if (!provider || !provider.isConfigured()) {
+      throw new AiBaseError(
+        provider
+          ? `${providerId} is not configured — set its API key to enable AI`
+          : `${providerId} is not registered`,
+        'PROVIDER_UNCONFIGURED',
+        'ROUTER',
+        false
+      )
+    }
+
+    const model =
+      generateOptions.model || request.options?.model || provider.defaultModel
+    const mergedOptions = {
+      ...request.options,
+      ...generateOptions,
+      model,
+    }
+
+    // Preferred path: true streaming.
+    if (typeof provider.stream === 'function') {
+      return provider.stream({
+        messages: request.messages,
+        options: mergedOptions,
+      })
+    }
+
+    // Fallback: single non-streaming call exposed as a one-delta stream.
+    const response = await this.generate(request, generateOptions)
+    const textStream = (async function* oneShot() {
+      yield response.content
+    })()
+    return { textStream, finished: Promise.resolve(response) }
+  }
+
+  /**
    * Convenience wrapper for JSON generation: parses and returns the object.
    * Throws JsonParseFailedError if the model returns non-JSON.
    */
@@ -564,18 +682,22 @@ class AiRouter {
   }
 
   private buildProviderChain(opts: GenerateOptions): ProviderId[] {
-    // If the request pins a model that looks provider-specific, try that
-    // provider first so the pinned model gets a chance before fallback.
+    // Single-provider strategy: production/dev each serve with exactly ONE
+    // provider (AI_PROVIDER env → GEMINI in dev, OPENAI in prod). No
+    // cross-provider fallback chains.
+    const chain = activeProviderChain()
+
+    // If the request pins a model that belongs to a DIFFERENT provider than
+    // the strategy, honor the pin by moving that provider to the front of
+    // the one-element chain — the pinned model is a deliberate choice.
     const pinned = opts.model
     if (pinned) {
-      for (const id of PROVIDER_FALLBACK_ORDER) {
-        const provider = getProvider(id)
-        if (provider?.availableModels.includes(pinned)) {
-          return [id, ...PROVIDER_FALLBACK_ORDER.filter((p) => p !== id)]
-        }
-      }
+      const owner = PROVIDER_FALLBACK_ORDER.find(
+        (id) => getProvider(id)?.availableModels.includes(pinned)
+      )
+      if (owner && !chain.includes(owner)) return [owner]
     }
-    return PROVIDER_FALLBACK_ORDER
+    return chain
   }
 
   private buildModelChain(

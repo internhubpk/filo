@@ -33,6 +33,7 @@ import { v } from "convex/values";
 import type { Id } from "./_generated/dataModel";
 import { internalMutation, internalQuery, mutation, query } from "./_generated/server";
 import { api, internal } from "./_generated/api";
+import { requireUser } from "./lib/session";
 
 // -----------------------------------------------------------------------------
 // Server token enforcement (mirrors convex/billing.ts — fail-closed)
@@ -76,6 +77,17 @@ export const getJob = query({
   },
 });
 
+/** SESSION-VERIFIED job read (client progress subscription). */
+export const getJobSession = query({
+  args: { session: v.string(), jobId: v.id("generationJobs") },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.session);
+    const job = await ctx.db.get(args.jobId);
+    if (!job || job.userId !== user._id) return null;
+    return job;
+  },
+});
+
 /** List a user's jobs (most recent first). */
 export const listUserJobs = query({
   args: { userId: v.id("users"), limit: v.optional(v.number()) },
@@ -83,6 +95,19 @@ export const listUserJobs = query({
     return await ctx.db
       .query("generationJobs")
       .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .order("desc")
+      .take(args.limit ?? 20);
+  },
+});
+
+/** SESSION-VERIFIED jobs list (client active-generations subscription). */
+export const listUserJobsSession = query({
+  args: { session: v.string(), limit: v.optional(v.number()) },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.session);
+    return await ctx.db
+      .query("generationJobs")
+      .withIndex("by_userId", (q) => q.eq("userId", user._id))
       .order("desc")
       .take(args.limit ?? 20);
   },

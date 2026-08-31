@@ -83,7 +83,7 @@ export function AdminShell({ children }: { children: React.ReactNode }) {
                 size="sm"
                 className="gap-1.5 text-muted-foreground hover:text-foreground"
               >
-                <Link href="/dashboard">
+                <Link href="/chat">
                   <AppWindow className="size-4" />
                   <span className="hidden sm:inline">Open app</span>
                 </Link>

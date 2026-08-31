@@ -35,14 +35,14 @@ function LoginForm() {
   useEffect(() => {
     if (apiClient.isAuthenticated()) {
       if (storedUser?.isAdmin) router.replace("/admin");
-      else router.replace(explicitNext?.startsWith("/") ? explicitNext : "/dashboard");
+      else router.replace(explicitNext?.startsWith("/") ? explicitNext : "/chat");
     }
      
   }, [storedUser?.isAdmin]);
 
   function destinationFor(isAdmin?: boolean): string {
     if (explicitNext?.startsWith("/")) return explicitNext;
-    return isAdmin ? "/admin" : "/dashboard";
+    return isAdmin ? "/admin" : "/chat";
   }
 
   async function onSubmit(e: React.FormEvent) {

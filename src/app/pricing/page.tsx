@@ -90,7 +90,7 @@ export default function PricingPage() {
       return;
     }
     if (plan.tier === "free") {
-      window.location.href = "/dashboard";
+      window.location.href = "/chat";
       return;
     }
     if (plan.contactSales) {
@@ -129,7 +129,7 @@ export default function PricingPage() {
             </Link>
           </Button>
           <Button asChild size="sm">
-            <Link href={user ? "/dashboard" : "/register"}>{user ? "Dashboard" : "Get started"}</Link>
+            <Link href={user ? "/chat" : "/register"}>{user ? "Open Filo" : "Get started"}</Link>
           </Button>
         </nav>
       </header>

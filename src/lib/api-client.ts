@@ -557,22 +557,6 @@ class ApiClient {
   }
 
   /**
-   * Admin manual activation: mark a pending checkout as paid + activate its
-   * subscription after the operator verified the payment as Complete in the
-   * Safepay dashboard. Audited server-side; admin-only.
-   */
-  async adminActivatePendingCheckout(input: {
-    subscriptionId?: string
-    userId?: string
-    note?: string
-  }): Promise<ApiResponse<{ paymentStatus?: string; subscriptionStatus?: string | null; message: string }>> {
-    return this.request('/admin/billing/activate-pending', {
-      method: 'POST',
-      body: JSON.stringify(input),
-    })
-  }
-
-  /**
    * Create the recurring plans on Safepay via the plans API and store the
    * returned Safepay plan ids on the Filo plan rows (admin-only).
    */
@@ -739,10 +723,10 @@ class ApiClient {
   }
 
   /**
-   * Admin: activate a user account (e.g. re-activating a suspended or
-   * legacy pending account). After this call, the user can generate.
+   * Admin: lift a suspension (suspended → active). Manual PLAN activation is
+   * removed — paid entitlements are granted exclusively by verified payments.
    */
-  async adminActivateUser(userId: string, opts?: { planId?: string; note?: string }): Promise<ApiResponse<{
+  async adminActivateUser(userId: string, opts?: { note?: string }): Promise<ApiResponse<{
     userId: string
     status: 'active'
     activatedAt: number

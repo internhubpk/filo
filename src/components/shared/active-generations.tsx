@@ -52,11 +52,11 @@ export function ActiveGenerations({
   /** Called when a previously-active job completes/fails (refresh signals). */
   onSettled?: () => void;
 }) {
-  const { user, ready } = useFiloSession();
+  const { user, token, ready } = useFiloSession();
 
   const jobs = useQuery(
-    api.generation.listUserJobs,
-    ready && user ? { userId: user.id as any, limit: 6 } : ("skip" as any)
+    api.generation.listUserJobsSession,
+    ready && user && token ? ({ session: token, limit: 6 } as any) : ("skip" as any)
   ) as Array<JobLike> | undefined;
 
   const active = (jobs ?? []).filter((j) => ACTIVE.has(j.status));
@@ -142,7 +142,7 @@ export function ActiveGenerations({
           {active.length === 1 ? "Generating in background" : `${active.length} generations in background`}
         </p>
         <Link
-          href="/create"
+          href="/chat"
           className="flex items-center gap-1 text-xs font-medium text-primary hover:underline"
         >
           Open <ArrowRight className="size-3" />

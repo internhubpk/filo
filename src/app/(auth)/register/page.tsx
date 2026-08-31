@@ -41,7 +41,7 @@ export default function RegisterPage() {
   const [accepted, setAccepted] = useState(false);
 
   useEffect(() => {
-    if (apiClient.isAuthenticated()) router.replace("/dashboard");
+    if (apiClient.isAuthenticated()) router.replace("/chat");
      
   }, []);
 
@@ -71,7 +71,7 @@ export default function RegisterPage() {
       }
       apiClient.storeSession(res.data.user as any, res.data.sessionToken);
       toast.success("Account created — welcome to Filo");
-      router.replace("/dashboard");
+      router.replace("/chat");
     } catch {
       setError("Could not reach the server. Check your connection and try again.");
     } finally {

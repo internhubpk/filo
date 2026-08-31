@@ -71,6 +71,18 @@ export interface AiResponse {
   finishReason?: string
 }
 
+/**
+ * Streaming generation handle (SSE under the hood for both Gemini and
+ * OpenAI). `textStream` yields incremental text deltas as they arrive;
+ * `finished` resolves once the upstream stream completes with the FULL
+ * normalized response (content = concatenation of every delta, real usage
+ * numbers included). `finished` rejects if the stream fails mid-flight.
+ */
+export interface AiStreamResult {
+  textStream: AsyncIterable<string>
+  finished: Promise<AiResponse>
+}
+
 /** Retry policy for a generation attempt. */
 export interface RetryPolicy {
   maxAttempts: number

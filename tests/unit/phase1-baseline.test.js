@@ -162,11 +162,13 @@ test('convex/artifacts.ts exposes listUserArtifacts query', () => {
 })
 
 test('UI pages use the sonner toast API correctly', () => {
-  // Any page that calls toast.* must import it from the sonner package.
+  // Any page/component that calls toast.* must import it from the sonner
+  // package. (REBUILD v2: the /create page was replaced by the chat
+  // workspace; the library below is the primary toast consumer now.)
   const pages = [
     'src/app/pricing/page.tsx',
     'src/app/(app)/billing/page.tsx',
-    'src/app/(app)/create/page.tsx',
+    'src/components/shared/artifacts-workspace.tsx',
   ]
   for (const rel of pages) {
     const path = resolve(REPO_ROOT, rel)
