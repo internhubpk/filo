@@ -270,20 +270,25 @@ export class OpenAiProvider implements AiProvider {
 
     const sse = parseSseStream(response.body)
 
-    async function* deltas(): AsyncGenerator<string, void, undefined> {
-      for await (const payload of sse) {
-        if (payload === '[DONE]') return
-        let chunk: {
-          choices?: Array<{ delta?: { content?: string } }>
-        }
-        try {
-          chunk = JSON.parse(payload)
-        } catch {
-          continue // keep-alive / partial event — skip, not fatal
-        }
-        const text = chunk.choices?.[0]?.delta?.content
-        if (text) yield text
-      }
+    // ---- SINGLE-PASS STREAM DISTRIBUTION ----
+    // Same contract as the Gemini adapter (see gemini.ts): the SSE generator
+    // is consumed EXACTLY ONCE by the background pump; the pump accumulates
+    // the full response AND forwards every text delta to `deltas()` via a
+    // wakeup queue. (Bug history: two concurrent consumers of one
+    // AsyncGenerator raced per chunk — replies streamed with random words
+    // missing and the persisted message was a different random half.)
+    //
+    // Note: reasoning models that stream `delta.reasoning_content` are
+    // handled by ONLY reading `delta.content` — thinking traces are dropped,
+    // never mixed into the visible reply.
+    const pending: string[] = []
+    let pumpDone = false
+    let pumpError: unknown = null
+    let wake: (() => void) | null = null
+    const kick = () => {
+      const w = wake
+      wake = null
+      w?.()
     }
 
     const finished = (async (): Promise<AiResponse> => {
@@ -314,7 +319,11 @@ export class OpenAiProvider implements AiProvider {
           }
           const choice = chunk.choices?.[0]
           const delta = choice?.delta?.content
-          if (delta) content += delta
+          if (delta) {
+            content += delta
+            pending.push(delta)
+            kick()
+          }
           const anns = choice?.delta?.annotations ?? choice?.message?.annotations
           if (anns?.length) citations.push(...anns)
           const fr = choice?.finish_reason
@@ -328,7 +337,8 @@ export class OpenAiProvider implements AiProvider {
           }
         }
         if (!content) {
-          throw new MalformedResponseError('OPENAI', 'stream produced no content')
+          pumpError = new MalformedResponseError('OPENAI', 'stream produced no content')
+          throw pumpError
         }
         const nativeSources: AiWebSource[] = mapOpenAiCitations(citations)
         return {
@@ -342,12 +352,35 @@ export class OpenAiProvider implements AiProvider {
           ...(nativeSources.length > 0 ? { sources: nativeSources } : {}),
         }
       } catch (err) {
+        pumpError = err
         if (err instanceof AiBaseError) throw err
         throw normalizeAiError('OPENAI', err)
       } finally {
+        pumpDone = true
+        kick()
         clearTimeout(timer)
       }
     })()
+
+    // If the caller bails out via the textStream error path it never awaits
+    // `finished` — swallow that rejection here to avoid unhandledRejection.
+    finished.catch(() => {})
+
+    async function* deltas(): AsyncGenerator<string, void, undefined> {
+      while (true) {
+        if (pending.length) {
+          yield pending.shift() as string
+          continue
+        }
+        if (pumpDone) {
+          if (pumpError) throw pumpError
+          return
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve
+        })
+      }
+    }
 
     return { textStream: deltas(), finished }
   }

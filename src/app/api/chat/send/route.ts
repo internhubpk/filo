@@ -43,6 +43,9 @@ interface ChatSendBody {
   mode?: "chat" | "document";
   artifactType?: string; // document | spreadsheet | presentation
   outputFormat?: string; // docx | pdf | xlsx | pptx
+  /** Optional per-request chat model pin (future UI picker). Validated
+   *  against a strict charset; unknown ids fail naturally at the provider. */
+  model?: string;
 }
 
 // ---- Context windows (bounded — oversized prompts slow every provider) ----
@@ -52,7 +55,41 @@ const MAX_CONTEXT_CHARS = 12_000;
 const MAX_SOURCE_CONTEXT_CHARS = 22_000; // planning prompt slices at 24k
 const TITLE_MAX_LEN = 60;
 
-const CHAT_SYSTEM_PROMPT = `You are Filo, an expert AI workspace assistant. You help users research topics, draft content, and prepare documents. Answer in clear, well-structured markdown: short paragraphs, headings when useful, bullet lists for enumerations, tables for comparisons. Be precise and concrete; prefer facts over filler. When the user's question builds on earlier messages in the conversation, use that context naturally. If you don't know something, say so briefly.`;
+// -----------------------------------------------------------------------------
+// Chat system prompt
+// -----------------------------------------------------------------------------
+// The old one-liner gave the model no identity, no capability map and no
+// formatting contract — it introduced itself as "It looks like workspace
+// assistant" and rambled. This version defines WHO Filo is, WHAT it can do
+// (chat, research + citations, drafting/editing, Document Mode hand-off) and
+// HOW to format for the chat renderer (markdown, code fences with language
+// tags, $ math, tables), plus honesty rules. Deliberately scoped to CHAT —
+// document generation keeps its own pipeline prompts (services/ai/prompts.ts).
+function buildChatSystemPrompt(webSearch: boolean): string {
+  const lines = [
+    "You are Filo — the AI assistant inside Filo, a workspace for researching, writing, and producing documents. You are knowledgeable, direct, and warm, and you take pride in answers that are immediately useful.",
+    "",
+    "WHAT YOU DO",
+    "- Answer questions and explain concepts clearly — facts over filler.",
+    "- Draft, edit, and improve writing: emails, reports, articles, summaries, plans, and code explanations.",
+    "- Research and organize: compare options, weigh trade-offs, structure findings.",
+    "- For full deliverables (a polished DOCX/PDF/XLSX/PPTX built from this conversation), tell the user to tap the Document (file) icon and switch to Document Mode — it turns everything discussed here into a formatted file.",
+    "",
+    "HOW YOU WRITE (the chat renders full markdown)",
+    "- Lead with the answer, then support it. Short paragraphs; add headings, bullet lists, and tables when they genuinely aid scanning — not decoration.",
+    "- Use **bold** sparingly for key terms. Write code in fenced blocks with a language tag. Write math in $...$ or $$...$$.",
+    "- Match the user's language and tone. No filler openers (\"Certainly!\", \"Great question!\") and no sign-offs.",
+    "- Never invent facts, numbers, quotes, or sources. If unsure, say what you know and what would need verification.",
+    "- Use the conversation history naturally. Ask a clarifying question only when the request is genuinely ambiguous — otherwise make a reasonable assumption and say it.",
+  ];
+  if (webSearch) {
+    lines.push(
+      "",
+      "WEB SEARCH is enabled: ground factual and current claims in live results, cite them inline as [title](url) where they support a point, and never present a link you have not seen in results. The app lists your top sources below the reply."
+    );
+  }
+  return lines.join("\n");
+}
 
 function errorResponse(error: string, code: string, status: number, extra?: Record<string, unknown>) {
   return Response.json({ success: false, error, code, ...(extra ? { data: extra } : {}) }, { status });
@@ -244,16 +281,32 @@ export async function POST(request: NextRequest) {
       const contextMessages = buildContextMessages(history, message);
       let assistantText = "";
 
+      // ---- Chat model pin (chat mode ONLY — document mode keeps its own
+      // cost-optimized task matrix) ----
+      // Precedence: client-supplied model (validated charset; future picker)
+      // > CHAT_MODEL env pin > provider default/task matrix. Pinning a model
+      // that belongs to another provider routes to THAT provider (the router
+      // honors pins across the registry), so e.g. CHAT_MODEL=gpt-5.6-sol
+      // requires AGENT_ROUTER_API_KEY to be configured.
+      const bodyModel =
+        typeof body.model === "string" && /^[A-Za-z0-9._/-]{1,120}$/.test(body.model)
+          ? body.model
+          : undefined;
+      const envModel = process.env.CHAT_MODEL?.trim() || undefined;
+      const chatModel = bodyModel || envModel;
+
       try {
         const result = await aiRouter.stream(
           {
             messages: [
-              { role: "system", content: CHAT_SYSTEM_PROMPT },
+              { role: "system", content: buildChatSystemPrompt(process.env.CHAT_WEB_SEARCH === "true") },
               ...contextMessages,
             ],
             options: {
               temperature: 0.7,
-              maxTokens: 2048,
+              // Reasoning models spend completion budget on thinking before
+              // the visible answer — 2048 truncated real replies mid-sentence.
+              maxTokens: 4096,
               // CHAT-ONLY native web grounding (env-gated, default off):
               //   GEMINI → google_search tool → groundingMetadata citations
               //   OPENAI → web_search_options (search-capable models) →
@@ -264,7 +317,7 @@ export async function POST(request: NextRequest) {
               webSearch: process.env.CHAT_WEB_SEARCH === "true",
             },
           },
-          { task: "generation" }
+          { task: "generation", ...(chatModel ? { model: chatModel } : {}) }
         );
 
         for await (const delta of result.textStream) {

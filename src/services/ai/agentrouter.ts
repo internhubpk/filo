@@ -39,9 +39,13 @@ import type {
   AiRequest,
   AiResponse,
   ProviderHealth,
+  AiStreamResult,
 } from './types'
 import type { AiProvider } from './provider'
-import { normalizeOpenAiCompatibleBaseUrl } from './provider'
+import {
+  normalizeOpenAiCompatibleBaseUrl,
+  parseSseStream,
+} from './provider'
 import {
   AiBaseError,
   ApiKeyMissingError,
@@ -225,6 +229,187 @@ export class AgentRouterModule implements AiProvider {
     } finally {
       clearTimeout(timer)
     }
+  }
+
+  /**
+   * Streaming generation (OpenAI-compatible SSE, `stream: true`).
+   *
+   * Reasoning-model note: the pool's reasoning models (deepseek-v4-flash,
+   * glm-5.3, gpt-5.6-sol) stream their thinking as `delta.reasoning_content`
+   * — a SEPARATE field from the answer. Only `delta.content` is read, so
+   * thinking traces are dropped, never mixed into the visible reply.
+   *
+   * stream_options { include_usage } is requested for real token counts but
+   * is not universal across gateways — a 400 retries once without it.
+   */
+  async stream(request: AiRequest): Promise<AiStreamResult> {
+    const apiKey = this.getApiKey()
+    const model = request.options?.model || this.defaultModel
+    const timeoutMs = request.options?.timeoutMs ?? 120_000
+    const startedAt = Date.now()
+    const opts = request.options
+
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+
+    const buildBody = (includeUsage: boolean): string =>
+      JSON.stringify({
+        model,
+        messages: request.messages,
+        stream: true,
+        ...(includeUsage ? { stream_options: { include_usage: true } } : {}),
+        temperature: opts?.temperature ?? 0.7,
+        max_tokens: opts?.maxTokens,
+        top_p: opts?.topP,
+        frequency_penalty: opts?.frequencyPenalty,
+        presence_penalty: opts?.presencePenalty,
+        stop: opts?.stopSequences,
+      })
+
+    let response: Response
+    try {
+      response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+        body: buildBody(true),
+      })
+
+      // Self-healing retry: some upstream models reject stream_options —
+      // retry once without include_usage rather than failing the chat.
+      if (!response.ok && response.status === 400) {
+        console.warn(
+          `[AI][AGENT_ROUTER] stream_options rejected on ${model} — retrying without include_usage`,
+        )
+        response = await fetch(`${this.getBaseUrl()}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: `Bearer ${apiKey}`,
+          },
+          signal: controller.signal,
+          body: buildBody(false),
+        })
+      }
+
+      if (!response.ok || !response.body) {
+        const errText = await response.text().catch(() => '')
+        clearTimeout(timer)
+        throw errorFromHttpStatus('AGENT_ROUTER', response.status, errText)
+      }
+    } catch (err) {
+      clearTimeout(timer)
+      throw normalizeAiError('AGENT_ROUTER', err)
+    }
+
+    const sse = parseSseStream(response.body)
+
+    // ---- SINGLE-PASS STREAM DISTRIBUTION ----
+    // Identical contract to the Gemini/OpenAI adapters (see gemini.ts): the
+    // SSE generator is consumed EXACTLY ONCE by the pump below, which feeds
+    // both the live delta stream and the persisted `finished.content`.
+    const pending: string[] = []
+    let pumpDone = false
+    let pumpError: unknown = null
+    let wake: (() => void) | null = null
+    const kick = () => {
+      const w = wake
+      wake = null
+      w?.()
+    }
+
+    const finished = (async (): Promise<AiResponse> => {
+      let content = ''
+      let finishReason: string | undefined
+      let usage = { promptTokens: 0, completionTokens: 0, totalTokens: 0 }
+      try {
+        for await (const payload of sse) {
+          if (payload === '[DONE]') break
+          let chunk: {
+            choices?: Array<{
+              delta?: {
+                content?: string
+                // Reasoning traces arrive here — deliberately IGNORED.
+                reasoning_content?: string
+                reasoning?: string
+              }
+              finish_reason?: string | null
+            }>
+            usage?: AgentRouterChatResponse['usage']
+          }
+          try {
+            chunk = JSON.parse(payload)
+          } catch {
+            continue
+          }
+          const choice = chunk.choices?.[0]
+          const delta = choice?.delta?.content
+          if (delta) {
+            content += delta
+            pending.push(delta)
+            kick()
+          }
+          const fr = choice?.finish_reason
+          if (fr) finishReason = fr
+          if (chunk.usage) {
+            usage = {
+              promptTokens: chunk.usage.prompt_tokens ?? 0,
+              completionTokens: chunk.usage.completion_tokens ?? 0,
+              totalTokens: chunk.usage.total_tokens ?? 0,
+            }
+          }
+        }
+        if (!content) {
+          pumpError = new MalformedResponseError(
+            'AGENT_ROUTER',
+            'stream produced no content',
+          )
+          throw pumpError
+        }
+        return {
+          id: `ar_${startedAt}`,
+          content,
+          usage,
+          provider: 'AGENT_ROUTER',
+          model,
+          durationMs: Date.now() - startedAt,
+          finishReason,
+        }
+      } catch (err) {
+        pumpError = err
+        if (err instanceof AiBaseError) throw err
+        throw normalizeAiError('AGENT_ROUTER', err)
+      } finally {
+        pumpDone = true
+        kick()
+        clearTimeout(timer)
+      }
+    })()
+
+    // If the caller bails out via the textStream error path it never awaits
+    // `finished` — swallow that rejection here to avoid unhandledRejection.
+    finished.catch(() => {})
+
+    async function* deltas(): AsyncGenerator<string, void, undefined> {
+      while (true) {
+        if (pending.length) {
+          yield pending.shift() as string
+          continue
+        }
+        if (pumpDone) {
+          if (pumpError) throw pumpError
+          return
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve
+        })
+      }
+    }
+
+    return { textStream: deltas(), finished }
   }
 
   async healthCheck(): Promise<ProviderHealth> {

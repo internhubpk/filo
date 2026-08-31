@@ -362,25 +362,28 @@ export class GeminiProvider implements AiProvider {
 
     const sse = parseSseStream(response.body)
 
-      async function* deltas(): AsyncGenerator<string, void, undefined> {
-        for await (const payload of sse) {
-          if (payload === '[DONE]') return
-          let chunk: GeminiGenerateContentResponse
-          try {
-            chunk = JSON.parse(payload) as GeminiGenerateContentResponse
-          } catch {
-            continue // keep-alive / partial event — skip, not fatal
-          }
-          const block = chunk.promptFeedback?.blockReason
-          if (block && block !== 'BLOCK_REASON_UNSPECIFIED') {
-            throw new ContentFilteredError('GEMINI', `prompt blocked: ${block}`)
-          }
-          const parts = chunk.candidates?.[0]?.content?.parts ?? []
-          for (const p of parts) {
-            if (p.text) yield p.text
-          }
-        }
-      }
+    // ---- SINGLE-PASS STREAM DISTRIBUTION ----
+    // The SSE generator is consumed EXACTLY ONCE by the background pump
+    // below. The pump accumulates the full response AND forwards every text
+    // delta to `deltas()` through a wakeup queue, so the client-visible
+    // stream and the persisted `finished.content` are guaranteed to contain
+    // the SAME bytes.
+    //
+    // Bug history (2026-08-31): `deltas()` and `finished` each iterated the
+    // same AsyncGenerator concurrently. An async generator hands each event
+    // to exactly ONE awaiter, so every SSE chunk went to either the live
+    // stream or the accumulator — never both. Replies reached users with
+    // random words/fragments missing (orphaned `**` markers, scrambled
+    // lists) and the persisted message was a different random half.
+    const pending: string[] = []
+    let pumpDone = false
+    let pumpError: unknown = null
+    let wake: (() => void) | null = null
+    const kick = () => {
+      const w = wake
+      wake = null
+      w?.()
+    }
 
     const finished = (async (): Promise<AiResponse> => {
       let content = ''
@@ -402,7 +405,11 @@ export class GeminiProvider implements AiProvider {
           }
           const parts = chunk.candidates?.[0]?.content?.parts ?? []
           for (const p of parts) {
-            if (p.text) content += p.text
+            if (p.text) {
+              content += p.text
+              pending.push(p.text)
+              kick()
+            }
           }
           // Grounding citations can arrive on ANY chunk — accumulate all.
           const gm = chunk.candidates?.[0]?.groundingMetadata?.groundingChunks
@@ -417,11 +424,17 @@ export class GeminiProvider implements AiProvider {
             }
           }
         }
+      } catch (err) {
+        pumpError = err
+        throw err
       } finally {
+        pumpDone = true
+        kick()
         clearTimeout(timer)
       }
       if (!content && !finishReason) {
-        throw new MalformedResponseError('GEMINI', 'stream produced no content')
+        pumpError = new MalformedResponseError('GEMINI', 'stream produced no content')
+        throw pumpError
       }
       const nativeSources: AiWebSource[] = mapGeminiGrounding(groundingChunks)
       return {
@@ -436,8 +449,26 @@ export class GeminiProvider implements AiProvider {
       }
     })()
 
-    // Surface pre-flight failures to the caller immediately.
+    // If the caller bails out via the textStream error path it never awaits
+    // `finished` — swallow that rejection here to avoid unhandledRejection.
     finished.catch(() => {})
+
+    async function* deltas(): AsyncGenerator<string, void, undefined> {
+      while (true) {
+        if (pending.length) {
+          yield pending.shift() as string
+          continue
+        }
+        if (pumpDone) {
+          if (pumpError) throw pumpError
+          return
+        }
+        await new Promise<void>((resolve) => {
+          wake = resolve
+        })
+      }
+    }
+
     return { textStream: deltas(), finished }
   }
 
