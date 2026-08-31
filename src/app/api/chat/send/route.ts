@@ -30,6 +30,7 @@ import { api } from "@convex/_generated/api";
 import { getConvexClient } from "@/lib/convex-server";
 import { isAiChatAllowedForPlan, type PlanEntitlementDoc } from "@/lib/ai-entitlement";
 import { aiRouter, userSafeAiMessage, AllProvidersFailedError } from "@/services/ai";
+import { extractWebSources } from "@/lib/web-sources";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -268,7 +269,10 @@ export async function POST(request: NextRequest) {
         }
 
         // Persist the assistant reply — the reactive transcript takes over
-        // from the client's local stream buffer.
+        // from the client's local stream buffer. Web resources cited by the
+        // reply (if any) ride along in metadata.sources and render as the
+        // "Web resources" strip in the chat UI.
+        const webSources = extractWebSources(assistantText);
         await convex.mutation(api.chats.appendMessage, {
           session: token,
           chatId: chatId as any,
@@ -279,6 +283,7 @@ export async function POST(request: NextRequest) {
             provider: final.provider,
             usage: final.usage,
             durationMs: final.durationMs,
+            ...(webSources.length > 0 ? { sources: webSources } : {}),
           },
         });
 

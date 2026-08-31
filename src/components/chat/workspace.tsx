@@ -29,6 +29,8 @@ import React, {
 import { useRouter } from "next/navigation";
 import { useMutation, useQuery } from "convex/react";
 import {
+  Check,
+  Copy,
   FileText,
   Loader2,
   Menu,
@@ -59,6 +61,7 @@ import {
 import { HistoryPanel } from "@/components/chat/history-panel";
 import { Composer, type ComposerMode, type DocFormat } from "@/components/chat/composer";
 import { ChatMarkdown } from "@/components/chat/chat-markdown";
+import { SourcesBlock, toChatSources } from "@/components/chat/sources-block";
 import { GenerationCard } from "@/components/chat/generation-card";
 import { ShareChatDialog } from "@/components/chat/share-dialog";
 
@@ -76,6 +79,9 @@ interface TranscriptMessage {
     error?: string;
     model?: string;
     provider?: string;
+    // Web-grounding citations attached by the chat backend when the reply
+    // used web results: [{ title, url, snippet? }, …]
+    sources?: { title: string; url: string; snippet?: string }[];
   } | null;
   createdAt: number;
 }
@@ -488,9 +494,11 @@ function MessageRow({ message }: { message: TranscriptMessage }) {
     );
   }
 
+  const sources = toChatSources(message.metadata?.sources);
   return (
-    <AssistantMessage>
+    <AssistantMessage rawContent={message.content || undefined}>
       {message.content ? <ChatMarkdown content={message.content} /> : null}
+      {sources.length > 0 ? <SourcesBlock sources={sources} /> : null}
       {message.metadata?.kind === "generation" && message.metadata.jobId ? (
         <GenerationCard
           jobId={message.metadata.jobId}
@@ -512,13 +520,36 @@ function UserBubble({ content, pending }: { content: string; pending?: boolean }
   );
 }
 
-function AssistantMessage({ children }: { children: ReactNode }) {
+function AssistantMessage({
+  children,
+  rawContent,
+}: {
+  children: ReactNode;
+  /** Raw markdown of the message — when present a hover copy button appears. */
+  rawContent?: string;
+}) {
+  const [copied, setCopied] = useState(false);
   return (
-    <div className="mb-5 flex items-start gap-2.5">
+    <div className="group relative mb-5 flex items-start gap-2.5">
       <Avatar className="mt-0.5 size-7 shrink-0 border border-primary/20 bg-primary/10">
         <AvatarFallback className="text-[10px] font-semibold text-primary">F</AvatarFallback>
       </Avatar>
       <div className="min-w-0 flex-1">{children}</div>
+      {rawContent ? (
+        <button
+          onClick={() => {
+            void navigator.clipboard.writeText(rawContent).then(() => {
+              setCopied(true);
+              setTimeout(() => setCopied(false), 1600);
+            });
+          }}
+          className="absolute right-0 top-0 flex items-center gap-1 rounded-md border bg-background/80 px-1.5 py-1 text-[11px] text-muted-foreground opacity-0 backdrop-blur transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+          aria-label="Copy message"
+          title="Copy message"
+        >
+          {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+        </button>
+      ) : null}
     </div>
   );
 }
