@@ -55,6 +55,11 @@ export interface AiRequestOptions {
    *  models (url_citation annotations); unsupported providers/models ignore
    *  it fail-soft and the caller falls back to link extraction. */
   webSearch?: boolean
+  /** Reasoning depth for thinking models (gpt-5.x / o-series). Lower =
+   *  faster first token ('low' makes chat replies start in ~ms instead of
+   *  seconds of silence). Ignored by non-reasoning models and providers
+   *  without an equivalent knob. */
+  reasoningEffort?: 'minimal' | 'low' | 'medium' | 'high'
 }
 
 /** A complete generation request. */

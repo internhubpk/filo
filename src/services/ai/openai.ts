@@ -219,6 +219,11 @@ export class OpenAiProvider implements AiProvider {
       model,
       messages: request.messages,
       ...sampling,
+      // Reasoning depth — only for thinking models (gpt-5.x / o-series);
+      // 'low' cuts seconds of silent thinking off the first token.
+      ...(isReasoningModel(model) && opts?.reasoningEffort
+        ? { reasoning_effort: opts.reasoningEffort }
+        : {}),
       ...(flags.useMaxCompletionTokens
         ? { max_completion_tokens: opts?.maxTokens }
         : { max_tokens: opts?.maxTokens }),

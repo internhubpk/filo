@@ -298,6 +298,17 @@ export async function POST(request: NextRequest) {
       const envModel = process.env.CHAT_MODEL?.trim() || undefined;
       const chatModel = bodyModel || envModel;
 
+      // Reasoning depth for thinking models (gpt-5.x / o-series) — 'low'
+      // cuts seconds of silent "Thinking…" off the first token so replies
+      // start in ~ms. Env-overridable; document generation is unaffected
+      // (it keeps the provider default for quality).
+      const rawEffort = process.env.CHAT_REASONING_EFFORT?.trim().toLowerCase();
+      const reasoningEffort = (
+        ["minimal", "low", "medium", "high"] as readonly (string | undefined)[]
+      ).includes(rawEffort)
+        ? (rawEffort as "minimal" | "low" | "medium" | "high")
+        : "low";
+
       try {
         const result = await aiRouter.stream(
           {
@@ -310,6 +321,7 @@ export async function POST(request: NextRequest) {
               // Reasoning models spend completion budget on thinking before
               // the visible answer — 2048 truncated real replies mid-sentence.
               maxTokens: 4096,
+              reasoningEffort,
               // CHAT-ONLY native web grounding (env-gated, default off):
               //   GEMINI → google_search tool → groundingMetadata citations
               //   OPENAI → web_search_options (search-capable models) →

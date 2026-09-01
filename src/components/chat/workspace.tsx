@@ -177,9 +177,6 @@ export function ChatWorkspace({
   const [busy, setBusy] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
-  // The blinking caret is tied to ACTIVE typing only — never during the
-  // thinking phase, never after the backlog drains, never after handoff.
-  const [caretOn, setCaretOn] = useState(false);
   // Synchronous send-guard: React state (`streaming`) only updates on the
   // next render, so two rapid Enter presses could both slip past the async
   // guard and start two interleaved SSE streams. A ref closes that race.
@@ -201,7 +198,6 @@ export function ChatWorkspace({
     sseDoneRef.current = false;
     setStreamTarget("");
     setStreamText("");
-    setCaretOn(false); // THINKING phase — dots only, no caret yet
     let resolve: () => void = () => {};
     const promise = new Promise<void>((r) => {
       resolve = r;
@@ -213,18 +209,17 @@ export function ChatWorkspace({
         const target = targetRef.current;
         if (shownLenRef.current < target.length) {
           const remaining = target.length - shownLenRef.current;
-          // Adaptive reveal: up to 10 chars per frame while the backlog is
-          // deep (keeps pace with fast generators), decelerating to a fine
-          // letter-rate as it catches up.
-          const step = Math.min(10, Math.max(1, Math.ceil(remaining / 10)));
+          // Adaptive reveal — FAST: a deep backlog burns at up to 60 chars
+          // per frame (~3600 chars/s) so the reply lands in about a second
+          // once the server is done, decelerating to a fine 2-char letter
+          // rate at the tail. The flowing text itself is the typing
+          // indicator — no extra blinking cursor is rendered.
+          const step = Math.min(60, Math.max(2, Math.ceil(remaining / 6)));
           shownLenRef.current = Math.min(target.length, shownLenRef.current + step);
           setStreamText(target.slice(0, shownLenRef.current));
         }
         if (sseDoneRef.current && shownLenRef.current >= target.length) {
-          // Drain complete — kill the caret BEFORE the handoff so no cursor
-          // can ever linger on the finished message.
-          setCaretOn(false);
-          typingDoneRef.current?.resolve(); // done — transcript takes over
+          typingDoneRef.current?.resolve(); // drained — transcript takes over
           return;
         }
         rafRef.current = requestAnimationFrame(tick);
@@ -233,12 +228,11 @@ export function ChatWorkspace({
     }
   }, []);
 
-  /** Append a server delta to the typewriter backlog. The first delta ends
-   *  the THINKING phase and starts TYPING (caret on). */
+  /** Append a server delta to the typewriter backlog. The first delta also
+   *  ends the THINKING phase — the dots swap for the flowing reply text. */
   const pushStreamText = useCallback((delta: string) => {
     targetRef.current += delta;
     setStreamTarget(targetRef.current);
-    setCaretOn(true);
   }, []);
 
   /** Mark the server side as finished — the typewriter drains, then resolves. */
@@ -258,7 +252,6 @@ export function ChatWorkspace({
     shownLenRef.current = 0;
     setStreamTarget("");
     setStreamText(null);
-    setCaretOn(false);
   }, []);
 
   /** SUCCESS handoff: the reply finished typing — drop the streaming bubble
@@ -276,7 +269,6 @@ export function ChatWorkspace({
     shownLenRef.current = 0;
     setStreamTarget("");
     setStreamText(null);
-    setCaretOn(false);
   }, []);
 
   // Stop the rAF loop on unmount (state updates on an unmounted component
@@ -587,9 +579,7 @@ export function ChatWorkspace({
                   {streamText!.length === 0 ? (
                     <ThinkingIndicator />
                   ) : (
-                    <div className={caretOn ? "type-caret" : undefined}>
-                      <ChatMarkdown content={streamText!} />
-                    </div>
+                    <ChatMarkdown content={streamText!} />
                   )}
                 </AssistantMessage>
               ) : null}
