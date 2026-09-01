@@ -177,6 +177,13 @@ export function ChatWorkspace({
   const [busy, setBusy] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  // The blinking caret is tied to ACTIVE typing only — never during the
+  // thinking phase, never after the backlog drains, never after handoff.
+  const [caretOn, setCaretOn] = useState(false);
+  // Synchronous send-guard: React state (`streaming`) only updates on the
+  // next render, so two rapid Enter presses could both slip past the async
+  // guard and start two interleaved SSE streams. A ref closes that race.
+  const sendingRef = useRef(false);
 
   // ---- Typewriter engine ----
   const targetRef = useRef(""); // authoritative full text (read by the rAF loop)
@@ -194,6 +201,7 @@ export function ChatWorkspace({
     sseDoneRef.current = false;
     setStreamTarget("");
     setStreamText("");
+    setCaretOn(false); // THINKING phase — dots only, no caret yet
     let resolve: () => void = () => {};
     const promise = new Promise<void>((r) => {
       resolve = r;
@@ -213,6 +221,9 @@ export function ChatWorkspace({
           setStreamText(target.slice(0, shownLenRef.current));
         }
         if (sseDoneRef.current && shownLenRef.current >= target.length) {
+          // Drain complete — kill the caret BEFORE the handoff so no cursor
+          // can ever linger on the finished message.
+          setCaretOn(false);
           typingDoneRef.current?.resolve(); // done — transcript takes over
           return;
         }
@@ -222,10 +233,12 @@ export function ChatWorkspace({
     }
   }, []);
 
-  /** Append a server delta to the typewriter backlog. */
+  /** Append a server delta to the typewriter backlog. The first delta ends
+   *  the THINKING phase and starts TYPING (caret on). */
   const pushStreamText = useCallback((delta: string) => {
     targetRef.current += delta;
     setStreamTarget(targetRef.current);
+    setCaretOn(true);
   }, []);
 
   /** Mark the server side as finished — the typewriter drains, then resolves. */
@@ -245,6 +258,25 @@ export function ChatWorkspace({
     shownLenRef.current = 0;
     setStreamTarget("");
     setStreamText(null);
+    setCaretOn(false);
+  }, []);
+
+  /** SUCCESS handoff: the reply finished typing — drop the streaming bubble
+   *  entirely so the persisted transcript row (copy button, sources) takes
+   *  over. This is what makes the cursor disappear and the copy action
+   *  appear the moment the message completes. */
+  const finalizeStream = useCallback(() => {
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    sseDoneRef.current = false;
+    typingDoneRef.current = null;
+    targetRef.current = "";
+    shownLenRef.current = 0;
+    setStreamTarget("");
+    setStreamText(null);
+    setCaretOn(false);
   }, []);
 
   // Stop the rAF loop on unmount (state updates on an unmounted component
@@ -308,7 +340,8 @@ export function ChatWorkspace({
   // ---- Send ----
   const send = useCallback(
     async (text: string) => {
-      if (!token || streaming) return;
+      if (!token || streaming || sendingRef.current) return;
+      sendingRef.current = true;
       setPendingUser({ content: text, at: Date.now() });
       setBusy(true);
       setSendError(null);
@@ -368,7 +401,8 @@ export function ChatWorkspace({
         let buffer = "";
         let errored: string | null = null;
 
-        while (true) {
+        let finished = false;
+        while (!finished) {
           const { done, value } = await reader.read();
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
@@ -390,6 +424,7 @@ export function ChatWorkspace({
             } else if (evt.type === "error") {
               errored = evt.error ?? "The AI service failed";
             } else if (evt.type === "done") {
+              finished = true; // stop reading — the server is done
               break;
             }
           }
@@ -398,10 +433,16 @@ export function ChatWorkspace({
         if (errored) throw new Error(errored);
         // Server finished — let the typewriter drain the remaining backlog,
         // THEN hand the message over to the persisted transcript (avoids a
-        // half-typed handoff and keeps the copy/sources row appearing only
-        // once the reply is complete).
+        // half-typed handoff; the copy/sources row appears only once the
+        // reply is complete). The race covers a backgrounded tab — rAF
+        // doesn't tick there, and the caret must never hang on frames that
+        // never come.
         endStreamTarget();
-        await typingDoneRef.current?.promise;
+        await Promise.race([
+          typingDoneRef.current?.promise ?? Promise.resolve(),
+          new Promise((r) => setTimeout(r, 6000)),
+        ]);
+        finalizeStream(); // bubble out → transcript row (copy, sources) in
         setPendingUser(null);
       } catch (sendErr) {
         cancelStream();
@@ -411,11 +452,23 @@ export function ChatWorkspace({
         }
         setPendingUser(null);
       } finally {
+        sendingRef.current = false;
         setBusy(false);
         abortRef.current = null;
       }
     },
-    [token, chatId, mode, format, streaming, beginStream, pushStreamText, endStreamTarget, cancelStream]
+    [
+      token,
+      chatId,
+      mode,
+      format,
+      streaming,
+      beginStream,
+      pushStreamText,
+      endStreamTarget,
+      finalizeStream,
+      cancelStream,
+    ]
   );
 
   const stop = useCallback(() => {
@@ -534,7 +587,7 @@ export function ChatWorkspace({
                   {streamText!.length === 0 ? (
                     <ThinkingIndicator />
                   ) : (
-                    <div className="type-caret">
+                    <div className={caretOn ? "type-caret" : undefined}>
                       <ChatMarkdown content={streamText!} />
                     </div>
                   )}
