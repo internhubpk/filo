@@ -32,7 +32,6 @@ import {
   Check,
   Copy,
   FileText,
-  Loader2,
   Menu,
   MessageSquare,
   Plus,
@@ -168,13 +167,94 @@ export function ChatWorkspace({
   ) as TranscriptMessage[] | null | undefined;
 
   // ---- Streaming + optimistic state ----
+  // streamText is the LETTER-BY-LETTER displayed text; streamTarget is the
+  // full text received from the server. A rAF typewriter loop reveals the
+  // backlog at a steady adaptive rate so irregular server chunks read as
+  // continuous typing instead of blocks popping in.
   const [streamText, setStreamText] = useState<string | null>(null);
+  const [streamTarget, setStreamTarget] = useState("");
   const [pendingUser, setPendingUser] = useState<{ content: string; at: number } | null>(null);
   const [busy, setBusy] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const abortRef = useRef<AbortController | null>(null);
 
+  // ---- Typewriter engine ----
+  const targetRef = useRef(""); // authoritative full text (read by the rAF loop)
+  const shownLenRef = useRef(0); // how many characters are currently displayed
+  const sseDoneRef = useRef(false); // server finished sending
+  const rafRef = useRef<number | null>(null);
+  const typingDoneRef = useRef<{ promise: Promise<void>; resolve: () => void } | null>(null);
+
   const streaming = streamText !== null;
+
+  /** Start a fresh chat stream: THINKING phase, rAF loop running. */
+  const beginStream = useCallback(() => {
+    targetRef.current = "";
+    shownLenRef.current = 0;
+    sseDoneRef.current = false;
+    setStreamTarget("");
+    setStreamText("");
+    let resolve: () => void = () => {};
+    const promise = new Promise<void>((r) => {
+      resolve = r;
+    });
+    typingDoneRef.current = { promise, resolve };
+    if (rafRef.current === null) {
+      const tick = () => {
+        rafRef.current = null;
+        const target = targetRef.current;
+        if (shownLenRef.current < target.length) {
+          const remaining = target.length - shownLenRef.current;
+          // Adaptive reveal: up to 10 chars per frame while the backlog is
+          // deep (keeps pace with fast generators), decelerating to a fine
+          // letter-rate as it catches up.
+          const step = Math.min(10, Math.max(1, Math.ceil(remaining / 10)));
+          shownLenRef.current = Math.min(target.length, shownLenRef.current + step);
+          setStreamText(target.slice(0, shownLenRef.current));
+        }
+        if (sseDoneRef.current && shownLenRef.current >= target.length) {
+          typingDoneRef.current?.resolve(); // done — transcript takes over
+          return;
+        }
+        rafRef.current = requestAnimationFrame(tick);
+      };
+      rafRef.current = requestAnimationFrame(tick);
+    }
+  }, []);
+
+  /** Append a server delta to the typewriter backlog. */
+  const pushStreamText = useCallback((delta: string) => {
+    targetRef.current += delta;
+    setStreamTarget(targetRef.current);
+  }, []);
+
+  /** Mark the server side as finished — the typewriter drains, then resolves. */
+  const endStreamTarget = useCallback(() => {
+    sseDoneRef.current = true;
+  }, []);
+
+  /** Kill the stream immediately (error / abort) and clear all its state. */
+  const cancelStream = useCallback(() => {
+    sseDoneRef.current = false;
+    if (rafRef.current !== null) {
+      cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    }
+    typingDoneRef.current = null;
+    targetRef.current = "";
+    shownLenRef.current = 0;
+    setStreamTarget("");
+    setStreamText(null);
+  }, []);
+
+  // Stop the rAF loop on unmount (state updates on an unmounted component
+  // are no-ops, but the loop itself must not keep running).
+  useEffect(() => {
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current);
+      rafRef.current = null;
+    };
+  }, []);
 
   useEffect(() => {
     if (!sendError) return;
@@ -190,15 +270,25 @@ export function ChatWorkspace({
     );
   }, [pendingUser, messages]);
 
-  const streamReflected = useMemo(() => {
-    if (!streamText || !messages?.length) return false;
+  // While the letter-by-letter stream is in flight, the freshly persisted
+  // assistant row is hidden — the typing bubble is the sole renderer until
+  // the typewriter drains, then the transcript row (copy button, sources,
+  // generation card) takes over seamlessly with identical content.
+  const visibleMessages = useMemo(() => {
+    if (!messages || !streaming || streamTarget === "") return messages;
     const last = messages[messages.length - 1];
-    return (
+    if (
+      last &&
       last.role === "assistant" &&
       last.content.length > 0 &&
-      (streamText === last.content || last.content.startsWith(streamText.slice(0, 80)))
-    );
-  }, [streamText, messages]);
+      (last.content === streamTarget ||
+        last.content.startsWith(streamTarget) ||
+        streamTarget.startsWith(last.content))
+    ) {
+      return messages.slice(0, -1);
+    }
+    return messages;
+  }, [messages, streaming, streamTarget]);
 
   // ---- Scroll management: follow new content unless the user scrolled up ----
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -226,6 +316,11 @@ export function ChatWorkspace({
       const currentChatId = chatId;
       const currentMode = mode;
       const currentFormat = format;
+
+      // Chat mode: the THINKING indicator is visible from the first
+      // millisecond (network + model latency included); the same bubble then
+      // turns into the letter-by-letter stream.
+      if (currentMode === "chat") beginStream();
 
       try {
         const ac = new AbortController();
@@ -266,12 +361,11 @@ export function ChatWorkspace({
           return;
         }
 
-        // ---- SSE stream ----
+        // ---- SSE stream (deltas feed the typewriter backlog) ----
         const reader = res.body?.getReader();
         if (!reader) throw new Error("Streaming is not supported in this browser");
         const decoder = new TextDecoder();
         let buffer = "";
-        let acc = "";
         let errored: string | null = null;
 
         while (true) {
@@ -292,8 +386,7 @@ export function ChatWorkspace({
             if (evt.type === "meta" && evt.chatId && !currentChatId) {
               setChatId(evt.chatId);
             } else if (evt.type === "delta" && evt.text) {
-              acc += evt.text;
-              setStreamText(acc);
+              pushStreamText(evt.text);
             } else if (evt.type === "error") {
               errored = evt.error ?? "The AI service failed";
             } else if (evt.type === "done") {
@@ -303,20 +396,26 @@ export function ChatWorkspace({
         }
 
         if (errored) throw new Error(errored);
+        // Server finished — let the typewriter drain the remaining backlog,
+        // THEN hand the message over to the persisted transcript (avoids a
+        // half-typed handoff and keeps the copy/sources row appearing only
+        // once the reply is complete).
+        endStreamTarget();
+        await typingDoneRef.current?.promise;
         setPendingUser(null);
       } catch (sendErr) {
+        cancelStream();
         const aborted = sendErr instanceof DOMException && sendErr.name === "AbortError";
         if (!aborted) {
           setSendError(sendErr instanceof Error ? sendErr.message : "Something went wrong");
         }
         setPendingUser(null);
       } finally {
-        setStreamText(null);
         setBusy(false);
         abortRef.current = null;
       }
     },
-    [token, chatId, mode, format, streaming]
+    [token, chatId, mode, format, streaming, beginStream, pushStreamText, endStreamTarget, cancelStream]
   );
 
   const stop = useCallback(() => {
@@ -324,11 +423,14 @@ export function ChatWorkspace({
   }, []);
 
   const openChat = useCallback((id: string) => {
+    // Leaving mid-stream aborts the fetch (catch → cancelStream cleans up).
+    abortRef.current?.abort();
     setChatId(id);
     setHistoryOpen(false);
   }, []);
 
   const newChat = useCallback(() => {
+    abortRef.current?.abort();
     setChatId(null);
     setHistoryOpen(false);
     router.push("/chat");
@@ -421,20 +523,20 @@ export function ChatWorkspace({
 
               {messages === undefined && chatId ? <TranscriptSkeleton /> : null}
 
-              {messages?.map((m) => (
+              {visibleMessages?.map((m) => (
                 <MessageRow key={m._id} message={m} />
               ))}
 
               {pendingUser && !pendingReflected ? <UserBubble content={pendingUser.content} pending /> : null}
 
-              {streaming && !streamReflected ? (
+              {streaming ? (
                 <AssistantMessage>
                   {streamText!.length === 0 ? (
-                    <span className="flex items-center gap-2 text-sm text-muted-foreground">
-                      <Loader2 className="size-3.5 animate-spin" /> Thinking…
-                    </span>
+                    <ThinkingIndicator />
                   ) : (
-                    <ChatMarkdown content={streamText!} />
+                    <div className="type-caret">
+                      <ChatMarkdown content={streamText!} />
+                    </div>
                   )}
                 </AssistantMessage>
               ) : null}
@@ -525,7 +627,8 @@ function AssistantMessage({
   rawContent,
 }: {
   children: ReactNode;
-  /** Raw markdown of the message — when present a hover copy button appears. */
+  /** Raw markdown of the message — when present a copy action appears
+   *  BELOW the response (always visible, quiet styling). */
   rawContent?: string;
 }) {
   const [copied, setCopied] = useState(false);
@@ -534,23 +637,48 @@ function AssistantMessage({
       <Avatar className="mt-0.5 size-7 shrink-0 border border-primary/20 bg-primary/10">
         <AvatarFallback className="text-[10px] font-semibold text-primary">F</AvatarFallback>
       </Avatar>
-      <div className="min-w-0 flex-1">{children}</div>
-      {rawContent ? (
-        <button
-          onClick={() => {
-            void navigator.clipboard.writeText(rawContent).then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 1600);
-            });
-          }}
-          className="absolute right-0 top-0 flex items-center gap-1 rounded-md border bg-background/80 px-1.5 py-1 text-[11px] text-muted-foreground opacity-0 backdrop-blur transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
-          aria-label="Copy message"
-          title="Copy message"
-        >
-          {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
-        </button>
-      ) : null}
+      <div className="min-w-0 flex-1">
+        {children}
+        {rawContent ? (
+          <div className="mt-1 flex items-center">
+            <button
+              onClick={() => {
+                void navigator.clipboard.writeText(rawContent).then(() => {
+                  setCopied(true);
+                  setTimeout(() => setCopied(false), 1600);
+                });
+              }}
+              className={cn(
+                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+                copied && "text-success hover:text-success"
+              )}
+              aria-label="Copy message"
+              title="Copy message"
+            >
+              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+          </div>
+        ) : null}
+      </div>
     </div>
+  );
+}
+
+// =============================================================================
+// ThinkingIndicator — shown from the moment a chat message is sent until the
+// first typed characters arrive (three bouncing dots + label).
+// =============================================================================
+function ThinkingIndicator() {
+  return (
+    <span className="flex items-center gap-2.5 py-1 text-sm text-muted-foreground" role="status">
+      <span className="thinking-dots" aria-hidden>
+        <i />
+        <i />
+        <i />
+      </span>
+      Thinking…
+    </span>
   );
 }
 
