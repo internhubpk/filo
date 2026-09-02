@@ -413,93 +413,89 @@
 }
 
 /* ============================================================
-   Welcome glyph (chat empty state) — animated document SVG.
-   The sheet + fold draw in once, the text lines write in a
-   slow staggered loop, sparkles twinkle, and the whole glyph
-   drifts. Reduced motion: the global override above collapses
-   these to a single instant run → the finished document.
+   Welcome orb (chat empty state) — an "AI aurora" ring around
+   the Filo mark. Two counter-rotating conic arcs + a breathing
+   glow. Transform/opacity-only keyframes → GPU-composited and
+   always smooth. Reduced motion: the global override above
+   collapses the loops to a single instant run → static orb.
    ============================================================ */
-.wg-sheet,
-.wg-fold {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  animation: wg-draw 0.9s cubic-bezier(0.16, 1, 0.3, 1) both;
+.wg-orb-glow {
+  background: radial-gradient(
+    closest-side,
+    color-mix(in oklch, var(--primary) 28%, transparent),
+    transparent 72%
+  );
+  animation: wg-breathe 4.5s ease-in-out infinite;
 }
-.wg-fold {
-  animation-delay: 0.35s;
+
+.wg-orb-arc {
+  background: conic-gradient(
+    from 0deg,
+    transparent 0deg,
+    var(--primary) 55deg,
+    transparent 115deg
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2.5px),
+    #000 calc(100% - 1.5px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2.5px),
+    #000 calc(100% - 1.5px)
+  );
+  animation: wg-spin 7s linear infinite;
 }
-@keyframes wg-draw {
+
+.wg-orb-arc-inner {
+  background: conic-gradient(
+    from 180deg,
+    transparent 0deg,
+    color-mix(in oklch, var(--primary) 55%, transparent) 45deg,
+    transparent 95deg
+  );
+  -webkit-mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 1px)
+  );
+  mask: radial-gradient(
+    farthest-side,
+    transparent calc(100% - 2px),
+    #000 calc(100% - 1px)
+  );
+  animation: wg-spin 4.2s linear infinite reverse;
+}
+
+.wg-orb-mark {
+  animation: wg-bob 3.6s ease-in-out infinite;
+}
+
+@keyframes wg-spin {
   to {
-    stroke-dashoffset: 0;
+    transform: rotate(360deg);
   }
 }
 
-.wg-line {
-  stroke-dasharray: 1;
-  stroke-dashoffset: 1;
-  opacity: 0;
-  animation: wg-write 4.8s ease-in-out infinite;
-}
-.wg-line-1 {
-  animation-delay: 1s;
-}
-.wg-line-2 {
-  animation-delay: 1.45s;
-}
-.wg-line-3 {
-  animation-delay: 1.9s;
-}
-@keyframes wg-write {
-  0% {
-    stroke-dashoffset: 1;
-    opacity: 0;
-  }
-  4% {
-    opacity: 1;
-  }
-  18% {
-    stroke-dashoffset: 0;
-  }
-  72% {
-    stroke-dashoffset: 0;
-    opacity: 1;
-  }
-  82%,
-  100% {
-    stroke-dashoffset: 0;
-    opacity: 0;
-  }
-}
-
-.wg-spark {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: wg-twinkle 2.6s ease-in-out infinite;
-}
-.wg-spark-b {
-  animation-delay: 1.3s;
-}
-@keyframes wg-twinkle {
+@keyframes wg-breathe {
   0%,
   100% {
-    opacity: 0.35;
-    transform: scale(0.72) rotate(0deg);
+    transform: scale(1);
+    opacity: 0.7;
   }
   50% {
+    transform: scale(1.12);
     opacity: 1;
-    transform: scale(1.08) rotate(18deg);
   }
 }
 
-.wg-float {
-  animation: wg-float 5.2s ease-in-out infinite;
-}
-@keyframes wg-float {
+@keyframes wg-bob {
   0%,
   100% {
     transform: translateY(0);
   }
   50% {
-    transform: translateY(-3px);
+    transform: translateY(-2px);
   }
 }

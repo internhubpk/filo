@@ -7,11 +7,11 @@
 // Presentations / Files / Billing / Settings) is GONE. Filo is now a
 // chat-centered workspace:
 //
-//   ┌──┬──────────────────────────────────────────┐
-//   │rail│  page content (full height)           │
-//   └──┴──────────────────────────────────────────┘
+//   ┌──────────────────────────────────────────┬──┐
+//   │  page content (full height)              │rail│
+//   └──────────────────────────────────────────┴──┘
 //
-//   rail — 56px, icon-only, every icon meaningful:
+//   rail — 56px, icon-only, pinned to the RIGHT edge; every icon meaningful:
 //     • Filo logo        → home (/chat)
 //     • New chat         → /chat (fresh conversation)
 //     • Documents        → /documents (the library)
@@ -117,6 +117,9 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <TooltipProvider delayDuration={RAIL_TOOLTIP.delayDuration} skipDelayDuration={RAIL_TOOLTIP.skipDelayDuration}>
       <div className="flex h-screen overflow-hidden bg-background">
+        {/* Main column — pages own their full height (chat scrolls internally) */}
+        <div className="flex min-w-0 flex-1 flex-col">{children}</div>
+
         <Rail
           isChat={isChat}
           userName={user.name}
@@ -124,9 +127,6 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           onLogout={logout}
           planHint={user.planId ? undefined : "Free plan"}
         />
-
-        {/* Main column — pages own their full height (chat scrolls internally) */}
-        <div className="flex min-w-0 flex-1 flex-col">{children}</div>
 
         <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
       </div>
@@ -151,7 +151,7 @@ function Rail({
 }) {
   return (
     <aside
-      className="z-30 flex h-full w-14 shrink-0 flex-col items-center border-r bg-sidebar py-3 text-sidebar-foreground"
+      className="z-30 flex h-full w-14 shrink-0 flex-col items-center border-l bg-sidebar py-3 text-sidebar-foreground"
       aria-label="Primary navigation"
     >
       {/* Brand → home */}
@@ -165,7 +165,7 @@ function Rail({
             <LogoMark size={26} />
           </Link>
         </TooltipTrigger>
-        <TooltipContent side="right">Filo</TooltipContent>
+        <TooltipContent side="left">Filo</TooltipContent>
       </Tooltip>
 
       {/* New chat */}
@@ -218,7 +218,7 @@ function RailItem({
           {children}
         </Link>
       </TooltipTrigger>
-      <TooltipContent side="right" sideOffset={8}>
+      <TooltipContent side="left" sideOffset={8}>
         {label}
       </TooltipContent>
     </Tooltip>
@@ -252,7 +252,7 @@ function PersonalMenu({
           </Avatar>
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent side="right" align="end" className="w-60">
+      <DropdownMenuContent side="left" align="end" className="w-60">
         <DropdownMenuLabel>
           <div className="truncate text-sm font-medium">{userName}</div>
           <div className="truncate text-xs font-normal text-muted-foreground">{userEmail}</div>

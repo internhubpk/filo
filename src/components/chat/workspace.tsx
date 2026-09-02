@@ -68,7 +68,7 @@ import { ChatMarkdown } from "@/components/chat/chat-markdown";
 import { SourcesBlock, toChatSources } from "@/components/chat/sources-block";
 import { GenerationCard } from "@/components/chat/generation-card";
 import { ShareChatDialog } from "@/components/chat/share-dialog";
-import { WelcomeGlyph } from "@/components/chat/welcome-animation";
+import { WelcomeOrb } from "@/components/chat/welcome-animation";
 
 // ==================== Transcript message shape ====================
 
@@ -809,7 +809,7 @@ function EmptyState({
   const firstName = (userName ?? "there").split(" ")[0];
   return (
     <div className="flex flex-col items-center py-10 text-center sm:py-16">
-      <WelcomeGlyph className="size-14" />
+      <WelcomeOrb className="mb-1" />
       <h2 className="mt-4 text-xl font-semibold tracking-tight">Hi {firstName} — what are we working on?</h2>
       <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
         Research a topic, think through an idea, then switch to Document Mode to turn the
