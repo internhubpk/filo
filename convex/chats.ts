@@ -257,6 +257,50 @@ export const remove = mutation({
   },
 });
 
+/**
+ * Truncate a transcript FROM a message. `inclusive: true` deletes that
+ * message and everything after it (message EDIT: the old turn is dropped,
+ * the edited prompt is re-sent as a fresh row). `inclusive: false` keeps
+ * the message and deletes only what follows (REGENERATE: keep the prompt,
+ * drop the reply). Ownership enforced on chat AND anchor message. Chat
+ * counters/preview fall back to the surviving tail.
+ */
+export const truncateFrom = mutation({
+  args: {
+    session: v.string(),
+    chatId: v.id("chats"),
+    messageId: v.id("messages"),
+    inclusive: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const user = await requireUser(ctx, args.session);
+    const chat = await ctx.db.get(args.chatId);
+    if (!chat || chat.userId !== user._id) throw new Error("Chat not found");
+    const anchor = await ctx.db.get(args.messageId);
+    if (!anchor || anchor.chatId !== args.chatId) throw new Error("Message not found");
+    const messages = await ctx.db
+      .query("messages")
+      .withIndex("by_chatId_createdAt", (q) => q.eq("chatId", args.chatId))
+      .order("asc")
+      .collect();
+    const idx = messages.findIndex((m) => m._id === args.messageId);
+    if (idx === -1) throw new Error("Message not found");
+    const doomed = messages.slice(args.inclusive ? idx : idx + 1);
+    for (const m of doomed) {
+      await ctx.db.delete(m._id);
+    }
+    const remaining = messages.slice(0, args.inclusive ? idx : idx + 1);
+    const last = remaining[remaining.length - 1];
+    await ctx.db.patch(args.chatId, {
+      messageCount: Math.max(0, chat.messageCount - doomed.length),
+      lastMessageAt: last?.createdAt ?? chat.createdAt,
+      lastMessagePreview: last ? last.content.slice(0, 160) : "",
+      updatedAt: Date.now(),
+    });
+    return { success: true, deletedMessages: doomed.length };
+  },
+});
+
 // ==================== SHARING ====================
 
 /**

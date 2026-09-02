@@ -43,6 +43,11 @@ interface ChatSendBody {
   mode?: "chat" | "document";
   artifactType?: string; // document | spreadsheet | presentation
   outputFormat?: string; // docx | pdf | xlsx | pptx
+  /** REGENERATE: the transcript already ends with the user's prompt (the
+   *  client deleted the previous reply via chats.truncateFrom). No new user
+   *  row is persisted — a fresh assistant reply is streamed for the same
+   *  prompt. Chat mode only; requires an existing chatId. */
+  regenerate?: boolean;
   /** Optional per-request chat model pin (future UI picker). Validated
    *  against a strict charset; unknown ids fail naturally at the provider. */
   model?: string;
@@ -105,9 +110,8 @@ function deriveTitle(message: string): string {
 }
 
 /** Build the bounded conversation context for the AI request. */
-function buildContextMessages(
-  history: Array<{ role: string; content: string }>,
-  currentMessage: string
+function boundedHistory(
+  history: Array<{ role: string; content: string }>
 ): Array<{ role: "user" | "assistant"; content: string }> {
   const recent = history.slice(-MAX_CONTEXT_MESSAGES);
   const picked: Array<{ role: "user" | "assistant"; content: string }> = [];
@@ -122,8 +126,14 @@ function buildContextMessages(
     picked.unshift({ role, content: clipped });
     if (budget <= 0) break;
   }
-  picked.push({ role: "user", content: currentMessage });
   return picked;
+}
+
+function buildContextMessages(
+  history: Array<{ role: string; content: string }>,
+  currentMessage: string
+): Array<{ role: "user" | "assistant"; content: string }> {
+  return [...boundedHistory(history), { role: "user", content: currentMessage }];
 }
 
 /** Bounded transcript excerpt used as the document generation sourceContext. */
@@ -170,8 +180,11 @@ export async function POST(request: NextRequest) {
     return errorResponse("Invalid request body", "BAD_REQUEST", 400);
   }
   const message = typeof body.message === "string" ? body.message.trim() : "";
-  const mode: "chat" | "document" = body.mode === "document" ? "document" : "chat";
-  if (!message) {
+  // REGENERATE re-answers the prompt that already sits at the end of the
+  // transcript — chat mode only, never document mode.
+  const regenerate = body.regenerate === true;
+  const mode: "chat" | "document" = !regenerate && body.mode === "document" ? "document" : "chat";
+  if (!message && !regenerate) {
     return errorResponse("Message cannot be empty", "EMPTY_MESSAGE", 400);
   }
   if (message.length > 32_000) {
@@ -198,6 +211,10 @@ export async function POST(request: NextRequest) {
 
   // ==================== CHAT RESOLUTION ====================
   let chatId = body.chatId ?? null;
+  if (regenerate && !chatId) {
+    // There must be a prior prompt to re-answer.
+    return errorResponse("Chat not found", "NOT_FOUND", 404);
+  }
   try {
     if (!chatId) {
       chatId = (await convex.mutation(api.chats.create, {
@@ -232,19 +249,27 @@ export async function POST(request: NextRequest) {
     console.warn("[CHAT/SEND] Transcript lookup failed, continuing without context:", histErr);
   }
 
+  // A regenerate with no user turn to re-answer is a client bug — fail fast.
+  if (regenerate && !history.some((m) => m.role === "user" && String(m.content ?? "").trim())) {
+    return errorResponse("Nothing to regenerate", "EMPTY_MESSAGE", 400);
+  }
+
   // ==================== PERSIST USER MESSAGE (immediately) ====================
   // The user's own message lands in the database BEFORE any AI work — the
-  // reactive transcript shows it instantly on every device.
-  try {
-    await convex.mutation(api.chats.appendMessage, {
-      session: token,
-      chatId: chatId as any,
-      role: "user",
-      content: message,
-    });
-  } catch (appendErr) {
-    console.error("[CHAT/SEND] Failed to persist user message:", appendErr);
-    return errorResponse("Could not save your message", "PERSIST_FAILED", 500);
+  // reactive transcript shows it instantly on every device. A regenerate
+  // SKIPS this: its prompt is already the last row of the transcript.
+  if (!regenerate) {
+    try {
+      await convex.mutation(api.chats.appendMessage, {
+        session: token,
+        chatId: chatId as any,
+        role: "user",
+        content: message,
+      });
+    } catch (appendErr) {
+      console.error("[CHAT/SEND] Failed to persist user message:", appendErr);
+      return errorResponse("Could not save your message", "PERSIST_FAILED", 500);
+    }
   }
 
   // ==================== DOCUMENT MODE → enqueue durable job ====================
@@ -278,7 +303,10 @@ export async function POST(request: NextRequest) {
       };
       send({ type: "meta", chatId, mode: "chat" });
 
-      const contextMessages = buildContextMessages(history, message);
+      // Regenerate: the prompt is the transcript's last row — no extra turn.
+      const contextMessages = regenerate
+        ? boundedHistory(history)
+        : buildContextMessages(history, message);
       let assistantText = "";
 
       // ---- Chat model pin (chat mode ONLY — document mode keeps its own

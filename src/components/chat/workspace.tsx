@@ -36,11 +36,14 @@ import {
   Check,
   Copy,
   FileText,
+  Loader2,
   Menu,
   MessageSquare,
   PanelRightClose,
   PanelRightOpen,
+  Pencil,
   Plus,
+  RotateCcw,
   Share2,
   Sparkles,
   Trash2,
@@ -130,6 +133,9 @@ export function ChatWorkspace({
     api.chats.messagesForUser,
     token && chatId ? ({ session: token, chatId } as any) : ("skip" as any)
   ) as TranscriptMessage[] | null | undefined;
+
+  // Transcript surgery for edit + regenerate (ownership-checked server-side).
+  const truncateFrom = useMutation(api.chats.truncateFrom);
 
   // ---- Streaming + optimistic state ----
   // streamText is the LETTER-BY-LETTER displayed text; streamTarget is the
@@ -294,14 +300,15 @@ export function ChatWorkspace({
     }
   }, [messages?.length, streamText, pendingUser]);
 
-  // ---- Send ----
-  const send = useCallback(
-    async (text: string) => {
-      if (!token || streaming || sendingRef.current) return;
-      sendingRef.current = true;
-      setPendingUser({ content: text, at: Date.now() });
+  // ---- Stream runner (shared by send / edit-resend / regenerate) ----
+  // Runs ONE assistant turn against /api/chat/send and drives the thinking →
+  // letter-by-letter → transcript-handoff lifecycle. Callers own the
+  // sendingRef guard and any transcript surgery (truncation) beforehand.
+  const runStream = useCallback(
+    async ({ text, regenerate = false }: { text: string; regenerate?: boolean }) => {
       setBusy(true);
       setSendError(null);
+      if (!regenerate) setPendingUser({ content: text, at: Date.now() });
 
       const currentChatId = chatId;
       const currentMode = mode;
@@ -309,8 +316,8 @@ export function ChatWorkspace({
 
       // Chat mode: the THINKING indicator is visible from the first
       // millisecond (network + model latency included); the same bubble then
-      // turns into the letter-by-letter stream.
-      if (currentMode === "chat") beginStream();
+      // turns into the letter-by-letter stream. Regenerate always streams.
+      if (regenerate || currentMode === "chat") beginStream();
 
       try {
         const ac = new AbortController();
@@ -323,7 +330,8 @@ export function ChatWorkspace({
             chatId: currentChatId ?? undefined,
             message: text,
             mode: currentMode,
-            ...(currentMode === "document"
+            ...(regenerate ? { regenerate: true } : {}),
+            ...(!regenerate && currentMode === "document"
               ? {
                   artifactType:
                     currentFormat === "xlsx"
@@ -343,7 +351,7 @@ export function ChatWorkspace({
           throw new Error(err?.error || `Request failed (${res.status})`);
         }
 
-        if (currentMode === "document") {
+        if (!regenerate && currentMode === "document") {
           const json = (await res.json()) as { success: boolean; data?: { chatId: string }; error?: string };
           if (!json.success) throw new Error(json.error || "Could not start the generation");
           if (!currentChatId && json.data?.chatId) setChatId(json.data.chatId);
@@ -411,7 +419,6 @@ export function ChatWorkspace({
         }
         setPendingUser(null);
       } finally {
-        sendingRef.current = false;
         setBusy(false);
         abortRef.current = null;
       }
@@ -421,7 +428,6 @@ export function ChatWorkspace({
       chatId,
       mode,
       format,
-      streaming,
       beginStream,
       pushStreamText,
       endStreamTarget,
@@ -429,6 +435,72 @@ export function ChatWorkspace({
       cancelStream,
     ]
   );
+
+  // ---- Send (composer) ----
+  const send = useCallback(
+    async (text: string) => {
+      if (!token || streaming || sendingRef.current) return;
+      sendingRef.current = true;
+      try {
+        await runStream({ text });
+      } finally {
+        sendingRef.current = false;
+      }
+    },
+    [token, streaming, runStream]
+  );
+
+  // ---- Edit a user message: truncate the thread from that turn (inclusive)
+  // and re-send the edited prompt — the AI then answers the NEW text, and
+  // every later message is gone. ----
+  const submitEdit = useCallback(
+    async (messageId: string, text: string) => {
+      const trimmed = text.trim();
+      if (!token || !trimmed || !chatId || streaming || sendingRef.current) return;
+      sendingRef.current = true;
+      try {
+        await truncateFrom({
+          session: token,
+          chatId: chatId as any,
+          messageId: messageId as any,
+          inclusive: true,
+        });
+        await runStream({ text: trimmed });
+      } catch (editErr) {
+        // Truncation failed (runStream handles its own errors internally).
+        cancelStream();
+        setSendError(editErr instanceof Error ? editErr.message : "Could not update the message");
+        setPendingUser(null);
+      } finally {
+        sendingRef.current = false;
+      }
+    },
+    [token, chatId, streaming, truncateFrom, runStream, cancelStream]
+  );
+
+  // ---- Regenerate: drop the last reply (everything after the most recent
+  // user message) but KEEP the prompt, then stream a fresh answer for it. ----
+  const regenerateResponse = useCallback(async () => {
+    if (!token || !chatId || streaming || sendingRef.current || !messages) return;
+    const lastUser = [...messages].reverse().find((m) => m.role === "user");
+    if (!lastUser) return;
+    sendingRef.current = true;
+    try {
+      await truncateFrom({
+        session: token,
+        chatId: chatId as any,
+        messageId: lastUser._id as any,
+        inclusive: false,
+      });
+      await runStream({ text: lastUser.content, regenerate: true });
+    } catch (regenErr) {
+      cancelStream();
+      setSendError(regenErr instanceof Error ? regenErr.message : "Could not regenerate");
+      setPendingUser(null);
+    } finally {
+      sendingRef.current = false;
+    }
+  }, [token, chatId, streaming, messages, truncateFrom, runStream, cancelStream]);
 
   const stop = useCallback(() => {
     abortRef.current?.abort();
@@ -541,8 +613,15 @@ export function ChatWorkspace({
                   optimistic bubble + thinking dots are the loading state. */}
               {messages === undefined && chatId && !inFlight ? <TranscriptSkeleton /> : null}
 
-              {visibleMessages?.map((m) => (
-                <MessageRow key={m._id} message={m} />
+              {visibleMessages?.map((m, i) => (
+                <MessageRow
+                  key={m._id}
+                  message={m}
+                  isLast={i === visibleMessages.length - 1}
+                  canAct={!inFlight}
+                  onSubmitEdit={submitEdit}
+                  onRegenerate={() => void regenerateResponse()}
+                />
               ))}
 
               {pendingUser && !pendingReflected ? <UserBubble content={pendingUser.content} pending /> : null}
@@ -593,9 +672,29 @@ export function ChatWorkspace({
 // Message rows
 // =============================================================================
 
-function MessageRow({ message }: { message: TranscriptMessage }) {
+function MessageRow({
+  message,
+  isLast,
+  canAct,
+  onSubmitEdit,
+  onRegenerate,
+}: {
+  message: TranscriptMessage;
+  /** The newest row — the only one that offers Regenerate. */
+  isLast: boolean;
+  /** False while a stream/send is in flight — actions would race it. */
+  canAct: boolean;
+  onSubmitEdit: (messageId: string, text: string) => Promise<void> | void;
+  onRegenerate: () => void;
+}) {
   if (message.role === "user") {
-    return <UserBubble content={message.content} />;
+    return (
+      <UserBubble
+        content={message.content}
+        canEdit={canAct}
+        onSubmitEdit={(text) => onSubmitEdit(message._id, text)}
+      />
+    );
   }
 
   // Error turn (assistant message with metadata.error and no content)
@@ -614,7 +713,11 @@ function MessageRow({ message }: { message: TranscriptMessage }) {
 
   const sources = toChatSources(message.metadata?.sources);
   return (
-    <AssistantMessage rawContent={message.content || undefined}>
+    <AssistantMessage
+      rawContent={message.content || undefined}
+      canRegenerate={isLast && canAct}
+      onRegenerate={onRegenerate}
+    >
       {message.content ? <ChatMarkdown content={message.content} /> : null}
       {sources.length > 0 ? <SourcesBlock sources={sources} /> : null}
       {message.metadata?.kind === "generation" && message.metadata.jobId ? (
@@ -628,12 +731,140 @@ function MessageRow({ message }: { message: TranscriptMessage }) {
   );
 }
 
-function UserBubble({ content, pending }: { content: string; pending?: boolean }) {
+function UserBubble({
+  content,
+  pending,
+  canEdit,
+  onSubmitEdit,
+}: {
+  content: string;
+  pending?: boolean;
+  /** Edit affordance is suppressed while a stream is in flight. */
+  canEdit?: boolean;
+  /** Persisted rows only — saves the edited text (truncates + re-answers). */
+  onSubmitEdit?: (text: string) => Promise<void> | void;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(content);
+  const [copied, setCopied] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+
+  // Keep the editor the height of its content; focus + caret at the end.
+  useEffect(() => {
+    if (!editing) return;
+    const el = textareaRef.current;
+    if (el) {
+      el.style.height = "auto";
+      el.style.height = `${Math.min(el.scrollHeight, 256)}px`;
+      el.focus();
+      el.setSelectionRange(el.value.length, el.value.length);
+    }
+  }, [editing, draft]);
+
+  function closeEditor() {
+    setEditing(false);
+    setDraft(content);
+  }
+
+  function save() {
+    const trimmed = draft.trim();
+    if (submitting) return;
+    if (!trimmed || trimmed === content) {
+      closeEditor();
+      return;
+    }
+    setSubmitting(true);
+    Promise.resolve(onSubmitEdit?.(trimmed))
+      .catch(() => {})
+      .finally(() => {
+        setSubmitting(false);
+        setEditing(false);
+      });
+  }
+
+  // ---- Inline editor: the bubble becomes a textarea; Save re-answers ----
+  if (editing) {
+    return (
+      <div className="mb-5 flex flex-col items-end gap-2">
+        <div className="w-full max-w-[85%] rounded-2xl rounded-br-md border border-primary/40 bg-card px-3.5 py-2.5 shadow-sm focus-within:border-primary/70">
+          <textarea
+            ref={textareaRef}
+            value={draft}
+            onChange={(e) => setDraft(e.target.value)}
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && !e.shiftKey) {
+                e.preventDefault();
+                save();
+              } else if (e.key === "Escape") {
+                e.preventDefault();
+                closeEditor();
+              }
+            }}
+            rows={1}
+            className="max-h-64 w-full resize-none bg-transparent text-[14.5px] leading-relaxed outline-none"
+            aria-label="Edit your message"
+          />
+        </div>
+        <div className="flex items-center gap-1.5">
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-8 rounded-full px-3 text-xs"
+            onClick={closeEditor}
+            disabled={submitting}
+          >
+            Cancel
+          </Button>
+          <Button
+            size="sm"
+            className="h-8 rounded-full px-4 text-xs"
+            onClick={save}
+            disabled={submitting || !draft.trim()}
+          >
+            {submitting ? <Loader2 className="size-3.5 animate-spin" /> : null}
+            Send
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className={cn("mb-5 flex justify-end", pending && "opacity-80")}>
+    <div className={cn("group mb-5 flex flex-col items-end", pending && "opacity-80")}>
       <div className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-br-md bg-primary px-4 py-2.5 text-[14.5px] leading-relaxed text-primary-foreground">
         {content}
       </div>
+      {!pending ? (
+        <div className="mt-0.5 flex items-center gap-0.5 transition-opacity sm:opacity-0 sm:group-hover:opacity-100 sm:focus-within:opacity-100">
+          <button
+            onClick={() => {
+              void navigator.clipboard.writeText(content).then(() => {
+                setCopied(true);
+                setTimeout(() => setCopied(false), 1600);
+              });
+            }}
+            className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+            aria-label="Copy message"
+            title="Copy"
+          >
+            {copied ? <Check className="size-3.5 text-success" /> : <Copy className="size-3.5" />}
+          </button>
+          {canEdit && onSubmitEdit ? (
+            <button
+              onClick={() => {
+                setDraft(content);
+                setEditing(true);
+              }}
+              className="inline-flex size-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+              aria-label="Edit message — the AI will answer the edited text"
+              title="Edit"
+            >
+              <Pencil className="size-3.5" />
+            </button>
+          ) : null}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -641,11 +872,16 @@ function UserBubble({ content, pending }: { content: string; pending?: boolean }
 function AssistantMessage({
   children,
   rawContent,
+  canRegenerate,
+  onRegenerate,
 }: {
   children: ReactNode;
   /** Raw markdown of the message — when present a copy action appears
    *  BELOW the response (always visible, quiet styling). */
   rawContent?: string;
+  /** Newest completed reply only — offers a fresh answer for the same prompt. */
+  canRegenerate?: boolean;
+  onRegenerate?: () => void;
 }) {
   const [copied, setCopied] = useState(false);
   return (
@@ -655,25 +891,38 @@ function AssistantMessage({
       </Avatar>
       <div className="min-w-0 flex-1">
         {children}
-        {rawContent ? (
-          <div className="mt-1 flex items-center">
-            <button
-              onClick={() => {
-                void navigator.clipboard.writeText(rawContent).then(() => {
-                  setCopied(true);
-                  setTimeout(() => setCopied(false), 1600);
-                });
-              }}
-              className={cn(
-                "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
-                copied && "text-success hover:text-success"
-              )}
-              aria-label="Copy message"
-              title="Copy message"
-            >
-              {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
-              {copied ? "Copied" : "Copy"}
-            </button>
+        {rawContent || canRegenerate ? (
+          <div className="mt-1 flex items-center gap-1">
+            {rawContent ? (
+              <button
+                onClick={() => {
+                  void navigator.clipboard.writeText(rawContent).then(() => {
+                    setCopied(true);
+                    setTimeout(() => setCopied(false), 1600);
+                  });
+                }}
+                className={cn(
+                  "inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground",
+                  copied && "text-success hover:text-success"
+                )}
+                aria-label="Copy message"
+                title="Copy message"
+              >
+                {copied ? <Check className="size-3.5" /> : <Copy className="size-3.5" />}
+                {copied ? "Copied" : "Copy"}
+              </button>
+            ) : null}
+            {canRegenerate && onRegenerate ? (
+              <button
+                onClick={onRegenerate}
+                className="inline-flex h-7 items-center gap-1.5 rounded-md px-2 text-[11.5px] text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                aria-label="Regenerate response"
+                title="Regenerate"
+              >
+                <RotateCcw className="size-3.5" />
+                Regenerate
+              </button>
+            ) : null}
           </div>
         ) : null}
       </div>
