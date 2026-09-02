@@ -9,7 +9,9 @@
 // the header's menu button opens it on mobile, the panel toggle on desktop.
 //
 // The four database states are rendered honestly at every layer:
-//   • transcript: undefined → skeleton bubbles · [] → nothing yet · rows → UI
+//   • transcript: undefined → skeleton bubbles — BUT NEVER while a send is in
+//     flight: the optimistic user bubble + the single thinking→typing bubble
+//     are the entire loading UI, so no skeleton ever competes with them
 //   • the streaming assistant reply is marked locally until the persisted
 //     message arrives via the reactive subscription (no duplicates)
 //   • generation turns render <GenerationCard> with live job progress
@@ -345,7 +347,9 @@ export function ChatWorkspace({
           const json = (await res.json()) as { success: boolean; data?: { chatId: string }; error?: string };
           if (!json.success) throw new Error(json.error || "Could not start the generation");
           if (!currentChatId && json.data?.chatId) setChatId(json.data.chatId);
-          setPendingUser(null);
+          // Keep the optimistic user bubble until the persisted row reflects
+          // it — nulling here would blank the message out while the fresh
+          // transcript subscription loads.
           return;
         }
 
@@ -448,6 +452,12 @@ export function ChatWorkspace({
   const showExamples =
     !chatId && !streaming && (messages === undefined || messages === null || messages.length === 0);
 
+  // A send is in flight from the first optimistic paint until the persisted
+  // transcript takes over. While true, loading skeletons are BANNED — the
+  // optimistic user bubble and the one thinking→typing bubble are the sole
+  // progress UI (a skeleton here is what made sends look broken/doubled).
+  const inFlight = busy || streaming || pendingUser !== null;
+
   return (
     <div className="flex h-full min-w-0 flex-1">
       {/* Conversation column — the sidebar itself lives in the AppShell */}
@@ -467,7 +477,13 @@ export function ChatWorkspace({
           <div className="min-w-0 flex-1">
             {chatId ? (
               chat === undefined ? (
-                <Skeleton className="h-4 w-40" />
+                inFlight ? (
+                  // Mid-send: no skeleton flash in the header either — a calm
+                  // fallback title until the real one arrives.
+                  <h1 className="truncate text-sm font-medium">Conversation</h1>
+                ) : (
+                  <Skeleton className="h-4 w-40" />
+                )
               ) : (
                 <h1 className="truncate text-sm font-medium">{chat?.title ?? "Conversation"}</h1>
               )
@@ -520,7 +536,10 @@ export function ChatWorkspace({
                 <EmptyState userName={user?.name} onExample={(text) => setPreset({ text, key: Date.now() })} />
               ) : null}
 
-              {messages === undefined && chatId ? <TranscriptSkeleton /> : null}
+              {/* Skeleton ONLY when loading a transcript nobody is sending
+                  into (e.g. opening a chat from history). Mid-send the
+                  optimistic bubble + thinking dots are the loading state. */}
+              {messages === undefined && chatId && !inFlight ? <TranscriptSkeleton /> : null}
 
               {visibleMessages?.map((m) => (
                 <MessageRow key={m._id} message={m} />
