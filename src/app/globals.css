@@ -413,9 +413,10 @@
 }
 
 /* ============================================================
-   Welcome orb (chat empty state) — an "AI aurora" ring around
-   the Filo mark. Two counter-rotating conic arcs + a breathing
-   glow. Transform/opacity-only keyframes → GPU-composited and
+   Welcome orb (chat empty state) — an "AI aurora" ring. ONE
+   rotating conic arc + a breathing glow around an empty frosted
+   core (the brand logo deliberately stays out of the animation).
+   Transform/opacity-only keyframes → GPU-composited and
    always smooth. Reduced motion: the global override above
    collapses the loops to a single instant run → static orb.
    ============================================================ */
@@ -448,30 +449,6 @@
   animation: wg-spin 7s linear infinite;
 }
 
-.wg-orb-arc-inner {
-  background: conic-gradient(
-    from 180deg,
-    transparent 0deg,
-    color-mix(in oklch, var(--primary) 55%, transparent) 45deg,
-    transparent 95deg
-  );
-  -webkit-mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 1px)
-  );
-  mask: radial-gradient(
-    farthest-side,
-    transparent calc(100% - 2px),
-    #000 calc(100% - 1px)
-  );
-  animation: wg-spin 4.2s linear infinite reverse;
-}
-
-.wg-orb-mark {
-  animation: wg-bob 3.6s ease-in-out infinite;
-}
-
 @keyframes wg-spin {
   to {
     transform: rotate(360deg);
@@ -487,15 +464,5 @@
   50% {
     transform: scale(1.12);
     opacity: 1;
-  }
-}
-
-@keyframes wg-bob {
-  0%,
-  100% {
-    transform: translateY(0);
-  }
-  50% {
-    transform: translateY(-2px);
   }
 }

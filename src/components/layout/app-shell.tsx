@@ -348,21 +348,13 @@ function SidebarBody({
         />
       </nav>
 
-      {/* History — below the other items */}
+      {/* History — below the other items (the "New chat" nav row above is
+          the single new-conversation entry point, no duplicate button) */}
       <div className="mt-2 flex min-h-0 flex-1 flex-col border-t">
-        <div className="flex shrink-0 items-center justify-between px-4 pb-1 pt-3">
+        <div className="shrink-0 px-4 pb-1 pt-3">
           <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
             History
           </h2>
-          <Button
-            variant="ghost"
-            size="sm"
-            className="h-6 gap-1 px-1.5 text-[11px] text-muted-foreground"
-            onClick={handleNewChat}
-            aria-label="Start a new chat"
-          >
-            <MessageSquarePlus className="size-3" /> New
-          </Button>
         </div>
         <QueryBoundary>
           <HistoryPanel
