@@ -49,6 +49,7 @@ import { cn } from "@/lib/utils";
 import { initials } from "@/lib/format";
 import { useFiloSession } from "@/hooks/use-session";
 import { useMounted } from "@/hooks/use-mounted";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { apiClient } from "@/lib/api-client";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
@@ -206,6 +207,7 @@ function AppSidebar({
   onLogout: () => void;
 }) {
   const reducedMotion = useReducedMotion() ?? false;
+  const isMobile = useIsMobile();
   const close = useCallback(() => onOpenChange(false), [onOpenChange]);
 
   // Shared body — desktop expanded panel and the mobile sheet render the
@@ -262,8 +264,10 @@ function AppSidebar({
         </div>
       </motion.aside>
 
-      {/* Mobile — the same sidebar as a right-hand sheet */}
-      <Sheet open={open} onOpenChange={onOpenChange}>
+      {/* Mobile — the same sidebar as a right-hand sheet. Gated to mobile:
+          on desktop the Sheet used to open ALONGSIDE the inline panel — two
+          sidebars stacked (the sheet's dark backdrop was the "opens in bg"). */}
+      <Sheet open={open && isMobile} onOpenChange={onOpenChange}>
         <SheetContent side="right" className="w-[300px] bg-sidebar p-0 text-sidebar-foreground">
           <SheetHeader className="sr-only">
             <SheetTitle>Menu</SheetTitle>
