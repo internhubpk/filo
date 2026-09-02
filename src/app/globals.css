@@ -314,6 +314,15 @@
   .animate-fade-up {
     transform: none !important;
   }
+  /* The welcome orb's cycling badges would all collapse to opacity:0
+     (their keyframes end at 0) — stop the cycle and pin the first badge. */
+  .wg-orb-type {
+    animation: none !important;
+    opacity: 0;
+  }
+  .wg-orb-type-first {
+    opacity: 1;
+  }
 }
 
 /* ---- Entrance keyframes (referenced by --animate-* theme tokens) ---- */
@@ -447,6 +456,38 @@
     #000 calc(100% - 1.5px)
   );
   animation: wg-spin 7s linear infinite;
+}
+
+/* File-type badges inside the orb core — Word → PPTX → PDF → CSV → XLSX,
+   crossfaded slowly. Each badge runs the same 12s loop, staggered by
+   animation-delay (2.4s apart in welcome-animation.tsx). Opacity + scale
+   only → compositor-friendly. */
+.wg-orb-type {
+  opacity: 0;
+  animation: wg-type-cycle 12s linear infinite;
+}
+
+@keyframes wg-type-cycle {
+  0% {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  3% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  17% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  21% {
+    opacity: 0;
+    transform: scale(0.88);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(0.88);
+  }
 }
 
 @keyframes wg-spin {

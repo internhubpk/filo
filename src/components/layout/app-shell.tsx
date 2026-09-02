@@ -225,35 +225,41 @@ function AppSidebar({
 
   return (
     <>
-      {/* Desktop — one collapsible aside at the right edge */}
+      {/* Desktop — one collapsible aside at the right edge. The rail and the
+          panel are NEVER crossfaded (that read as two superimposed sidebars):
+          exactly one layer is visible at any moment, and the panel is anchored
+          to the LEFT edge so the widening aside reveals it like a sliding
+          drawer, perfectly in sync with the main content push. */}
       <motion.aside
         initial={false}
         animate={{ width: open ? SIDEBAR_WIDTH : RAIL_WIDTH }}
-        transition={{ duration: reducedMotion ? 0 : 0.26, ease: [0.16, 1, 0.3, 1] }}
+        transition={{ duration: reducedMotion ? 0 : 0.22, ease: [0.16, 1, 0.3, 1] }}
         className="relative z-30 hidden h-full shrink-0 overflow-hidden border-l bg-sidebar text-sidebar-foreground md:block"
         aria-label="Workspace sidebar"
       >
-        {/* Collapsed layer — the icon rail, anchored to the right edge */}
-        <motion.div
-          initial={false}
-          animate={{ opacity: open ? 0 : 1 }}
-          transition={{ duration: reducedMotion ? 0 : 0.18 }}
+        {/* Collapsed rail — right edge, only while closed */}
+        <div
           inert={open}
-          className="absolute inset-y-0 right-0 flex w-14 flex-col items-center py-3"
+          aria-hidden={open}
+          className={cn(
+            "absolute inset-y-0 right-0 flex w-14 flex-col items-center py-3",
+            open ? "invisible" : "visible"
+          )}
         >
           <Rail open={open} onOpen={() => onOpenChange(true)} userName={userName} userEmail={userEmail} onLogout={onLogout} />
-        </motion.div>
+        </div>
 
-        {/* Expanded layer — nav + history + account, anchored to the right edge */}
-        <motion.div
-          initial={false}
-          animate={{ opacity: open ? 1 : 0 }}
-          transition={{ duration: reducedMotion ? 0 : 0.22 }}
+        {/* Expanded panel — revealed left→right as the aside widens */}
+        <div
           inert={!open}
-          className="absolute inset-y-0 right-0 flex w-72 flex-col"
+          aria-hidden={!open}
+          className={cn(
+            "absolute inset-y-0 left-0 flex w-72 flex-col",
+            open ? "visible" : "invisible"
+          )}
         >
           {body(false)}
-        </motion.div>
+        </div>
       </motion.aside>
 
       {/* Mobile — the same sidebar as a right-hand sheet */}
