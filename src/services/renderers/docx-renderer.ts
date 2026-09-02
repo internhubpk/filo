@@ -59,6 +59,7 @@ import {
   hex6,
   isDarkColor,
   latexToOmml,
+  partHeadingLabel,
   renderComponentImage,
   tint,
   type DerivedTheme,
@@ -79,7 +80,7 @@ type DocxColor = ReturnType<typeof deriveTheme>['colors']
  */
 function inlineRuns(
   text: string,
-  opts: { font?: string; color?: string; italicsBase?: boolean; size?: number; monoFont?: string }
+  opts: { font?: string; color?: string; italicsBase?: boolean; size?: number; monoFont?: string; boldAll?: boolean }
 ): TextRun[] {
   const monoFont = opts.monoFont || 'Consolas'
   const baseColor = opts.color ?? '1F2937'
@@ -93,18 +94,18 @@ function inlineRuns(
       case 'bold':
         return new TextRun({ text: seg.text, bold: true, italics: opts.italicsBase, ...common })
       case 'italic':
-        return new TextRun({ text: seg.text, italics: true, ...common })
+        return new TextRun({ text: seg.text, italics: true, bold: opts.boldAll, ...common })
       case 'code':
-        return new TextRun({ text: seg.text, font: monoFont, size: opts.size ? Math.max(opts.size - 2, 14) : undefined, shading: { type: ShadingType.CLEAR, fill: 'F1F5F9' }, color: '0F172A' })
+        return new TextRun({ text: seg.text, font: monoFont, size: opts.size ? Math.max(opts.size - 2, 14) : undefined, shading: { type: ShadingType.CLEAR, fill: 'F1F5F9' }, color: '0F172A', bold: opts.boldAll })
       case 'link':
         return new ExternalHyperlink({
-          children: [new TextRun({ text: seg.text, ...common, style: 'Hyperlink' })],
+          children: [new TextRun({ text: seg.text, ...common, style: 'Hyperlink', bold: opts.boldAll })],
           link: seg.href || seg.text,
         }) as unknown as TextRun
       case 'strike':
-        return new TextRun({ text: seg.text, strike: true, ...common })
+        return new TextRun({ text: seg.text, strike: true, bold: opts.boldAll, ...common })
       default:
-        return new TextRun({ text: seg.text, italics: opts.italicsBase, ...common })
+        return new TextRun({ text: seg.text, italics: opts.italicsBase, bold: opts.boldAll, ...common })
     }
   })
 }
@@ -231,7 +232,7 @@ export class DocxRenderer implements DocumentRenderer {
         const isPart = lvl === 'part'
         const isSub = lvl === 'section'
         const label = isPart
-          ? num ? `Part ${num} — ${s.title}` : s.title
+          ? partHeadingLabel(num, s.title)
           : num
             ? isSub ? `${num}  ${s.title}` : `${num}.  ${s.title}`
             : s.title
@@ -282,7 +283,7 @@ export class DocxRenderer implements DocumentRenderer {
 
       // Heading text with deterministic outline number.
       const headingText = isPart
-        ? num ? `Part ${num} — ${section.title}` : section.title
+        ? partHeadingLabel(num, section.title)
         : isSub
           ? num ? `${num}  ${section.title}` : section.title
           : num ? `${num}.  ${section.title}` : section.title
@@ -813,7 +814,7 @@ export class DocxRenderer implements DocumentRenderer {
       case 'key_takeaways': {
         const items = asStringArray(component.content)
         if (items.length > 0) {
-          out.push(this.takeawaysBox(items, colors.accent))
+          out.push(this.takeawaysBox(items, colors.accent, bodyFont, ctx?.monoFont))
           out.push(new Paragraph({ text: '', spacing: { after: 120 } }))
         }
         break
@@ -835,7 +836,7 @@ export class DocxRenderer implements DocumentRenderer {
       case 'callout': {
         const text = asString(component.content)
         if (text) {
-          out.push(this.calloutTable(text, colors.accent))
+          out.push(this.calloutTable(text, colors.accent, bodyFont, ctx?.monoFont))
           out.push(new Paragraph({ text: '', spacing: { after: 120 } }))
         }
         break
@@ -863,7 +864,7 @@ export class DocxRenderer implements DocumentRenderer {
       case 'two_column': {
         const data = asTwoColumn(component.content)
         if (data) {
-          out.push(this.twoColumnTable(data, colors.primary, colors.accent, hex6(colors.border, 'E2E8F0')))
+          out.push(this.twoColumnTable(data, colors.primary, colors.accent, hex6(colors.border, 'E2E8F0'), bodyFont, ctx?.monoFont))
           out.push(new Paragraph({ text: '', spacing: { after: 160 } }))
         }
         break
@@ -1060,7 +1061,7 @@ export class DocxRenderer implements DocumentRenderer {
     })
   }
 
-  private calloutTable(text: string, accent: string): Table {
+  private calloutTable(text: string, accent: string, bodyFont?: string, monoFont?: string): Table {
     const fill = tint(accent, 0.88).slice(1).toUpperCase()
     return new Table({
       width: { size: 100, type: WidthType.PERCENTAGE },
@@ -1076,7 +1077,7 @@ export class DocxRenderer implements DocumentRenderer {
                 right: { style: BorderStyle.SINGLE, size: 4, color: fill },
               },
               margins: { top: 160, bottom: 160, left: 240, right: 240 },
-              children: [new Paragraph({ children: [new TextRun({ text, size: 22, bold: true })] })],
+              children: [new Paragraph({ children: inlineRuns(text, { font: bodyFont, monoFont, size: 22, boldAll: true }) })],
             }),
           ],
         }),
@@ -1085,7 +1086,7 @@ export class DocxRenderer implements DocumentRenderer {
   }
 
   /** Shaded key-takeaways emphasis box (title + bullets). */
-  private takeawaysBox(items: string[], accent: string): Table {
+  private takeawaysBox(items: string[], accent: string, bodyFont?: string, monoFont?: string): Table {
     const fill = tint(accent, 0.9).slice(1).toUpperCase()
     return new Table({
       width: { size: 100, type: WidthType.PERCENTAGE },
@@ -1109,7 +1110,7 @@ export class DocxRenderer implements DocumentRenderer {
                 ...items.map(
                   (item, i) =>
                     new Paragraph({
-                      children: [new TextRun({ text: `${i + 1}.  ${item}`, size: 22 })],
+                      children: [new TextRun({ text: `${i + 1}.  `, size: 22 }), ...inlineRuns(item, { font: bodyFont, monoFont, size: 22 })],
                       spacing: { after: i === items.length - 1 ? 0 : 60 },
                     })
                 ),
@@ -1179,7 +1180,9 @@ export class DocxRenderer implements DocumentRenderer {
     data: { leftTitle: string; leftPoints: string[]; rightTitle: string; rightPoints: string[] },
     primary: string,
     accent: string,
-    borderColor: string
+    borderColor: string,
+    bodyFont?: string,
+    monoFont?: string
   ): Table {
     const cellBorder = { style: BorderStyle.SINGLE, size: 4, color: borderColor }
     const mkSide = (title: string, points: string[], fillTitle: string) =>
@@ -1195,7 +1198,7 @@ export class DocxRenderer implements DocumentRenderer {
           ...points.map(
             (p) =>
               new Paragraph({
-                text: `• ${p}`,
+                children: [new TextRun({ text: '•  ', size: 22 }), ...inlineRuns(p, { font: bodyFont, monoFont, size: 22 })],
                 spacing: { after: 60 },
               })
           ),

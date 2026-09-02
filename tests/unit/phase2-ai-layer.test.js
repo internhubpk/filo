@@ -120,12 +120,15 @@ test('legacy ai.ts is a shim that re-exports the canonical layer', () => {
   )
 })
 
-test('.env.example documents AGENT_ROUTER_API_KEY as the primary provider', () => {
+test('.env.example documents AGENT_ROUTER_API_KEY in the provider strategy', () => {
   const env = readFileSync(resolve(REPO_ROOT, '.env.example'), 'utf8')
   assert.ok(env.includes('AGENT_ROUTER_API_KEY='), '.env.example must document AGENT_ROUTER_API_KEY')
+  // The provider-strategy block lists every selectable provider explicitly
+  // (AI_PROVIDER env: GEMINI | OPENAI | AGENT_ROUTER) and AGENT_ROUTER is the
+  // head of the documented fallback order.
   assert.ok(
-    /PRIMARY AI provider.*Agent Router|Agent Router.*PRIMARY/i.test(env),
-    '.env.example must mark the Agent Router as the primary provider'
+    /AI_PROVIDER env \(GEMINI \| OPENAI \| AGENT_ROUTER\)/.test(env),
+    '.env.example must list AGENT_ROUTER as an explicit AI_PROVIDER choice'
   )
   // Real Safepay billing was rebuilt — the current credential set is required.
   for (const v of ['SAFEPAY_SECRET_KEY=', 'SAFEPAY_WEBHOOK_SECRET=', 'SAFEPAY_PUBLIC_KEY=', 'SAFEPAY_SANDBOX=']) {

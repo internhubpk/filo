@@ -423,6 +423,20 @@ export async function renderComponentImage(
 
 // ==================== COLOR / TEXT UTILS ====================
 
+/**
+ * Heading label for a PART-level section. The AI frequently titles part
+ * sections "Part II: Object-Oriented Architecture" AND sets number="II" —
+ * naively composing `Part II — <title>` shipped duplicated headings like
+ * "Part II — Part II: Object-Oriented Architecture". When the title already
+ * carries the part prefix, use it verbatim.
+ */
+export function partHeadingLabel(num: string | undefined, title: string): string {
+  const t = String(title ?? '').trim()
+  if (!num) return t
+  if (/^part\s*/i.test(t)) return t
+  return `Part ${num} — ${t}`
+}
+
 /** '#1e3a5f' → '1E3A5F' (docx/pptx want hex WITHOUT the hash). */
 export function hex6(color: string | undefined, fallback = '1E3A5F'): string {
   const c = String(color || '').trim()

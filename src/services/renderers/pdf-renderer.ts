@@ -28,6 +28,7 @@ import {
   deriveTheme,
   equationLatexOf,
   isDarkColor,
+  partHeadingLabel,
   renderComponentImage,
   tint,
   withHash,
@@ -36,7 +37,7 @@ import {
 import { evaluateFormula } from '@/services/formula-evaluator'
 import type { CellMatrix } from '@/services/formula-evaluator'
 import { resolvePdfFonts } from '@/services/typography/fonts'
-import { parseInlineMarkdown } from '@/services/typography/inline'
+import { inlineToPlainText, normalizeSegmentBoundaries, parseInlineMarkdown } from '@/services/typography/inline'
 import { highlightCode, type CodeToken } from '@/services/typography/code'
 import { existsSync, readFileSync } from 'node:fs'
 
@@ -119,9 +120,23 @@ function currentPageNo(doc: any): number {
 
 /**
  * Inline-markdown-aware text drawing for pdfkit. Plain text takes the fast
- * path; styled prose renders as continued runs (bold/italic/code/link) with
- * per-segment fonts/colors. Height measurement uses the plain text — styling
- * never changes font size, so metrics stay within a line's tolerance.
+ * path; styled prose renders as ONE continuous flow of styled runs.
+ *
+ * pdfkit `continued` semantics (probed against pdfkit 0.19):
+ *   • every call that is FOLLOWED by more text on the same flow must pass
+ *     `continued: true` — the FIRST call OPENS the shared LineWrapper and the
+ *     LAST call (continued falsy) closes it. The old code had this inverted
+ *     (first call un-continued, later calls continued), so every styled
+ *     paragraph opened a fresh wrapper per segment: tokens landed on their
+ *     own lines, the space at each segment boundary was swallowed
+ *     ("__exit__ to" → "exitto"), and — worst of all — the wrapper stayed
+ *     OPEN afterwards, so the next `heightOfString` measurement call REUSED
+ *     it and, with the drawing listener still attached, painted a SECOND
+ *     copy of the measured text mid-flow. That is where the overlapping /
+ *     duplicated paragraphs came from.
+ *   • whitespace at the START of a continued chunk is swallowed by the line
+ *     breaker, so boundary spaces are moved to the trailing edge first
+ *     (normalizeSegmentBoundaries).
  */
 function hasInlineStyling(text: string): boolean {
   return /\*\*|__|~~|`|\[[^\]]+\]\(https?:|(?<![\w*])\*(?![\s*])/.test(text)
@@ -135,34 +150,45 @@ function drawStyledText(
   opts: { width: number; align?: 'left' | 'justify' | 'center'; lineGap?: number; bodyFont: string; monoFont?: string; baseColor: string; size?: number }
 ): number {
   if (!hasInlineStyling(text)) {
+    // Self-contained: set the body font/size/color — callers (two_column
+    // points, takeaways) invoke this right after heading-font draws, and a
+    // stale 11.5pt heading font inflated every measured line height.
+    doc.font(opts.bodyFont).fontSize(opts.size ?? 10.5).fillColor(opts.baseColor)
     doc.text(text, x, yPos, { width: opts.width, align: opts.align, lineGap: opts.lineGap })
     return doc.y
   }
-  const segments = parseInlineMarkdown(text)
+  const segments = normalizeSegmentBoundaries(parseInlineMarkdown(text))
   const mono = opts.monoFont
-  let first = true
-  for (const seg of segments) {
+  const boldName = opts.bodyFont === 'FiloBody' ? 'FiloBodyBold' : `${opts.bodyFont}-Bold`
+  segments.forEach((seg, i) => {
+    const isLast = i === segments.length - 1
     const runOpts: Record<string, unknown> = {
       width: opts.width,
       align: opts.align,
       lineGap: opts.lineGap,
-      continued: first ? undefined : true,
+      continued: !isLast,
     }
-    if (first) runOpts.x = x
-    if (first && yPos !== undefined) runOpts.y = yPos
     if (seg.style === 'code' && mono) {
       doc.font(mono).fontSize(Math.max((opts.size ?? 10.5) - 0.5, 7)).fillColor('#0F172A')
     } else if (seg.style === 'bold') {
-      const boldName = opts.bodyFont === 'FiloBody' ? 'FiloBodyBold' : `${opts.bodyFont}-Bold`
       doc.font(boldName).fontSize(opts.size).fillColor(opts.baseColor)
     } else if (seg.style === 'link') {
       doc.font(opts.bodyFont).fontSize(opts.size).fillColor('#2563EB')
     } else {
       doc.font(opts.bodyFont).fontSize(opts.size).fillColor(opts.baseColor)
     }
-    doc.text(seg.text, runOpts)
-    first = false
-  }
+    if (i === 0) {
+      // x/y MUST be passed as positional numbers. The old code stuffed them
+      // into the options object — pdfkit's _initOptions treats an object in
+      // the x slot as THE OPTIONS and never reads options.x/options.y, so
+      // styled paragraphs silently started at whatever doc.x/doc.y the
+      // PREVIOUS component left (mid-page, mid-column, off the page edge).
+      if (yPos !== undefined) doc.text(seg.text, x, yPos, runOpts)
+      else doc.text(seg.text, x, runOpts)
+    } else {
+      doc.text(seg.text, runOpts)
+    }
+  })
   return doc.y
 }
 
@@ -339,7 +365,14 @@ export class PdfRenderer implements DocumentRenderer {
     // page (registered the handler too late).
     let coverPages = 0
     let tocPages = 0
+    // Pages already stamped — the cover's trailing addPage() fires pageAdded
+    // for the first front-matter page AND the explicit stamp below hits the
+    // same page, which used to print every header/footer TWICE ("Page 2 of
+    // 34" over "Page 2 of 34", slightly offset).
+    const stampedPages = new Set<number>()
     const stampHeaderFooter = (pageNo: number) => {
+      if (stampedPages.has(pageNo)) return
+      stampedPages.add(pageNo)
       // The footer draws BELOW the content area (pageH - 36 < maxY). Without
       // this guard, pdfkit auto-paginates DURING stamping → pageAdded fires
       // again → stamp again → infinite recursion (RangeError: Maximum call
@@ -527,9 +560,7 @@ export class PdfRenderer implements DocumentRenderer {
 
       // ---- heading (ornament-driven) ----
       const headingText = isPart
-        ? num
-          ? `Part ${num} — ${section.title}`
-          : section.title
+        ? partHeadingLabel(num, section.title)
         : isSub
           ? num
             ? `${num}  ${section.title}`
@@ -690,7 +721,7 @@ export class PdfRenderer implements DocumentRenderer {
       const isPart = e.level === 'part'
       const isSub = e.level === 'section' || e.level === 'subsection'
       const indent = isPart ? 0 : isSub ? 32 : 16
-      const label = e.number ? (isPart ? `Part ${e.number} — ${e.title}` : isSub ? `${e.number}  ${e.title}` : `${e.number}.  ${e.title}`) : e.title
+      const label = e.number ? (isPart ? partHeadingLabel(e.number, e.title) : isSub ? `${e.number}  ${e.title}` : `${e.number}.  ${e.title}`) : e.title
       // body-relative page + cover/TOC offset = absolute 1-based page. The
       // stray "+1" that shifted every printed number is GONE.
       const printedPage = e.page + opts.offset
@@ -810,9 +841,17 @@ export class PdfRenderer implements DocumentRenderer {
     const width = pageW - margin * 2
     let y = opts.y
 
+    // DEFENSIVE STATE GUARD: an open pdfkit "continued" wrapper left by any
+    // code path would make the next heightOfString() measurement RE-PAINT
+    // the measured text into the document (the duplicate/overlap class of
+    // bugs). Every styled run now closes its own wrapper, but components are
+    // an absolute boundary — start each one with clean text state.
+    doc._wrapper = null
+    doc._textOptions = null
+
     switch (component.type) {
       case 'heading': {
-        const text = asString(component.content)
+        const text = inlineToPlainText(asString(component.content))
         if (!text) return y
         y = ensureSpace(y, 46)
         doc.font(headingFont).fontSize(13.5).fillColor(primary)
@@ -825,13 +864,17 @@ export class PdfRenderer implements DocumentRenderer {
         if (!text) return y
         doc.font(bodyFont).fontSize(bodyFontSize).fillColor(fg)
         const height = doc.heightOfString(text, { width, lineGap: bodyLineGap })
+        // Styled runs (bold/mono at slightly different metrics) can reflow by
+        // one line versus the plain-text measurement — reserve one extra line
+        // so the flow never crosses into the footer zone.
+        const cushion = hasInlineStyling(text) ? bodyFontSize * 1.8 : 0
         // A paragraph taller than one page: flow it with pdfkit's own
         // pagination instead of ensureSpace (which would loop forever).
-        if (height > opts.contentBottom - margin - 8) {
+        if (height + cushion > opts.contentBottom - margin - 8) {
           drawStyledText(doc, text, margin, y, { width, align: 'justify', lineGap: bodyLineGap, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: bodyFontSize })
           return doc.y + 10
         }
-        y = ensureSpace(y, height + 10)
+        y = ensureSpace(y, height + cushion + 10)
         drawStyledText(doc, text, margin, y, { width, align: 'justify', lineGap: bodyLineGap, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: bodyFontSize })
         return doc.y + 10
       }
@@ -844,10 +887,12 @@ export class PdfRenderer implements DocumentRenderer {
         let iy = y
         for (const item of items) {
           if (!item) continue
-          const h = doc.heightOfString(item, { width: width - 18, lineGap: 2 })
-          iy = ensureSpace(iy, h + 6)
+          const h = doc.heightOfString(inlineToPlainText(item), { width: width - 18, lineGap: 2 })
+          // +1 line cushion when the item carries inline styling — the styled
+          // flow can reflow by a line against the plain measurement.
+          iy = ensureSpace(iy, h + (hasInlineStyling(item) ? bodyFontSize * 1.6 : 0) + 6)
           doc.fillColor(accent).circle(margin + 4, iy + 5, 2).fill()
-          doc.fillColor(fg).text(item, margin + 16, iy, { width: width - 18, lineGap: 2 })
+          drawStyledText(doc, item, margin + 16, iy, { width: width - 18, lineGap: 2, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: bodyFontSize })
           iy = doc.y + 6
         }
         return iy + 4
@@ -858,26 +903,26 @@ export class PdfRenderer implements DocumentRenderer {
         if (!text) return y
         const qWidth = width - 36
         doc.font(bodyFont).fontSize(11.5)
-        const h = doc.heightOfString(`“${text}”`, { width: qWidth, lineGap: 3 })
-        y = ensureSpace(y, h + 24)
-        doc.rect(margin, y, 3, h + 12).fill(accent)
-        doc.fillColor(primary).font(bodyFont).fontSize(11.5)
-        doc.text(`“${text}”`, margin + 18, y + 6, { width: qWidth, lineGap: 3 })
-        return y + h + 24
+        const h = doc.heightOfString(`“${inlineToPlainText(text)}”`, { width: qWidth, lineGap: 3 })
+        const cushion = hasInlineStyling(text) ? 14 : 0
+        y = ensureSpace(y, h + cushion + 24)
+        doc.rect(margin, y, 3, h + cushion + 12).fill(accent)
+        drawStyledText(doc, text, margin + 18, y + 6, { width: qWidth, lineGap: 3, bodyFont, monoFont: opts.monoFont || undefined, baseColor: primary, size: 11.5 })
+        return y + h + cushion + 24
       }
 
       case 'callout': {
         const text = asString(component.content)
         if (!text) return y
         doc.font(bodyFont).fontSize(10.5)
-        const h = doc.heightOfString(text, { width: width - 32, lineGap: 2 })
-        const boxH = h + 24
+        const h = doc.heightOfString(inlineToPlainText(text), { width: width - 32, lineGap: 2 })
+        const cushion = hasInlineStyling(text) ? 14 : 0
+        const boxH = h + cushion + 24
         y = ensureSpace(y, boxH + 12)
         const fill = tint(accent, 0.9)
         doc.rect(margin, y, width, boxH).fill(fill)
         doc.rect(margin, y, 4, boxH).fill(accent)
-        doc.fillColor(fg).font(headingFont).fontSize(10.5)
-        doc.text(text, margin + 18, y + 12, { width: width - 32, lineGap: 2 })
+        drawStyledText(doc, text, margin + 18, y + 12, { width: width - 32, lineGap: 2, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: 10.5 })
         return y + boxH + 14
       }
 
@@ -910,53 +955,101 @@ export class PdfRenderer implements DocumentRenderer {
       case 'code': {
         // FIRST-CLASS CODE BLOCK: theme-shaded monospace panel with a language
         // label and an accent rule — the PDF twin of the DOCX code block.
-        // Line-by-line layout (measure → paginate → draw) so the panel splits
-        // cleanly across pages with no trapped paragraphs.
+        //
+        // MANUAL TOKEN LAYOUT: every visual line is drawn token-by-token with
+        // an explicitly advanced x and a fixed y (no pdfkit flow wrapper is
+        // ever opened). The previous implementation drove pdfkit's continued
+        // runs with per-token coordinates — pdfkit re-anchored each token to
+        // the explicit x/y, scrambled line order, dropped tokens, and (for
+        // overlong lines) auto-paginated ONE TOKEN PER PAGE. Explicit
+        // coordinates are deterministic: measure → paginate → draw.
         const block = asCodeBlock(component.content)
         if (!block) return y
         const mono = opts.monoFont || 'Courier'
         const monoLabel = opts.monoFont ? 'FiloMonoBold' : 'Courier-Bold'
         // Bundled Shiki token stream — colors render in the PDF text layer.
         const tokenLines = await highlightCode(block.code, block.language).catch(() => null)
-        const allLines: Array<Array<{ text: string; color: string }>> =
+        const sourceLines: Array<Array<{ text: string; color: string }>> =
           tokenLines && tokenLines.length > 0
             ? tokenLines
             : block.code.split('\n').map((l) => [{ text: l, color: fg.replace('#', '').toUpperCase() }])
-        const lines = allLines.slice(0, 400)
-        const truncated = allLines.length - lines.length
+        const maxSourceLines = 400
+        const truncatedSource = Math.max(0, sourceLines.length - maxSourceLines)
         const fontSize = 8.5
         const lineGap = 2.5
         const padX = 14
         const padY = 9
         const textW = width - padX * 2 - 4
+
+        // ---- layout: wrap tokens into visual lines that FIT textW --------
         doc.font(mono).fontSize(fontSize)
-        // Measure every source line's wrapped height ONCE (heightOfString
-        // draws nothing — safe for measurement).
-        const lineHeights = lines.map((line) => {
-          const raw = Array.isArray(line) ? line.map((t) => t.text).join('') : String(line)
-          return raw.length ? doc.heightOfString(raw, { width: textW, lineGap }) : fontSize
-        })
+        const lineWidthOf = (s: string) => doc.widthOfString(s)
+        type Tok = { text: string; color: string }
+        const visualLines: Tok[][] = []
+        const hardSplit = (tok: Tok): Tok[] => {
+          // A single token wider than the panel (minified JSON, long URLs):
+          // split on characters so layout can never stall.
+          const chunks: Tok[] = []
+          let cur = ''
+          for (const ch of tok.text) {
+            if (lineWidthOf(cur + ch) > textW && cur) {
+              chunks.push({ text: cur, color: tok.color })
+              cur = ch
+            } else {
+              cur += ch
+            }
+          }
+          if (cur) chunks.push({ text: cur, color: tok.color })
+          return chunks
+        }
+        for (const srcLine of sourceLines.slice(0, maxSourceLines)) {
+          const toks: Tok[] = []
+          for (const tok of srcLine) {
+            if (!tok.text) continue
+            if (lineWidthOf(tok.text) <= textW) {
+              toks.push(tok)
+            } else {
+              toks.push(...hardSplit(tok))
+            }
+          }
+          if (toks.length === 0) {
+            visualLines.push([]) // blank source line keeps its row
+            continue
+          }
+          let cur: Tok[] = []
+          let curW = 0
+          for (const tok of toks) {
+            const w = lineWidthOf(tok.text)
+            if (curW + w > textW && cur.length > 0) {
+              visualLines.push(cur)
+              // A token that splits across rows keeps its own characters
+              // (including its leading whitespace) on the next row.
+              cur = []
+              curW = 0
+            }
+            cur.push(tok)
+            curW += w
+          }
+          if (cur.length > 0) visualLines.push(cur)
+        }
+
+        const lineHeight = doc.currentLineHeight(true) + lineGap
         const labelH = block.language ? 16 : 0
 
         let idx = 0
         let panelY = y
         let firstSegment = true
-        while (idx < lines.length) {
+        while (idx < visualLines.length || firstSegment) {
           const top = firstSegment ? panelY : margin
           const avail = opts.contentBottom - top - padY * 2 - (firstSegment ? labelH : 0)
-          // Fit as many whole lines as possible on this segment.
-          let take = 0
-          let used = 0
-          while (idx + take < lines.length && used + lineHeights[idx + take] <= avail) {
-            used += lineHeights[idx + take]
-            take++
-          }
-          if (take === 0) take = 1 // single oversized line still progresses
+          const capacity = Math.max(1, Math.floor(avail / lineHeight))
+          const take = Math.min(capacity, visualLines.length - idx)
+          if (take <= 0) break
           if (!firstSegment) {
             doc.addPage()
             panelY = margin
           }
-          const segH = used + padY * 2 + (firstSegment ? labelH : 0)
+          const segH = take * lineHeight + padY * 2 + (firstSegment ? labelH : 0)
           doc.rect(margin, panelY, width, segH).fill(tint(primary, 0.96))
           doc.rect(margin, panelY, 3.5, segH).fill(accent)
           doc.rect(margin, panelY, width, 0.8).fill(borderCol)
@@ -964,40 +1057,31 @@ export class PdfRenderer implements DocumentRenderer {
           let ty = panelY + padY
           if (firstSegment && block.language) {
             doc.font(monoLabel).fontSize(7).fillColor(mutedFg)
-            doc.text(block.language.toUpperCase(), margin + padX, ty, { width: textW, lineBreak: false })
+            doc.text(block.language.toUpperCase(), margin + padX, ty, { lineBreak: false })
             ty += labelH
           }
           doc.font(mono).fontSize(fontSize)
           for (let k = 0; k < take; k++) {
-            const toks = lines[idx + k]
-            if (toks.length && toks.some((t) => t.text.length)) {
-              let firstTok = true
-              for (const tok of toks) {
-                if (!tok.text) continue
-                doc.fillColor(`#${tok.color}`)
-                doc.text(tok.text, margin + padX + 2, ty, {
-                  width: textW,
-                  lineGap,
-                  lineBreak: false,
-                  ...(firstTok ? {} : { continued: true }),
-                })
-                firstTok = false
-              }
-              // Close the continued run so the next line starts fresh.
-              doc.text('', { continued: false })
-            } else {
-              doc.fillColor(fg)
-              doc.text(' ', margin + padX + 2, ty, { width: textW, lineGap })
+            const toks = visualLines[idx + k]
+            let tx = margin + padX + 2
+            for (const tok of toks) {
+              if (!tok.text) continue
+              doc.fillColor(`#${tok.color}`)
+              // Explicit x/y + lineBreak:false — draws exactly here, advances
+              // nothing; we advance x ourselves. No wrapper, no flow state.
+              doc.text(tok.text, tx, ty, { lineBreak: false })
+              tx += doc.widthOfString(tok.text)
             }
-            ty += lineHeights[idx + k]
+            ty += lineHeight
           }
           idx += take
           panelY = panelY + segH + 2
           firstSegment = false
+          if (idx >= visualLines.length) break
         }
-        if (truncated > 0) {
+        if (truncatedSource > 0) {
           doc.font(mono).fontSize(7.5).fillColor(mutedFg)
-          doc.text(`… ${truncated} more lines truncated`, margin + padX, panelY + 2, { width: width - padX * 2 })
+          doc.text(`… ${truncatedSource} more lines truncated`, margin + padX, panelY + 2, { width: width - padX * 2 })
           panelY = doc.y + 4
         }
         return panelY + 12
@@ -1007,23 +1091,46 @@ export class PdfRenderer implements DocumentRenderer {
         const data = asTwoColumn(component.content)
         if (!data) return y
         const colW = (width - 16) / 2
-        const colH = 150
+        // MEASURED height: the old fixed 150pt box could not hold 4-5
+        // two-line bullets — text spilled below the card outline and the
+        // following component drew over it. Measure both columns (title +
+        // each point) and size the box to the taller one.
+        const measureColumn = (title: string, points: string[]): { h: number; lines: number[] } => {
+          doc.font(headingFont).fontSize(11.5)
+          const titleH = doc.heightOfString(title, { width: colW - 24 })
+          let h = 12 + titleH + 8 // top padding + title + gap
+          const lines: number[] = []
+          doc.font(bodyFont).fontSize(9.5)
+          for (const p of points.slice(0, 5)) {
+            const ph = doc.heightOfString(inlineToPlainText(p), { width: colW - 34, lineGap: 1.5 })
+            lines.push(ph)
+            // styled points can reflow one line taller than the plain measure
+            h += ph + (hasInlineStyling(p) ? 14 : 0) + 5
+          }
+          return { h: h + 8, lines }
+        }
+        const left = measureColumn(data.leftTitle, data.leftPoints)
+        const right = measureColumn(data.rightTitle, data.rightPoints)
+        const maxPageColH = opts.contentBottom - margin - 24
+        const colH = Math.min(maxPageColH, Math.max(150, left.h, right.h))
         y = ensureSpace(y, colH + 16)
         const render = (title: string, points: string[], x: number) => {
           doc.rect(x, y, colW, colH).fillAndStroke('#FFFFFF', borderCol)
           doc.rect(x, y, colW, 2.5).fill(accent)
           doc.font(headingFont).fontSize(11.5).fillColor(primary)
-          doc.text(title, x + 12, y + 12, { width: colW - 24 })
-          doc.font(bodyFont).fontSize(9.5).fillColor(fg)
+          doc.text(inlineToPlainText(title), x + 12, y + 12, { width: colW - 24 })
           let py = y + 34
           for (const p of points.slice(0, 5)) {
-            doc.circle(x + 14, py + 4, 1.6).fill(accent)
-            doc.text(p, x + 22, py, { width: colW - 34, lineGap: 1.5 })
+            doc.fillColor(accent).circle(x + 14, py + 4, 1.6).fill()
+            drawStyledText(doc, p, x + 22, py, { width: colW - 34, lineGap: 1.5, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: 9.5 })
             py = doc.y + 5
           }
         }
         render(data.leftTitle, data.leftPoints, margin)
         render(data.rightTitle, data.rightPoints, margin + colW + 16)
+        // The last text call left doc.x inside the right column — reset so
+        // the next flow-drawn component starts at the left margin.
+        doc.x = margin
         return y + colH + 16
       }
 
@@ -1080,8 +1187,7 @@ export class PdfRenderer implements DocumentRenderer {
         // never a raw JSON dump, never a silent drop.
         const text = asString(component.content)
         if (text) {
-          doc.font(bodyFont).fontSize(10.5).fillColor(fg)
-          doc.text(text, margin, y, { width, lineGap: 3 })
+          drawStyledText(doc, text, margin, y, { width, lineGap: 3, bodyFont, monoFont: opts.monoFont || undefined, baseColor: fg, size: 10.5 })
           return doc.y + 10
         }
         const serialized = component.content && typeof component.content === 'object' ? JSON.stringify(component.content) : ''

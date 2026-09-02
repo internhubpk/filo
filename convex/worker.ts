@@ -55,6 +55,7 @@ import {
 import {
   buildPlanningSystemPrompt,
   buildSectionContentPrompt,
+  extractJsonObject,
   parsePlanResponse,
   normalizeComponentType,
   type DocumentFormat,
@@ -802,24 +803,81 @@ async function generateOneUnit(
   }
 }
 
-/** Parse the section AI response into normalized render-ready components. */
+/**
+ * Parse the section AI response into normalized render-ready components.
+ *
+ * The model response can be: clean JSON, fenced JSON, JSON wrapped in prose,
+ * or — when the output hits maxTokens — TRUNCATED JSON. The old implementation
+ * only tried a direct parse and one fence regex; on any failure it stored the
+ * ENTIRE raw response (including the half-finished JSON) as a single
+ * paragraph component, which then rendered pages of raw `{"components":…}`
+ * into the user's document.
+ *
+ * Strategy:
+ *   1. extractJsonObject — direct/fenced/brace-balanced/repair/truncation
+ *      rescue (the same bulletproof extractor the planner uses).
+ *   2. If no usable `components` array survived, salvage complete
+ *      `{"type":…,"content":…}` objects by a balanced scan of the raw text.
+ *   3. Last resort: a BOUNDED plain-text paragraph (never unbounded JSON).
+ */
 function safeParseComponents(raw: string): Array<{ type: string; content: unknown }> {
-  let parsed: any;
+  const text = String(raw ?? "");
+
+  let list: unknown[] | null = null;
   try {
-    parsed = JSON.parse(raw);
+    const parsed = extractJsonObject(text) as { components?: unknown } | null;
+    if (parsed && Array.isArray(parsed.components)) list = parsed.components as unknown[];
   } catch {
-    const m = raw.match(/```(?:json)?\s*([\s\S]*?)```/);
-    if (m) parsed = JSON.parse(m[1]);
-    else parsed = { components: [{ type: "paragraph", content: raw }] };
+    // extractJsonObject throws when nothing parseable remains — salvage below.
   }
-  const list = Array.isArray(parsed?.components) ? parsed.components : [];
-  const normalized = list
+
+  // Salvage pass: pick every BALANCED {...} object that carries the component
+  // shape (both "type" and "content" keys). Recovers the completed components
+  // of a truncated response even when the whole-document parse could not be
+  // repaired — the incomplete tail object is dropped, not dumped.
+  if (!list || list.length === 0) {
+    const salvaged: Array<{ at: number; obj: Record<string, unknown> }> = [];
+    const stack: Array<{ start: number }> = [];
+    let inString = false;
+    let escaped = false;
+    for (let i = 0; i < text.length; i++) {
+      const ch = text[i];
+      if (inString) {
+        if (escaped) escaped = false;
+        else if (ch === "\\") escaped = true;
+        else if (ch === '"') inString = false;
+        continue;
+      }
+      if (ch === '"') inString = true;
+      else if (ch === "{") stack.push({ start: i });
+      else if (ch === "}" && stack.length > 0) {
+        const { start } = stack.pop()!;
+        try {
+          const obj = JSON.parse(text.slice(start, i + 1));
+          if (obj && typeof obj === "object" && "content" in obj && "type" in obj) {
+            salvaged.push({ at: start, obj });
+          }
+        } catch {
+          // incomplete/noisy object — skip
+        }
+      }
+    }
+    if (salvaged.length > 0) {
+      list = salvaged.sort((a, b) => a.at - b.at).map((s) => s.obj);
+    }
+  }
+
+  const source = list ?? [];
+  const normalized = source
     .filter((c: any) => c && c.content !== undefined && c.content !== null)
     .map((c: any) => ({
       type: normalizeComponentType(String(c.type || "paragraph")),
       content: c.content,
     }));
   if (normalized.length === 0) {
+    // Bounded honest fallback — never dump an unbounded raw response.
+    const snippet = text.replace(/\s+/g, " ").trim().slice(0, 1200);
+    if (snippet) return [{ type: "PARAGRAPH", content: snippet }];
     return [{ type: "PARAGRAPH", content: "(empty section)" }];
   }
   return normalized;

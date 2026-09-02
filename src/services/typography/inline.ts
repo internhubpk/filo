@@ -36,23 +36,34 @@ export function parseInlineMarkdown(input: unknown): InlineSegment[] {
     if (m.index > last) segments.push({ text: text.slice(last, m.index), style: 'text' })
     if (m[2] !== undefined) {
       segments.push({ text: m[2], style: 'code' })
-    } else if (m[5] !== undefined && m[6]) {
-      segments.push({ text: m[4] ?? m[5], style: 'link', href: m[6] })
+    } else if (m[3] !== undefined) {
+      // [text](url) — G3 whole, G4 link text, G5 URL.
+      segments.push({ text: m[4] || m[5], style: 'link', href: m[5] })
     } else if (m[7] !== undefined) {
       // ***bold italic*** → bold wins, italics preserved as emphasis chars-free
       segments.push({ text: m[7], style: 'bold' })
     } else if (m[9] !== undefined) {
       segments.push({ text: m[9], style: 'bold' })
     } else if (m[11] !== undefined) {
-      segments.push({ text: m[11], style: 'bold' })
+      // __content__ is ambiguous: markdown bold vs. a Python dunder
+      // identifier. Technical prose (__init__, __enter__, __dict__) means the
+      // DUNDER — rendering "enter" in bold destroyed the identifier. When the
+      // content is a single snake_case token with no spaces, keep the FULL
+      // text (underscores included) as inline code; otherwise treat as bold.
+      const full = m[11] !== undefined ? String(m[0]) : ''
+      if (/^__[a-z][a-z0-9_]*__$/i.test(full) && !m[11]!.includes(' ')) {
+        segments.push({ text: full, style: 'code' })
+      } else {
+        segments.push({ text: m[11], style: 'bold' })
+      }
     } else if (m[13] !== undefined) {
       segments.push({ text: m[13], style: 'strike' })
+    } else if (m[14] !== undefined) {
+      segments.push({ text: m[14], style: 'italic' })
     } else if (m[15] !== undefined) {
       segments.push({ text: m[15], style: 'italic' })
-    } else if (m[17] !== undefined) {
-      segments.push({ text: m[17], style: 'italic' })
-    } else if (m[18] !== undefined) {
-      segments.push({ text: m[18], style: 'link', href: m[18] })
+    } else if (m[16] !== undefined) {
+      segments.push({ text: m[16], style: 'link', href: m[16] })
     }
     last = m.index + m[0].length
   }
@@ -65,4 +76,26 @@ export function inlineToPlainText(input: unknown): string {
   return parseInlineMarkdown(input)
     .map((s) => s.text)
     .join('')
+}
+
+/**
+ * Move whitespace at segment BOUNDARIES onto the END of the previous segment.
+ *
+ * Flow typesetting engines (pdfkit continued runs, DOCX run joins, …) wrap
+ * each chunk independently and swallow whitespace at the START of a chunk —
+ * a styled run "exit" followed by " to establish" would join as "exitto".
+ * Shifting the space to the trailing edge of the previous segment preserves
+ * it (trailing spaces at a line break are dropped by any engine, which is
+ * correct typography; a MISSING space mid-line is not).
+ */
+export function normalizeSegmentBoundaries<T extends { text: string }>(segments: T[]): T[] {
+  const out = segments.map((s) => ({ ...s }))
+  for (let i = 0; i < out.length - 1; i++) {
+    const lead = out[i + 1].text.match(/^\s+/)
+    if (lead) {
+      out[i].text = out[i].text.replace(/\s+$/, '') + lead[0]
+      out[i + 1].text = out[i + 1].text.slice(lead[0].length)
+    }
+  }
+  return out.filter((s) => s.text.length > 0)
 }

@@ -47,6 +47,67 @@ export interface RawComponent {
 }
 
 /**
+ * Normalized text key for duplicate detection: case/whitespace/markdown-emphasis
+ * insensitive, trailing punctuation trimmed. Two components with the same key
+ * ARE the same content as far as a reader is concerned.
+ */
+function duplicateKey(text: unknown): string {
+  return String(text ?? '')
+    .toLowerCase()
+    .replace(/[\s\u00A0]+/g, ' ')
+    .replace(/[`*_~]/g, '')
+    .trim()
+    .replace(/[.!?:;,]+$/, '')
+}
+
+/**
+ * De-duplicate a section's components (the "same paragraph twice" class of
+ * defects observed in generated documents):
+ *
+ *   1. A leading HEADING that restates the section title (the renderer already
+ *      draws the section heading — the AI copying it into the components list
+ *      produced doubled chapter titles).
+ *   2. A PARAGRAPH/HEADING/CALLOUT/QUOTE identical (normalized) to the one
+ *      immediately before it.
+ *   3. A PARAGRAPH whose full text is CONTAINED in the immediately preceding
+ *      paragraph — the model re-emitting the tail of the previous paragraph as
+ *      its own component (seen verbatim in generated books).
+ *
+ * Applied centrally so DOCX/PDF/PPTX/HTML/TXT all render the same cleaned
+ * component stream.
+ */
+function dedupeComponents(components: CanonicalComponent[], sectionTitle: string): CanonicalComponent[] {
+  const titleKey = duplicateKey(sectionTitle)
+  const out: CanonicalComponent[] = []
+  for (let i = 0; i < components.length; i++) {
+    const c = components[i]
+    const isTextual = c.type === 'paragraph' || c.type === 'heading' || c.type === 'callout' || c.type === 'quote'
+    const text = typeof c.content === 'string' ? c.content : ''
+    const key = duplicateKey(text)
+
+    // 1. leading heading duplicating the section title
+    if (c.type === 'heading' && out.length === 0 && titleKey && key === titleKey) continue
+
+    if (isTextual && key && out.length > 0) {
+      const prev = out[out.length - 1]
+      const prevIsTextual =
+        prev.type === 'paragraph' || prev.type === 'heading' || prev.type === 'callout' || prev.type === 'quote'
+      if (prevIsTextual) {
+        const prevText = typeof prev.content === 'string' ? prev.content : ''
+        const prevKey = duplicateKey(prevText)
+        // 2. exact adjacent duplicate
+        // 3. this paragraph is a verbatim chunk of the previous one
+        if (key === prevKey || (c.type === 'paragraph' && prev.type === 'paragraph' && key.length >= 120 && prevKey.includes(key))) {
+          continue
+        }
+      }
+    }
+    out.push(c)
+  }
+  return out
+}
+
+/**
  * Group raw components by section, normalize types to the canonical
  * lowercase vocabulary, and order them. Sections without components still
  * render (renderers own their empty-section handling).
@@ -74,7 +135,10 @@ export function prepareForRendering(
     type: section.type ?? 'content',
     title: section.title ?? '',
     order: section.order ?? 0,
-    components: (bySection.get(section.id) ?? []).slice().sort((a, b) => a.order - b.order),
+    components: dedupeComponents(
+      (bySection.get(section.id) ?? []).slice().sort((a, b) => a.order - b.order),
+      section.title ?? ''
+    ),
   }))
 
   // Include any components whose sectionId didn't match a spec section
@@ -88,7 +152,7 @@ export function prepareForRendering(
         type: 'content',
         title: '',
         order: sections.length,
-        components: list.slice().sort((a, b) => a.order - b.order),
+        components: dedupeComponents(list.slice().sort((a, b) => a.order - b.order), ''),
       })
     }
   }
