@@ -3,7 +3,9 @@
 // =============================================================================
 // ChatWorkspace — the unified chat + document workspace (THE product).
 // =============================================================================
-// Layout: [history panel] [conversation]  inside the icon-rail AppShell.
+// Layout: [conversation] [history panel]  inside the icon-rail AppShell.
+// The history panel lives on the RIGHT and is closed by default — a header
+// toggle (PanelRight) slides it in; on mobile it opens as a right-hand sheet.
 //
 // The four database states are rendered honestly at every layer:
 //   • transcript: undefined → skeleton bubbles · [] → nothing yet · rows → UI
@@ -34,12 +36,15 @@ import {
   FileText,
   Menu,
   MessageSquare,
+  PanelRightClose,
+  PanelRightOpen,
   Plus,
   Share2,
   Sparkles,
   Trash2,
   TriangleAlert,
 } from "lucide-react";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { api } from "@convex/_generated/api";
 import { useFiloSession } from "@/hooks/use-session";
 import { cn } from "@/lib/utils";
@@ -63,6 +68,7 @@ import { ChatMarkdown } from "@/components/chat/chat-markdown";
 import { SourcesBlock, toChatSources } from "@/components/chat/sources-block";
 import { GenerationCard } from "@/components/chat/generation-card";
 import { ShareChatDialog } from "@/components/chat/share-dialog";
+import { WelcomeGlyph } from "@/components/chat/welcome-animation";
 
 // ==================== Transcript message shape ====================
 
@@ -144,8 +150,12 @@ export function ChatWorkspace({
   const [chatId, setChatId] = useState<string | null>(initialChatId ?? null);
   const [mode, setMode] = useState<ComposerMode>(initialMode ?? "chat");
   const [format, setFormat] = useState<DocFormat>("docx");
+  // Both panels start CLOSED: the desktop right-hand sidebar and the mobile
+  // drawer only appear when the user asks for them.
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [shareOpen, setShareOpen] = useState(false);
+  const reducedMotion = useReducedMotion() ?? false;
 
   // URL sync for deep links (/chat/<id>).
   useEffect(() => {
@@ -489,16 +499,9 @@ export function ChatWorkspace({
 
   return (
     <div className="flex h-full min-w-0 flex-1">
-      {/* Desktop history panel */}
-      <aside className="hidden w-[268px] shrink-0 border-r bg-sidebar md:block">
-        <QueryBoundary>
-          <HistoryPanel activeChatId={chatId} onOpenChat={openChat} onNewChat={newChat} />
-        </QueryBoundary>
-      </aside>
-
-      {/* Mobile history drawer */}
+      {/* Mobile history drawer — right-hand sheet, closed by default */}
       <Sheet open={historyOpen} onOpenChange={setHistoryOpen}>
-        <SheetContent side="left" className="w-[280px] bg-sidebar p-0">
+        <SheetContent side="right" className="w-[280px] bg-sidebar p-0">
           <SheetHeader className="sr-only">
             <SheetTitle>Chat history</SheetTitle>
           </SheetHeader>
@@ -545,6 +548,18 @@ export function ChatWorkspace({
 
           <Button variant="ghost" size="sm" className="hidden h-8 gap-1.5 px-2.5 text-xs lg:inline-flex" onClick={newChat}>
             <Plus className="size-3.5" /> New
+          </Button>
+
+          {/* Right sidebar toggle — closed by default on desktop */}
+          <Button
+            variant="ghost"
+            size="icon"
+            className="hidden size-8 md:inline-flex"
+            onClick={() => setSidebarOpen((v) => !v)}
+            aria-label={sidebarOpen ? "Close chat history" : "Open chat history"}
+            aria-expanded={sidebarOpen}
+          >
+            {sidebarOpen ? <PanelRightClose className="size-4.5" /> : <PanelRightOpen className="size-4.5" />}
           </Button>
         </header>
 
@@ -609,6 +624,26 @@ export function ChatWorkspace({
           </div>
         </div>
       </div>
+
+      {/* Desktop history panel — RIGHT side, toggled, closed by default */}
+      <AnimatePresence initial={false}>
+        {sidebarOpen ? (
+          <motion.aside
+            key="history-sidebar"
+            initial={reducedMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
+            animate={reducedMotion ? { opacity: 1 } : { width: 268, opacity: 1 }}
+            exit={reducedMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
+            transition={{ duration: reducedMotion ? 0.15 : 0.28, ease: [0.16, 1, 0.3, 1] }}
+            className="hidden shrink-0 overflow-hidden border-l bg-sidebar md:block"
+          >
+            <div className="h-full w-[268px]">
+              <QueryBoundary>
+                <HistoryPanel activeChatId={chatId} onOpenChat={openChat} onNewChat={newChat} />
+              </QueryBoundary>
+            </div>
+          </motion.aside>
+        ) : null}
+      </AnimatePresence>
 
       {/* Share dialog */}
       <ShareChatDialog chatId={chatId} open={shareOpen} onOpenChange={setShareOpen} />
@@ -774,9 +809,7 @@ function EmptyState({
   const firstName = (userName ?? "there").split(" ")[0];
   return (
     <div className="flex flex-col items-center py-10 text-center sm:py-16">
-      <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/10">
-        <Sparkles className="size-6 text-primary" />
-      </div>
+      <WelcomeGlyph className="size-14" />
       <h2 className="mt-4 text-xl font-semibold tracking-tight">Hi {firstName} — what are we working on?</h2>
       <p className="mt-1.5 max-w-md text-sm text-muted-foreground">
         Research a topic, think through an idea, then switch to Document Mode to turn the
