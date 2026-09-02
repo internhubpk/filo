@@ -3,9 +3,10 @@
 // =============================================================================
 // ChatWorkspace — the unified chat + document workspace (THE product).
 // =============================================================================
-// Layout: [conversation] [history panel]  inside the icon-rail AppShell.
-// The history panel lives on the RIGHT and is closed by default — a header
-// toggle (PanelRight) slides it in; on mobile it opens as a right-hand sheet.
+// Layout: [conversation] inside the AppShell, whose ONE sidebar (icon rail ⟷
+// expanded panel, closed by default) owns navigation + chat history + account.
+// The workspace opens/closes that sidebar via SidebarContext (useSidebar):
+// the header's menu button opens it on mobile, the panel toggle on desktop.
 //
 // The four database states are rendered honestly at every layer:
 //   • transcript: undefined → skeleton bubbles · [] → nothing yet · rows → UI
@@ -25,7 +26,6 @@ import React, {
   useMemo,
   useRef,
   useState,
-  type ErrorInfo,
   type ReactNode,
 } from "react";
 import { useRouter } from "next/navigation";
@@ -44,14 +44,12 @@ import {
   Trash2,
   TriangleAlert,
 } from "lucide-react";
-import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import { api } from "@convex/_generated/api";
 import { useFiloSession } from "@/hooks/use-session";
 import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Skeleton } from "@/components/ui/skeleton";
-import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -62,7 +60,8 @@ import {
   AlertDialogHeader,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { HistoryPanel } from "@/components/chat/history-panel";
+import { QueryBoundary } from "@/components/chat/query-boundary";
+import { useSidebar } from "@/components/layout/sidebar-context";
 import { Composer, type ComposerMode, type DocFormat } from "@/components/chat/composer";
 import { ChatMarkdown } from "@/components/chat/chat-markdown";
 import { SourcesBlock, toChatSources } from "@/components/chat/sources-block";
@@ -91,50 +90,6 @@ interface TranscriptMessage {
   createdAt: number;
 }
 
-// ==================== Error boundary for Convex subscriptions ====================
-
-class QueryBoundary extends React.Component<
-  { children: ReactNode },
-  { error: Error | null }
-> {
-  state = { error: null as Error | null };
-  static getDerivedStateFromError(error: Error) {
-    return { error };
-  }
-  componentDidCatch(error: Error, info: ErrorInfo) {
-    console.error("[ChatWorkspace] subscription error:", error, info.componentStack);
-  }
-  render() {
-    if (this.state.error) {
-      const auth = this.state.error.message.includes("Unauthorized");
-      return (
-        <div className="flex flex-1 flex-col items-center justify-center gap-3 p-8 text-center">
-          <TriangleAlert className="size-8 text-destructive" />
-          <p className="text-sm font-medium">
-            {auth ? "Your session has expired" : "Could not load this conversation"}
-          </p>
-          <p className="max-w-sm text-xs text-muted-foreground">
-            {auth
-              ? "Sign in again to keep chatting — your history is safe."
-              : this.state.error.message || "The connection to the live database failed."}
-          </p>
-          <div className="flex gap-2">
-            <Button size="sm" variant="outline" onClick={() => this.setState({ error: null })}>
-              Retry
-            </Button>
-            {auth ? (
-              <Button size="sm" onClick={() => (window.location.href = "/login")}>
-                Sign in
-              </Button>
-            ) : null}
-          </div>
-        </div>
-      );
-    }
-    return this.props.children;
-  }
-}
-
 // ==================== Main workspace ====================
 
 export function ChatWorkspace({
@@ -150,12 +105,10 @@ export function ChatWorkspace({
   const [chatId, setChatId] = useState<string | null>(initialChatId ?? null);
   const [mode, setMode] = useState<ComposerMode>(initialMode ?? "chat");
   const [format, setFormat] = useState<DocFormat>("docx");
-  // Both panels start CLOSED: the desktop right-hand sidebar and the mobile
-  // drawer only appear when the user asks for them.
-  const [historyOpen, setHistoryOpen] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  // The single workspace sidebar (AppShell) starts CLOSED — this workspace
+  // only opens it on demand through SidebarContext.
+  const sidebar = useSidebar();
   const [shareOpen, setShareOpen] = useState(false);
-  const reducedMotion = useReducedMotion() ?? false;
 
   // URL sync for deep links (/chat/<id>).
   useEffect(() => {
@@ -481,13 +434,11 @@ export function ChatWorkspace({
     // Leaving mid-stream aborts the fetch (catch → cancelStream cleans up).
     abortRef.current?.abort();
     setChatId(id);
-    setHistoryOpen(false);
   }, []);
 
   const newChat = useCallback(() => {
     abortRef.current?.abort();
     setChatId(null);
-    setHistoryOpen(false);
     router.push("/chat");
   }, [router]);
 
@@ -499,19 +450,7 @@ export function ChatWorkspace({
 
   return (
     <div className="flex h-full min-w-0 flex-1">
-      {/* Mobile history drawer — right-hand sheet, closed by default */}
-      <Sheet open={historyOpen} onOpenChange={setHistoryOpen}>
-        <SheetContent side="right" className="w-[280px] bg-sidebar p-0">
-          <SheetHeader className="sr-only">
-            <SheetTitle>Chat history</SheetTitle>
-          </SheetHeader>
-          <QueryBoundary>
-            <HistoryPanel activeChatId={chatId} onOpenChat={openChat} onNewChat={newChat} />
-          </QueryBoundary>
-        </SheetContent>
-      </Sheet>
-
-      {/* Conversation column */}
+      {/* Conversation column — the sidebar itself lives in the AppShell */}
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Compact header */}
         <header className="flex h-12 shrink-0 items-center gap-1.5 border-b px-3 sm:px-4">
@@ -519,8 +458,8 @@ export function ChatWorkspace({
             variant="ghost"
             size="icon"
             className="size-8 md:hidden"
-            onClick={() => setHistoryOpen(true)}
-            aria-label="Open chat history"
+            onClick={() => sidebar.setOpen(true)}
+            aria-label="Open sidebar"
           >
             <Menu className="size-4.5" />
           </Button>
@@ -550,16 +489,16 @@ export function ChatWorkspace({
             <Plus className="size-3.5" /> New
           </Button>
 
-          {/* Right sidebar toggle — closed by default on desktop */}
+          {/* Sidebar toggle — one sidebar, closed by default, opened here */}
           <Button
             variant="ghost"
             size="icon"
             className="hidden size-8 md:inline-flex"
-            onClick={() => setSidebarOpen((v) => !v)}
-            aria-label={sidebarOpen ? "Close chat history" : "Open chat history"}
-            aria-expanded={sidebarOpen}
+            onClick={sidebar.toggle}
+            aria-label={sidebar.open ? "Close sidebar" : "Open sidebar"}
+            aria-expanded={sidebar.open}
           >
-            {sidebarOpen ? <PanelRightClose className="size-4.5" /> : <PanelRightOpen className="size-4.5" />}
+            {sidebar.open ? <PanelRightClose className="size-4.5" /> : <PanelRightOpen className="size-4.5" />}
           </Button>
         </header>
 
@@ -624,26 +563,6 @@ export function ChatWorkspace({
           </div>
         </div>
       </div>
-
-      {/* Desktop history panel — RIGHT side, toggled, closed by default */}
-      <AnimatePresence initial={false}>
-        {sidebarOpen ? (
-          <motion.aside
-            key="history-sidebar"
-            initial={reducedMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
-            animate={reducedMotion ? { opacity: 1 } : { width: 268, opacity: 1 }}
-            exit={reducedMotion ? { opacity: 0 } : { width: 0, opacity: 0 }}
-            transition={{ duration: reducedMotion ? 0.15 : 0.28, ease: [0.16, 1, 0.3, 1] }}
-            className="hidden shrink-0 overflow-hidden border-l bg-sidebar md:block"
-          >
-            <div className="h-full w-[268px]">
-              <QueryBoundary>
-                <HistoryPanel activeChatId={chatId} onOpenChat={openChat} onNewChat={newChat} />
-              </QueryBoundary>
-            </div>
-          </motion.aside>
-        ) : null}
-      </AnimatePresence>
 
       {/* Share dialog */}
       <ShareChatDialog chatId={chatId} open={shareOpen} onOpenChange={setShareOpen} />

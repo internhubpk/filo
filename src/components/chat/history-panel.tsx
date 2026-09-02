@@ -62,11 +62,15 @@ export function HistoryPanel({
   onOpenChat,
   onNewChat,
   className,
+  showHeader = true,
 }: {
   activeChatId: string | null;
   onOpenChat: (chatId: string) => void;
   onNewChat: () => void;
   className?: string;
+  /** Hide the built-in "History / New" header when embedded in a sidebar
+      that already provides its own section chrome. */
+  showHeader?: boolean;
 }) {
   const { token } = useFiloSession();
 
@@ -135,19 +139,21 @@ export function HistoryPanel({
 
   return (
     <div className={cn("flex h-full flex-col", className)} aria-label="Chat history">
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 pb-2 pt-1">
-        <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">History</h2>
-        <Button
-          variant="ghost"
-          size="sm"
-          className="h-7 gap-1 px-2 text-xs"
-          onClick={onNewChat}
-          aria-label="Start a new chat"
-        >
-          <Plus className="size-3.5" /> New
-        </Button>
-      </div>
+      {/* Header — optional when the host sidebar renders its own */}
+      {showHeader ? (
+        <div className="flex items-center justify-between px-3 pb-2 pt-1">
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">History</h2>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-7 gap-1 px-2 text-xs"
+            onClick={onNewChat}
+            aria-label="Start a new chat"
+          >
+            <Plus className="size-3.5" /> New
+          </Button>
+        </div>
+      ) : null}
 
       {/* Body — four states */}
       <div className="min-h-0 flex-1 overflow-y-auto px-2 pb-3">

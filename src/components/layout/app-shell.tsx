@@ -1,35 +1,37 @@
 "use client";
 
 // =============================================================================
-// AppShell v2 — the rebuilt logged-in product frame.
+// AppShell v3 — the rebuilt logged-in product frame.
 // =============================================================================
-// The old 8-item sidebar (Dashboard / Create / Documents / Spreadsheets /
-// Presentations / Files / Billing / Settings) is GONE. Filo is now a
-// chat-centered workspace:
+// ONE sidebar, closed by default, openable — everything lives in it:
 //
-//   ┌──────────────────────────────────────────┬──┐
-//   │  page content (full height)              │rail│
-//   └──────────────────────────────────────────┴──┘
+//   ┌─────────────────────────────────────────┬────┬──────┐
+//   │  page content (full height)             │rail│menu  │   ← collapsed (56px)
+//   │  page content  ←────────pushed──────────│  nav          │   ← expanded (288px)
+//   └─────────────────────────────────────────┴──────────────┘
 //
-//   rail — 56px, icon-only, pinned to the RIGHT edge; every icon meaningful:
-//     • Filo logo        → home (/chat)
-//     • New chat         → /chat (fresh conversation)
-//     • Documents        → /documents (the library)
-//     • spacer
-//     • Personal menu    → avatar → Profile & settings / Billing / theme / Log out
+//   Collapsed = the icon rail (56px, right edge): logo · open-sidebar ·
+//   new chat · documents · spacer · account avatar.
+//   Expanded  = the same sidebar opened (pushes content left):
+//     • brand row + close toggle
+//     • nav rows (New chat, Documents)
+//     • HISTORY — the user's conversations, below the other items
+//     • account footer (profile & settings / billing / theme / log out)
 //
-// Billing and Settings live in the compact personal menu (they are
-// occasional destinations, not workspace destinations). The chat workspace
-// owns its own history panel — this shell stays out of its way.
+//   Mobile: the same sidebar body opens as a right-hand sheet; the chat
+//   header's menu button opens it via SidebarContext (useSidebar).
 //
-// Auth: session read via useFiloSession; unauthenticated visitors are
-// redirected to /login?next=<path>. Hydration-safe loading state.
+//   ⌘B / Ctrl+B toggles the sidebar anywhere in the shell.
+//
+// The old 8-item sidebar is gone; Filo stays a chat-centered workspace.
+// Auth: unauthenticated visitors are redirected to /login?next=<path>.
 // =============================================================================
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { usePathname, useRouter } from "next/navigation";
 import {
+  ChevronsUpDown,
   FileText,
   MessageSquarePlus,
   Settings as SettingsIcon,
@@ -38,7 +40,10 @@ import {
   Moon,
   Sun,
   Monitor,
+  PanelRightClose,
+  PanelRightOpen,
 } from "lucide-react";
+import { motion, useReducedMotion } from "framer-motion";
 import { useTheme } from "next-themes";
 import { cn } from "@/lib/utils";
 import { initials } from "@/lib/format";
@@ -61,24 +66,38 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { Sheet, SheetContent, SheetHeader, SheetTitle } from "@/components/ui/sheet";
 import { CommandPalette } from "@/components/layout/command-palette";
 import { LogoMark } from "@/components/shared/logo";
+import { SidebarContext } from "@/components/layout/sidebar-context";
+import { HistoryPanel } from "@/components/chat/history-panel";
+import { QueryBoundary } from "@/components/chat/query-boundary";
 
 // ---- Tooltip delay tuned for a dense rail ----
 const RAIL_TOOLTIP = { delayDuration: 250, skipDelayDuration: 100 };
+
+// ---- Sidebar geometry ----
+const RAIL_WIDTH = 56; // w-14 — collapsed
+const SIDEBAR_WIDTH = 288; // expanded
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const pathname = usePathname();
   const { user, ready, clearSession } = useFiloSession();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // ONE sidebar — closed by default, opened on demand.
+  const [sidebarOpen, setSidebarOpen] = useState(false);
 
-  // ---- Global shortcut: ⌘K palette ----
+  // ---- Global shortcuts: ⌘K palette · ⌘B sidebar ----
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         setPaletteOpen((o) => !o);
+      }
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "b") {
+        e.preventDefault();
+        setSidebarOpen((o) => !o);
       }
     };
     window.addEventListener("keydown", onKey);
@@ -101,6 +120,32 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     window.location.assign("/");
   }, [clearSession]);
 
+  const sidebar = useMemo(
+    () => ({
+      open: sidebarOpen,
+      setOpen: setSidebarOpen,
+      toggle: () => setSidebarOpen((v) => !v),
+    }),
+    [sidebarOpen]
+  );
+
+  // The active chat id lives in the URL — the sidebar highlights it on any page.
+  const activeChatId = useMemo(() => {
+    const match = /^\/chat\/([^/]+)/.exec(pathname ?? "");
+    return match ? match[1] : null;
+  }, [pathname]);
+
+  const openChat = useCallback(
+    (chatId: string) => {
+      router.push(`/chat/${chatId}`);
+    },
+    [router]
+  );
+
+  const newChat = useCallback(() => {
+    router.push("/chat");
+  }, [router]);
+
   if (!ready || !user) {
     return (
       <div className="flex h-screen items-center justify-center bg-background">
@@ -112,48 +157,286 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     );
   }
 
-  const isChat = pathname === "/chat" || pathname.startsWith("/chat/");
-
   return (
     <TooltipProvider delayDuration={RAIL_TOOLTIP.delayDuration} skipDelayDuration={RAIL_TOOLTIP.skipDelayDuration}>
-      <div className="flex h-screen overflow-hidden bg-background">
-        {/* Main column — pages own their full height (chat scrolls internally) */}
-        <div className="flex min-w-0 flex-1 flex-col">{children}</div>
+      <SidebarContext.Provider value={sidebar}>
+        <div className="flex h-screen overflow-hidden bg-background">
+          {/* Main column — pages own their full height (chat scrolls internally) */}
+          <div className="flex min-w-0 flex-1 flex-col">{children}</div>
 
-        <Rail
-          isChat={isChat}
-          userName={user.name}
-          userEmail={user.email}
-          onLogout={logout}
-          planHint={user.planId ? undefined : "Free plan"}
-        />
+          <AppSidebar
+            open={sidebarOpen}
+            onOpenChange={setSidebarOpen}
+            activeChatId={activeChatId}
+            onOpenChat={openChat}
+            onNewChat={newChat}
+            userName={user.name}
+            userEmail={user.email}
+            onLogout={logout}
+          />
 
-        <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
-      </div>
+          <CommandPalette open={paletteOpen} onOpenChange={setPaletteOpen} />
+        </div>
+      </SidebarContext.Provider>
     </TooltipProvider>
   );
 }
 
 // =============================================================================
-// Rail — icon-only navigation
+// AppSidebar — THE single sidebar: icon rail (collapsed) ⟷ full panel (open).
 // =============================================================================
-function Rail({
-  isChat,
+
+function AppSidebar({
+  open,
+  onOpenChange,
+  activeChatId,
+  onOpenChat,
+  onNewChat,
   userName,
   userEmail,
   onLogout,
 }: {
-  isChat: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  activeChatId: string | null;
+  onOpenChat: (chatId: string) => void;
+  onNewChat: () => void;
   userName: string;
   userEmail: string;
   onLogout: () => void;
-  planHint?: string;
 }) {
+  const reducedMotion = useReducedMotion() ?? false;
+  const close = useCallback(() => onOpenChange(false), [onOpenChange]);
+
+  // Shared body — desktop expanded panel and the mobile sheet render the
+  // same content; on mobile every navigation also dismisses the sheet.
+  const body = (dismissOnNavigate: boolean) => (
+    <SidebarBody
+      activeChatId={activeChatId}
+      onOpenChat={onOpenChat}
+      onNewChat={onNewChat}
+      userName={userName}
+      userEmail={userEmail}
+      onLogout={onLogout}
+      onCollapse={close}
+      onNavigate={dismissOnNavigate ? close : undefined}
+    />
+  );
+
   return (
-    <aside
-      className="z-30 flex h-full w-14 shrink-0 flex-col items-center border-l bg-sidebar py-3 text-sidebar-foreground"
-      aria-label="Primary navigation"
+    <>
+      {/* Desktop — one collapsible aside at the right edge */}
+      <motion.aside
+        initial={false}
+        animate={{ width: open ? SIDEBAR_WIDTH : RAIL_WIDTH }}
+        transition={{ duration: reducedMotion ? 0 : 0.26, ease: [0.16, 1, 0.3, 1] }}
+        className="relative z-30 hidden h-full shrink-0 overflow-hidden border-l bg-sidebar text-sidebar-foreground md:block"
+        aria-label="Workspace sidebar"
+      >
+        {/* Collapsed layer — the icon rail, anchored to the right edge */}
+        <motion.div
+          initial={false}
+          animate={{ opacity: open ? 0 : 1 }}
+          transition={{ duration: reducedMotion ? 0 : 0.18 }}
+          inert={open}
+          className="absolute inset-y-0 right-0 flex w-14 flex-col items-center py-3"
+        >
+          <Rail open={open} onOpen={() => onOpenChange(true)} userName={userName} userEmail={userEmail} onLogout={onLogout} />
+        </motion.div>
+
+        {/* Expanded layer — nav + history + account, anchored to the right edge */}
+        <motion.div
+          initial={false}
+          animate={{ opacity: open ? 1 : 0 }}
+          transition={{ duration: reducedMotion ? 0 : 0.22 }}
+          inert={!open}
+          className="absolute inset-y-0 right-0 flex w-72 flex-col"
+        >
+          {body(false)}
+        </motion.div>
+      </motion.aside>
+
+      {/* Mobile — the same sidebar as a right-hand sheet */}
+      <Sheet open={open} onOpenChange={onOpenChange}>
+        <SheetContent side="right" className="w-[300px] bg-sidebar p-0 text-sidebar-foreground">
+          <SheetHeader className="sr-only">
+            <SheetTitle>Menu</SheetTitle>
+          </SheetHeader>
+          {body(true)}
+        </SheetContent>
+      </Sheet>
+    </>
+  );
+}
+
+// =============================================================================
+// SidebarBody — expanded content: brand · nav · history (below) · account
+// =============================================================================
+
+function SidebarBody({
+  activeChatId,
+  onOpenChat,
+  onNewChat,
+  userName,
+  userEmail,
+  onLogout,
+  onCollapse,
+  onNavigate,
+}: {
+  activeChatId: string | null;
+  onOpenChat: (chatId: string) => void;
+  onNewChat: () => void;
+  userName: string;
+  userEmail: string;
+  onLogout: () => void;
+  onCollapse: () => void;
+  /** Called after any in-sidebar navigation — the mobile sheet closes itself. */
+  onNavigate?: () => void;
+}) {
+  const handleOpenChat = useCallback(
+    (chatId: string) => {
+      onOpenChat(chatId);
+      onNavigate?.();
+    },
+    [onOpenChat, onNavigate]
+  );
+
+  const handleNewChat = useCallback(() => {
+    onNewChat();
+    onNavigate?.();
+  }, [onNewChat, onNavigate]);
+
+  return (
+    <div className="flex h-full flex-col">
+      {/* Brand + collapse */}
+      <div className="flex h-12 shrink-0 items-center gap-2 border-b px-3">
+        <Link
+          href="/chat"
+          onClick={onNavigate}
+          className="flex min-w-0 items-center gap-2 rounded-md"
+          aria-label="Filo home"
+        >
+          <LogoMark size={22} />
+          <span className="truncate text-sm font-semibold">Filo</span>
+        </Link>
+        <span className="flex-1" />
+        <Button
+          variant="ghost"
+          size="icon"
+          className="size-8"
+          onClick={onCollapse}
+          aria-label="Close sidebar"
+        >
+          <PanelRightClose className="size-4.5" />
+        </Button>
+      </div>
+
+      {/* Primary nav */}
+      <nav className="shrink-0 px-2 pt-2" aria-label="Primary">
+        <SidebarLink
+          href="/chat"
+          icon={<MessageSquarePlus className="size-4.5" />}
+          label="New chat"
+          matchExact
+          onClick={handleNewChat}
+        />
+        <SidebarLink
+          href="/documents"
+          icon={<FileText className="size-4.5" />}
+          label="Documents"
+          onClick={onNavigate}
+        />
+      </nav>
+
+      {/* History — below the other items */}
+      <div className="mt-2 flex min-h-0 flex-1 flex-col border-t">
+        <div className="flex shrink-0 items-center justify-between px-4 pb-1 pt-3">
+          <h2 className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground">
+            History
+          </h2>
+          <Button
+            variant="ghost"
+            size="sm"
+            className="h-6 gap-1 px-1.5 text-[11px] text-muted-foreground"
+            onClick={handleNewChat}
+            aria-label="Start a new chat"
+          >
+            <MessageSquarePlus className="size-3" /> New
+          </Button>
+        </div>
+        <QueryBoundary>
+          <HistoryPanel
+            activeChatId={activeChatId}
+            onOpenChat={handleOpenChat}
+            onNewChat={handleNewChat}
+            showHeader={false}
+          />
+        </QueryBoundary>
+      </div>
+
+      {/* Account footer */}
+      <div className="shrink-0 border-t p-2">
+        <PersonalMenu variant="full" userName={userName} userEmail={userEmail} onLogout={onLogout} />
+      </div>
+    </div>
+  );
+}
+
+function SidebarLink({
+  href,
+  icon,
+  label,
+  matchExact,
+  onClick,
+}: {
+  href: string;
+  icon: React.ReactNode;
+  label: string;
+  matchExact?: boolean;
+  onClick?: () => void;
+}) {
+  const pathname = usePathname();
+  const isActive = matchExact ? pathname === href : pathname === href || pathname.startsWith(href + "/");
+  return (
+    <Link
+      href={href}
+      onClick={onClick}
+      aria-current={isActive ? "page" : undefined}
+      className={cn(
+        "mb-0.5 flex items-center gap-2.5 rounded-lg px-2.5 py-2 text-[13px] font-medium transition-colors",
+        isActive
+          ? "bg-sidebar-accent text-sidebar-accent-foreground"
+          : "text-sidebar-foreground/75 hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+      )}
     >
+      {icon}
+      {label}
+    </Link>
+  );
+}
+
+// =============================================================================
+// Rail — collapsed sidebar layer: icon-only, 56px, right edge
+// =============================================================================
+
+function Rail({
+  open,
+  onOpen,
+  userName,
+  userEmail,
+  onLogout,
+}: {
+  open: boolean;
+  onOpen: () => void;
+  userName: string;
+  userEmail: string;
+  onLogout: () => void;
+}) {
+  const pathname = usePathname();
+  const isChat = pathname === "/chat" || pathname.startsWith("/chat/");
+
+  return (
+    <>
       {/* Brand → home */}
       <Tooltip>
         <TooltipTrigger asChild>
@@ -166,6 +449,21 @@ function Rail({
           </Link>
         </TooltipTrigger>
         <TooltipContent side="left">Filo</TooltipContent>
+      </Tooltip>
+
+      {/* Open sidebar */}
+      <Tooltip>
+        <TooltipTrigger asChild>
+          <button
+            onClick={onOpen}
+            aria-label="Open sidebar"
+            aria-expanded={open}
+            className="mt-1.5 flex size-9 items-center justify-center rounded-lg text-sidebar-foreground/65 transition-colors hover:bg-sidebar-accent/60 hover:text-sidebar-accent-foreground"
+          >
+            <PanelRightOpen className="size-5" />
+          </button>
+        </TooltipTrigger>
+        <TooltipContent side="left">Open sidebar</TooltipContent>
       </Tooltip>
 
       {/* New chat */}
@@ -181,8 +479,8 @@ function Rail({
       <div className="flex-1" />
 
       {/* Personal menu — compact, everything account-related in one place */}
-      <PersonalMenu userName={userName} userEmail={userEmail} onLogout={onLogout} />
-    </aside>
+      <PersonalMenu variant="rail" userName={userName} userEmail={userEmail} onLogout={onLogout} />
+    </>
   );
 }
 
@@ -226,13 +524,18 @@ function RailItem({
 }
 
 // =============================================================================
-// PersonalMenu — avatar trigger; profile, billing, theme, logout
+// PersonalMenu — profile, billing, theme, logout
+//   variant="rail"  → 36px avatar icon (collapsed sidebar)
+//   variant="full"  → full-width row with name + email (expanded sidebar)
 // =============================================================================
+
 function PersonalMenu({
+  variant,
   userName,
   userEmail,
   onLogout,
 }: {
+  variant: "rail" | "full";
   userName: string;
   userEmail: string;
   onLogout: () => void;
@@ -243,14 +546,30 @@ function PersonalMenu({
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
-        <button
-          className="flex size-9 items-center justify-center rounded-lg transition-colors hover:bg-sidebar-accent/60"
-          aria-label="Account menu"
-        >
-          <Avatar className="size-7">
-            <AvatarFallback className="text-[11px]">{initials(userName)}</AvatarFallback>
-          </Avatar>
-        </button>
+        {variant === "rail" ? (
+          <button
+            className="flex size-9 items-center justify-center rounded-lg transition-colors hover:bg-sidebar-accent/60"
+            aria-label="Account menu"
+          >
+            <Avatar className="size-7">
+              <AvatarFallback className="text-[11px]">{initials(userName)}</AvatarFallback>
+            </Avatar>
+          </button>
+        ) : (
+          <button
+            className="flex w-full items-center gap-2.5 rounded-lg px-2 py-2 text-left transition-colors hover:bg-sidebar-accent/60"
+            aria-label="Account menu"
+          >
+            <Avatar className="size-8">
+              <AvatarFallback className="text-[11px]">{initials(userName)}</AvatarFallback>
+            </Avatar>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-[13px] font-medium">{userName}</span>
+              <span className="block truncate text-[11px] text-muted-foreground">{userEmail}</span>
+            </span>
+            <ChevronsUpDown className="size-3.5 shrink-0 text-muted-foreground" />
+          </button>
+        )}
       </DropdownMenuTrigger>
       <DropdownMenuContent side="left" align="end" className="w-60">
         <DropdownMenuLabel>
