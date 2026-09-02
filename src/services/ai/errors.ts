@@ -388,6 +388,18 @@ export function errorFromHttpStatus(
  */
 export function userSafeAiMessage(err: unknown): string {
   if (err instanceof AllProvidersFailedError) {
+    // Deterministic configuration gap: every attempt was skipped or rejected
+    // for a MISSING credential. Retrying can never succeed — tell the
+    // operator what to fix instead of asking them to "try again".
+    const attemptCodes = err.attempts.map((a) => a.code)
+    const nothingConfigured =
+      attemptCodes.length > 0 &&
+      attemptCodes.every(
+        (c) => c === 'PROVIDER_UNCONFIGURED' || c === 'API_KEY_MISSING'
+      )
+    if (nothingConfigured) {
+      return 'Document generation is not configured on this deployment — no AI provider key was found by the generator. Add an AI key (OPENAI_API_KEY or GEMINI_API_KEY) to the server environment and retry.'
+    }
     return 'We could not generate your document right now. Please try again in a moment.'
   }
   if (err instanceof AiBaseError) {

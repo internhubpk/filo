@@ -263,6 +263,17 @@ export type AiProviderStrategy = ProviderId
  * Resolve the provider this environment should serve AI with.
  * `isConfiguredLookup` lets callers (e.g. the Convex worker, whose registry
  * may not be booted yet) supply their own configured-check.
+ *
+ * Resolution order:
+ *   1. Explicit AI_PROVIDER env — ABSOLUTE (operator's pin, never rerouted).
+ *   2. Exactly one provider with credentials → that provider.
+ *   3. NODE_ENV default (production → OPENAI, development → GEMINI) — but
+ *      ONLY when that default actually has credentials. A dead default
+ *      (e.g. NODE_ENV=production with only a Gemini key deployed) used to
+ *      resolve to a guaranteed PROVIDER_UNCONFIGURED — every document
+ *      generation failed with "all providers failed" while a perfectly
+ *      valid key sat in the environment. Now the first CONFIGURED provider
+ *      in preference order serves instead.
  */
 export function resolveProviderStrategy(
   isConfiguredLookup?: (id: ProviderId) => boolean
@@ -280,11 +291,21 @@ export function resolveProviderStrategy(
     const p = getProvider(id)
     return Boolean(p?.isConfigured())
   }
-  const configuredIds = (
-    ['GEMINI', 'OPENAI', 'AGENT_ROUTER'] as ProviderId[]
-  ).filter(configured)
+  const preference: ProviderId[] =
+    process.env.NODE_ENV === 'production'
+      ? ['OPENAI', 'GEMINI', 'AGENT_ROUTER']
+      : ['GEMINI', 'OPENAI', 'AGENT_ROUTER']
+  const configuredIds = preference.filter(configured)
   if (configuredIds.length === 1) return configuredIds[0]
-  return process.env.NODE_ENV === 'production' ? 'OPENAI' : 'GEMINI'
+  if (configuredIds.length > 1) {
+    // Environment default first when usable; otherwise the best configured
+    // provider (never a guaranteed-dead resolution).
+    if (configured(preference[0])) return preference[0]
+    return configuredIds[0]
+  }
+  // Nothing configured — keep the environment default so diagnostics and
+  // error messages name the provider the operator is expected to configure.
+  return preference[0]
 }
 
 /**
