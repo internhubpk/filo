@@ -33,6 +33,7 @@ import { api } from '@convex/_generated/api'
 import { getConvexClient } from '@/lib/convex-server'
 import { isAiChatAllowedForPlan, type PlanEntitlementDoc } from '@/lib/ai-entitlement'
 import { ingestFile, buildSourceContext, type IngestedFile } from '@/services/ingestion'
+import { sanitizeTemplateId } from '@/config/templates'
 
 // Shape of the plan documents we read for entitlement/quota decisions.
 type PlanDoc = PlanEntitlementDoc
@@ -360,6 +361,7 @@ export async function POST(request: NextRequest) {
       workspaceId: (workspaceId || undefined) as any,
       artifactType: artifactType || undefined,
       outputFormat: effectiveOutputFormat || undefined,
+      template: sanitizeTemplateId(body.template),
       appBaseUrl: origin,
       brandConfig: brandConfig ?? undefined,
       attachedFileNames: safeFiles.map((f) => f.filename),

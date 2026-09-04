@@ -17,8 +17,9 @@ import {
   type FormEvent,
   type KeyboardEvent,
 } from "react";
-import { ArrowUp, FileSpreadsheet, FileText, Loader2, Presentation, Square } from "lucide-react";
+import { ArrowUp, FileSpreadsheet, FileText, Loader2, Presentation, ScrollText, Square } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { FORMAL_TEMPLATES, getTemplate, DEFAULT_TEMPLATE_ID } from "@/config/templates";
 import {
   Tooltip,
   TooltipContent,
@@ -52,6 +53,8 @@ export function Composer({
   onModeChange,
   format,
   onFormatChange,
+  template = DEFAULT_TEMPLATE_ID,
+  onTemplateChange,
   onSend,
   onStop,
   streaming,
@@ -65,6 +68,9 @@ export function Composer({
   onModeChange: (m: ComposerMode) => void;
   format: DocFormat;
   onFormatChange: (f: DocFormat) => void;
+  /** FORMAL TEMPLATE id ("none" = blank). Only shown for Word/PDF. */
+  template?: string;
+  onTemplateChange?: (id: string) => void;
   onSend: (message: string) => void;
   onStop: () => void;
   streaming: boolean;
@@ -122,6 +128,12 @@ export function Composer({
   }
 
   const activeFormat = FORMATS.find((f) => f.id === format) ?? FORMATS[0];
+  const activeTemplate = getTemplate(template);
+  // Templates are formal print documents — meaningful for Word/PDF only.
+  const showTemplates =
+    mode === "document" &&
+    (format === "docx" || format === "pdf") &&
+    Boolean(onTemplateChange);
 
   return (
     <form
@@ -182,6 +194,41 @@ export function Composer({
                   <f.icon className={cn("mr-2 size-4", f.chip)} />
                   <span className="mr-auto">{f.label}</span>
                   <span className="text-xs text-muted-foreground">{f.hint}</span>
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuContent>
+          </DropdownMenu>
+        ) : null}
+
+        {/* Formal template picker (document mode, Word/PDF only) */}
+        {showTemplates ? (
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                className={cn(
+                  "flex h-8 items-center gap-1.5 rounded-lg border px-2.5 text-xs font-medium transition-colors hover:bg-accent",
+                  activeTemplate && "border-primary/40 bg-primary/[0.04]"
+                )}
+                aria-label={activeTemplate ? `Template: ${activeTemplate.label}` : "Template: none"}
+              >
+                <ScrollText className={cn("size-3.5", activeTemplate ? "text-primary" : "text-muted-foreground")} />
+                <span className="max-w-28 truncate">{activeTemplate ? activeTemplate.label : "Template"}</span>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="start" className="w-64">
+              <DropdownMenuItem onClick={() => onTemplateChange?.(DEFAULT_TEMPLATE_ID)}>
+                <span className="mr-auto">No template</span>
+                <span className="text-xs text-muted-foreground">Blank</span>
+              </DropdownMenuItem>
+              {FORMAL_TEMPLATES.map((t) => (
+                <DropdownMenuItem key={t.id} onClick={() => onTemplateChange?.(t.id)}>
+                  <ScrollText className="mr-2 size-4 text-muted-foreground" />
+                  <span className="mr-auto">
+                    <span className="block">{t.label}</span>
+                    <span className="block text-[11px] text-muted-foreground">{t.description}</span>
+                  </span>
+                  {template === t.id ? <span className="ml-2 text-xs font-medium text-primary">✓</span> : null}
                 </DropdownMenuItem>
               ))}
             </DropdownMenuContent>

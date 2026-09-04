@@ -31,6 +31,7 @@ import { getConvexClient } from "@/lib/convex-server";
 import { isAiChatAllowedForPlan, type PlanEntitlementDoc } from "@/lib/ai-entitlement";
 import { aiRouter, userSafeAiMessage, AllProvidersFailedError } from "@/services/ai";
 import { extractWebSources } from "@/lib/web-sources";
+import { sanitizeTemplateId } from "@/config/templates";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -43,6 +44,10 @@ interface ChatSendBody {
   mode?: "chat" | "document";
   artifactType?: string; // document | spreadsheet | presentation
   outputFormat?: string; // docx | pdf | xlsx | pptx
+  /** FORMAL TEMPLATE id (src/config/templates.ts) — letter/memo/form/….
+   *  Validated server-side; unknown ids are dropped (generation still runs
+   *  as a normal document). */
+  template?: string;
   /** REGENERATE: the transcript already ends with the user's prompt (the
    *  client deleted the previous reply via chats.truncateFrom). No new user
    *  row is persisted — a fresh assistant reply is streamed for the same
@@ -284,6 +289,7 @@ export async function POST(request: NextRequest) {
         history,
         artifactType: body.artifactType,
         outputFormat: body.outputFormat,
+        template: sanitizeTemplateId(body.template),
         appBaseUrl:
           process.env.NEXT_PUBLIC_APP_URL?.replace(/\/$/, "") ||
           request.nextUrl.origin,
@@ -446,6 +452,7 @@ async function startDocumentGeneration(opts: {
   history: Array<{ role: string; content: string }>;
   artifactType?: string;
   outputFormat?: string;
+  template?: string;
   appBaseUrl: string;
 }) {
   const { convex, token, userId, chatId, message, history } = opts;
@@ -531,6 +538,7 @@ async function startDocumentGeneration(opts: {
     prompt: message,
     artifactType,
     outputFormat,
+    template: opts.template,
     appBaseUrl: opts.appBaseUrl,
     sourceContext: buildConversationSourceContext(history),
     aiKeys: {

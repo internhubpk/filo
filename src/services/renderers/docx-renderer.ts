@@ -563,7 +563,9 @@ export class DocxRenderer implements DocumentRenderer {
             width: { size: 100, type: WidthType.PERCENTAGE },
             rows: [
               new TableRow({
-                height: { value: 13200, rule: HeightRule.EXACT },
+                // ATLEAST (not EXACT): a long title wrapping to a second line
+                // must GROW the row — EXACT clips the overflow invisibly.
+                height: { value: 13200, rule: HeightRule.ATLEAST },
                 children: [
                   new TableCell({
                     width: { size: 3600, type: WidthType.DXA },
@@ -573,10 +575,11 @@ export class DocxRenderer implements DocumentRenderer {
                     margins: { top: 200, bottom: 200, left: 240, right: 200 },
                     children: [
                       new Paragraph({
+                        spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
                         children: [new TextRun({ text: theme.tokens.label, bold: true, size: 22, color: 'FFFFFF', font: headingFont, smallCaps: true })],
                       }),
                       ...(companyName
-                        ? [new Paragraph({ spacing: { before: 80 }, children: [new TextRun({ text: companyName, size: 18, color: hex6(colors.muted, 'F4F6F9') })] })]
+                        ? [new Paragraph({ spacing: { before: 80, after: 0, line: 240, lineRule: LineRuleType.AUTO }, children: [new TextRun({ text: companyName, size: 18, color: hex6(colors.muted, 'F4F6F9') })] })]
                         : []),
                     ],
                   }),
@@ -699,7 +702,9 @@ export class DocxRenderer implements DocumentRenderer {
             width: { size: 100, type: WidthType.PERCENTAGE },
             rows: [
               new TableRow({
-                height: { value: 2000, rule: HeightRule.EXACT },
+                // ATLEAST: wrapped title lines grow the band instead of
+                // disappearing below it (the classic clipped-heading bug).
+                height: { value: 2000, rule: HeightRule.ATLEAST },
                 children: [
                   new TableCell({
                     shading: { type: ShadingType.CLEAR, fill: hex6(colors.primary, '1E3A5F') },
@@ -708,6 +713,7 @@ export class DocxRenderer implements DocumentRenderer {
                     margins: { top: 100, bottom: 100, left: 400, right: 400 },
                     children: [
                       new Paragraph({
+                        spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
                         children: [
                           new TextRun({ text: title, bold: true, size: 52, color: 'FFFFFF', font: headingFont }),
                         ],
@@ -715,7 +721,7 @@ export class DocxRenderer implements DocumentRenderer {
                       ...(subtitle
                         ? [
                             new Paragraph({
-                              spacing: { before: 120 },
+                              spacing: { before: 120, after: 0, line: 240, lineRule: LineRuleType.AUTO },
                               children: [new TextRun({ text: subtitle.slice(0, 200), size: 22, color: hex6(colors.muted, 'F4F6F9'), italics: true })],
                             }),
                           ]
@@ -1077,7 +1083,7 @@ export class DocxRenderer implements DocumentRenderer {
                 right: { style: BorderStyle.SINGLE, size: 4, color: fill },
               },
               margins: { top: 160, bottom: 160, left: 240, right: 240 },
-              children: [new Paragraph({ children: inlineRuns(text, { font: bodyFont, monoFont, size: 22, boldAll: true }) })],
+              children: [new Paragraph({ children: inlineRuns(text, { font: bodyFont, monoFont, size: 22, boldAll: true }), spacing: { after: 0, line: 276, lineRule: LineRuleType.AUTO } })],
             }),
           ],
         }),
@@ -1105,13 +1111,13 @@ export class DocxRenderer implements DocumentRenderer {
               children: [
                 new Paragraph({
                   children: [new TextRun({ text: 'Key Takeaways', bold: true, size: 22, color: hex6(accent, '3B82F6') })],
-                  spacing: { after: 100 },
+                  spacing: { after: 100, line: 276, lineRule: LineRuleType.AUTO },
                 }),
                 ...items.map(
                   (item, i) =>
                     new Paragraph({
                       children: [new TextRun({ text: `${i + 1}.  `, size: 22 }), ...inlineRuns(item, { font: bodyFont, monoFont, size: 22 })],
-                      spacing: { after: i === items.length - 1 ? 0 : 60 },
+                      spacing: { after: i === items.length - 1 ? 0 : 60, line: 276, lineRule: LineRuleType.AUTO },
                     })
                 ),
               ],
@@ -1132,6 +1138,7 @@ export class DocxRenderer implements DocumentRenderer {
           children: [
             new Paragraph({
               alignment: AlignmentType.CENTER,
+              spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
               children: [new TextRun({ text: m.label, bold: true, size: 18, color: hex6(primary, '1E3A5F'), font: headingFont })],
             }),
           ],
@@ -1147,6 +1154,7 @@ export class DocxRenderer implements DocumentRenderer {
           children: [
             new Paragraph({
               alignment: AlignmentType.CENTER,
+              spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
               children: [new TextRun({ text: m.value, bold: true, size: 40, color: hex6(accent, '3B82F6'), font: headingFont })],
             }),
           ],
@@ -1164,6 +1172,7 @@ export class DocxRenderer implements DocumentRenderer {
               children: [
                 new Paragraph({
                   alignment: AlignmentType.CENTER,
+                  spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
                   children: [new TextRun({ text: m.change ?? '', size: 18, italics: true, color: mutedFg })],
                 }),
               ],
@@ -1193,13 +1202,13 @@ export class DocxRenderer implements DocumentRenderer {
         children: [
           new Paragraph({
             children: [new TextRun({ text: title, bold: true, size: 24, color: hex6(fillTitle, '1E3A5F') })],
-            spacing: { after: 120 },
+            spacing: { after: 120, line: 276, lineRule: LineRuleType.AUTO },
           }),
           ...points.map(
             (p) =>
               new Paragraph({
                 children: [new TextRun({ text: '•  ', size: 22 }), ...inlineRuns(p, { font: bodyFont, monoFont, size: 22 })],
-                spacing: { after: 60 },
+                spacing: { after: 60, line: 276, lineRule: LineRuleType.AUTO },
               })
           ),
         ],
@@ -1271,6 +1280,10 @@ export class DocxRenderer implements DocumentRenderer {
               margins: { top: 80, bottom: 80, left: 100, right: 100 },
               children: [
                 new Paragraph({
+                  // Tight explicit spacing: table cells must NOT inherit the
+                  // document default (1.4-1.6 line height + paragraph-after)
+                  // — that inheritance is what made table rows airy/uneven.
+                  spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
                   children: [
                     new TextRun({
                       text: String(cell ?? ''),
@@ -1307,6 +1320,9 @@ export class DocxRenderer implements DocumentRenderer {
             margins: { top: 60, bottom: 60, left: 100, right: 100 },
             children: [
               new Paragraph({
+                // Tight explicit spacing (see header row) — single line height,
+                // no inherited paragraph gap inside cells.
+                spacing: { after: 0, line: 240, lineRule: LineRuleType.AUTO },
                 children: [
                   new TextRun({
                     text: displayText,

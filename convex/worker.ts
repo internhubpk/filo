@@ -70,6 +70,13 @@ import {
   type DesignPlan,
   type GenerationBrief,
 } from "../src/services/design-planning";
+import {
+  templatePlanningBlock,
+  templateDesignContext,
+  templateContentDirection,
+  templateCapsScale,
+  getTemplate,
+} from "../src/config/templates";
 
 // ==================== TYPES ====================
 
@@ -125,8 +132,8 @@ export const processJob = internalAction({
         const artifactType = (job.artifactType || "document").toUpperCase();
         const outputFormat = normalizeFormat(job.outputFormat, artifactType);
 
-        // ----- Stage A: designer -----
-        const designPlan = await designStage(job, outputFormat);
+        // ----- Stage A: designer (a formal template pins the design) -----
+        const designPlan = await designStage(job, outputFormat, job.template);
         const { design } = applyDesignPlan(designPlan, outputFormat);
         const designDirection = describeDesignPlan(designPlan);
         // Full brief = design direction + resolved DOCUMENT SCALE (page/
@@ -134,22 +141,41 @@ export const processJob = internalAction({
         // explicit user evidence ("100 pages notes") over the designer's
         // opinion — see doc-scale.ts.
         const brief: GenerationBrief = buildGenerationBrief(designPlan, job.prompt);
-        const scale = brief.scale;
+        // A formal template fixes the document's anatomy — clamp the scale
+        // so the architect never pads a letter/form into a multi-part book.
+        const scale = templateCapsScale(job.template)
+          ? {
+              ...brief.scale,
+              depth: "brief" as const,
+              pageTarget: Math.min(brief.scale.pageTarget || 4, 4),
+              minSections: Math.min(brief.scale.minSections, 3),
+              maxSections: Math.min(brief.scale.maxSections, 9),
+              // Cadence "every 99 sections" never binds — formal templates
+              // place their own tables explicitly in the anatomy.
+              visualEveryN: 99,
+              toc: false,
+              numberedHeadings: false,
+            }
+          : brief.scale;
         console.log(
           `[WORKER] job ${jobId}: scale=${scale.depth} pages≈${scale.pageTarget} sections=${scale.minSections}-${scale.maxSections} words/unit=${scale.wordsPerUnitMin}-${scale.wordsPerUnitMax} (${scale.rationale})`
         );
 
         // ----- Stage B: architect -----
-        const planPrompt = buildPlanningSystemPrompt(artifactType, outputFormat, {
-          theme: designPlan.theme,
-          audience: designPlan.audience,
-          tone: designPlan.tone,
-          density: designPlan.density,
-          visualPriority: designPlan.visualPriority,
-          useCharts: designPlan.useCharts,
-          useTables: designPlan.useTables,
-          useMetrics: designPlan.useMetrics,
-        }, scale);
+        // A formal template appends its fixed ANATOMY to the architect's
+        // system prompt — the blueprint must follow the template's sections,
+        // and the scale is capped (a letter is never a 20-chapter book).
+        const planPrompt =
+          buildPlanningSystemPrompt(artifactType, outputFormat, {
+            theme: designPlan.theme,
+            audience: designPlan.audience,
+            tone: designPlan.tone,
+            density: designPlan.density,
+            visualPriority: designPlan.visualPriority,
+            useCharts: designPlan.useCharts,
+            useTables: designPlan.useTables,
+            useMetrics: designPlan.useMetrics,
+          }, scale) + templatePlanningBlock(job.template);
 
         // 8192 (was 4096): Gemini 3.x thinking consumes the SAME
         // maxOutputTokens budget, so a 4096 cap truncated large PPTX/XLSX
@@ -570,16 +596,19 @@ export const renderRetry = internalAction({
  * default design plan so generation can proceed.
  */
 async function designStage(
-  job: { prompt: string; sourceContext?: string | null; artifactType?: string | null },
-  outputFormat: DocumentFormat
+  job: { prompt: string; sourceContext?: string | null; artifactType?: string | null; template?: string | null },
+  outputFormat: DocumentFormat,
+  template?: string | null
 ): Promise<DesignPlan> {
   try {
     const sourceSummary = job.sourceContext
       ? job.sourceContext.slice(0, 2000)
       : null;
+    const baseUser = buildDesignerUserPrompt(job.prompt, outputFormat, sourceSummary);
+    const tplContext = templateDesignContext(template);
     const { system, user } = {
       system: buildDesignerSystemPrompt(outputFormat),
-      user: buildDesignerUserPrompt(job.prompt, outputFormat, sourceSummary),
+      user: tplContext ? `${baseUser}\n\n${tplContext}` : baseUser,
     };
     const response = await aiRouter.generate(
       {
@@ -740,6 +769,8 @@ async function generateOneUnit(
     sourceContext: typeof job.sourceContext === "string" ? job.sourceContext : null,
     designDirection:
       typeof designDirectionFor(job) === "string" ? designDirectionFor(job) : undefined,
+    // FORMAL TEMPLATE: fixed writing rules for the chosen template.
+    templateDirection: templateContentDirection(job.template) || null,
     // Scale-driven depth: numbering, level, word budget, mandatory visuals.
     sectionNumber: section.number || null,
     sectionLevel: section.level || "chapter",

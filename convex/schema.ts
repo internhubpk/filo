@@ -288,6 +288,9 @@ export default defineSchema({
     prompt: v.string(),
     artifactType: v.optional(v.string()),
     outputFormat: v.optional(v.string()),
+    // FORMAL TEMPLATE (src/config/templates.ts): letter | memo | form |
+    // invoice | quotation | meeting-minutes | agreement | notice
+    template: v.optional(v.string()),
 
     // Lifecycle: queued → planning → generating → validating → rendering
     //            → uploading → completed | failed | cancelled

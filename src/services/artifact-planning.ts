@@ -139,6 +139,8 @@ export interface SectionPromptInput {
   sourceContext?: string | null
   /** Theme/audience/tone direction from the designer stage (spec §8). */
   designDirection?: string | null
+  /** FORMAL TEMPLATE: fixed structural/writing rules for the chosen template. */
+  templateDirection?: string | null
   /** Deterministic heading number computed from the outline (e.g. "2.1"). */
   sectionNumber?: string | null
   /** Section level from the outline: part | chapter | section. */
@@ -208,9 +210,12 @@ Document Title: ${input.documentTitle}
 Document Type: ${input.documentType}
 Output Format: ${input.outputFormat}
 ${input.designDirection ? `\nDesign direction: ${input.designDirection}\n` : ''}
+${input.templateDirection ? `\nFORMAL TEMPLATE RULES (the document uses a fixed template — follow them over any default):
+${input.templateDirection}
+` : ''}
 ABSOLUTE CONTENT RULES:
 1. Generate COMPLETE, PROFESSIONAL content — NO placeholders, NO lorem ipsum, NO meta commentary ("as an AI", "this section will")
-2. WORD BUDGET (hard requirement): this section's paragraphs must total ${minWords}-${maxWords} words${isDeck ? ' — slides are the exception: keep bullets tight (deck brevity beats the budget)' : isSheet ? ' — spreadsheets express depth through DATA, so grow the table rows instead of prose' : '. Write 3-6 substantial paragraphs of 4-6 full sentences each; develop ONE complete idea per paragraph with concrete specifics, examples, numbers, or mechanisms'}
+2. WORD BUDGET (hard requirement): this section's paragraphs must total ${minWords}-${maxWords} words${isDeck ? ' — slides are the exception: keep bullets tight (deck brevity beats the budget)' : isSheet ? ' — spreadsheets express depth through DATA, so grow the table rows instead of prose' : input.templateDirection ? ' — FORMAL TEMPLATE exception: field tables, fixed anatomy blocks and short pre-printed lines satisfy the budget; never pad a form, letter, invoice or memo with filler prose to reach the count' : '. Write 3-6 substantial paragraphs of 4-6 full sentences each; develop ONE complete idea per paragraph with concrete specifics, examples, numbers, or mechanisms'}
 3. For table type: return content as a 2D array (array of arrays) with headers as the first row. Cells may be plain values or formula strings like "=SUM(B2:B10)" when the format is XLSX and a computed column makes sense.
 4. For list type: return content as an array of strings (each item a full, information-bearing clause — never 2-word stubs)
 5. For paragraph type: return content as a plain text string

@@ -30,6 +30,7 @@
   },
   "include": [
     "../../src/types/index.ts",
+    "../../src/config/templates.ts",
     "../../src/services/themes.ts",
     "../../src/services/doc-scale.ts",
     "../../src/services/design-planning.ts",

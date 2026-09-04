@@ -678,16 +678,28 @@ export class PdfRenderer implements DocumentRenderer {
       }
       case 'banner':
       default: {
-        doc.rect(0, 0, pageW, 150).fill(c.primary)
+        // Wrap-aware cover band: the old FIXED 150pt band + white text meant
+        // any title that wrapped to a second line was drawn BELOW the colored
+        // rect — white text on white paper, invisible. The band now grows to
+        // fit the measured title (and subtitle) height.
+        const bandTextW = pageW - (margin + 8) * 2
+        doc.font(headingFont).fontSize(27)
+        const titleH = doc.heightOfString(title, { width: bandTextW })
+        const subText = subtitle.slice(0, 180)
+        doc.font(bodyFont).fontSize(11)
+        const subH = subText ? doc.heightOfString(subText, { width: bandTextW }) : 0
+        const bandH = Math.max(150, 40 + titleH + (subH ? subH + 10 : 0) + 24)
+        doc.rect(0, 0, pageW, bandH).fill(c.primary)
         doc.font(headingFont).fontSize(27).fillColor('#FFFFFF')
-        doc.text(title, margin + 4, 52, { width: pageW - (margin + 8) * 2 })
-        if (subtitle) {
+        doc.text(title, margin + 4, 40, { width: bandTextW })
+        if (subText) {
           doc.font(bodyFont).fontSize(11).fillColor('#E6EBF2')
-          doc.text(subtitle.slice(0, 180), margin + 4, doc.y + 8, { width: pageW - (margin + 8) * 2 })
+          doc.text(subText, margin + 4, 40 + titleH + 8, { width: bandTextW })
         }
-        doc.rect(margin, pageH * 0.5, 72, 4).fill(c.accent)
+        const accentY = Math.max(pageH * 0.5, bandH + 26)
+        doc.rect(margin, accentY, 72, 4).fill(c.accent)
         doc.font(bodyFont).fontSize(10).fillColor(c.mutedFg)
-        doc.text(meta, margin, pageH * 0.52 + 12, { width: pageW - margin * 2 })
+        doc.text(meta, margin, accentY + 20, { width: pageW - margin * 2 })
         doc.addPage()
         return 1
       }
@@ -761,17 +773,24 @@ export class PdfRenderer implements DocumentRenderer {
     switch (theme.ornament) {
       case 'band': {
         if (o.isPart) {
-          const h = size + 26
+          // Wrap-aware: measure the heading so the band grows with it — the
+          // old fixed band + lineBreak:false turned any 2-line part title
+          // into a clipped one-liner.
+          doc.font(headingFont).fontSize(size)
+          const textH = doc.heightOfString(text, { width: width - 28 })
+          const h = Math.max(size + 26, textH + 24)
           doc.rect(margin, cy, width, h).fill(colors.primary)
           doc.font(headingFont).fontSize(size).fillColor('#FFFFFF')
-          doc.text(text, margin + 14, cy + 12, { width: width - 28, lineBreak: false, ellipsis: true })
+          doc.text(text, margin + 14, cy + 12, { width: width - 28 })
           return cy + h + 20
         }
-        const h = size + 16
+        doc.font(headingFont).fontSize(size)
+        const textH = doc.heightOfString(text, { width: width - 28 })
+        const h = Math.max(size + 16, textH + 16)
         doc.rect(margin, cy, width, h).fill(tint(colors.primary, 0.92))
         doc.rect(margin, cy, 4, h).fill(colors.primary)
         doc.font(headingFont).fontSize(size).fillColor(colors.primary)
-        doc.text(text, margin + 14, cy + 8, { width: width - 28, lineBreak: false, ellipsis: true })
+        doc.text(text, margin + 14, cy + 8, { width: width - 28 })
         return cy + h + 16
       }
       case 'left-bar': {
@@ -1236,6 +1255,22 @@ export class PdfRenderer implements DocumentRenderer {
     const scaleW = width / colWidths.reduce((s: number, v: number) => s + v, 0)
     for (let i = 0; i < colWidths.length; i++) colWidths[i] *= scaleW
 
+    // HEADER BAND — wrap-aware. The old band was a FIXED 24pt strip and the
+    // header text was drawn with lineBreak:false + ellipsis, so any column
+    // heading long enough to wrap ("Percentage of Total Budget") was cut off
+    // after one line. The band height is now measured from the wrapped text
+    // and headings render in full across as many lines as they need.
+    doc.font(headingFont).fontSize(9)
+    const headTextW = colWidths.map((w: number) => Math.max(w - 10, 18))
+    const headerTextH = Math.max(
+      10,
+      ...header.map((cell: unknown, i: number) =>
+        doc.heightOfString(String(cell ?? ''), { width: headTextW[i] })
+      )
+    )
+    const bandedH = Math.max(24, headerTextH + 14) // boxed/banded/dark-header
+    const minimalH = Math.max(28, headerTextH + 14) // minimal/editorial
+
     const drawHeaderBand = (bandY: number) => {
       switch (theme.table) {
         case 'minimal':
@@ -1243,46 +1278,47 @@ export class PdfRenderer implements DocumentRenderer {
           doc.font(headingFont).fontSize(9).fillColor(colors.primary)
           let hx = margin
           header.forEach((cell: unknown, i: number) => {
-            doc.text(String(cell ?? ''), hx + 5, bandY + 6, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            doc.text(String(cell ?? ''), hx + 5, bandY + 6, { width: headTextW[i] })
             hx += colWidths[i]
           })
+          const ruleY = bandY + 6 + headerTextH + 6
           const ruleW = theme.table === 'editorial' ? width : Math.min(width, 99999)
-          doc.rect(margin, bandY + 20, ruleW, theme.table === 'editorial' ? 2 : 1.2).fill(colors.primary)
+          doc.rect(margin, ruleY, ruleW, theme.table === 'editorial' ? 2 : 1.2).fill(colors.primary)
           if (theme.table === 'editorial') doc.rect(margin, bandY, width, 1).fill(colors.primary)
           doc.font(bodyFont).fontSize(9)
-          return bandY + 28
+          return ruleY + 2
         }
         case 'dark-header': {
           // Luminance guard (missing here while DOCX had one): a light
           // 'dark-header' fill with white text rendered an INVISIBLE header.
           const fill = isDarkColor(colors.fg) ? colors.fg : isDarkColor(colors.primary) ? colors.primary : '#334155'
-          doc.rect(margin, bandY, width, 24).fill(fill)
+          doc.rect(margin, bandY, width, bandedH).fill(fill)
           doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
           let hx = margin
           header.forEach((cell: unknown, i: number) => {
-            doc.text(String(cell ?? ''), hx + 5, bandY + 8, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            doc.text(String(cell ?? ''), hx + 5, bandY + 7, { width: headTextW[i] })
             hx += colWidths[i]
           })
           doc.font(bodyFont).fontSize(9)
-          return bandY + 24
+          return bandY + bandedH
         }
         case 'boxed':
         case 'banded':
         default: {
-          doc.rect(margin, bandY, width, 24).fill(colors.primary)
+          doc.rect(margin, bandY, width, bandedH).fill(colors.primary)
           doc.font(headingFont).fontSize(9).fillColor('#FFFFFF')
           let hx = margin
           header.forEach((cell: unknown, i: number) => {
-            doc.text(String(cell ?? ''), hx + 5, bandY + 8, { width: colWidths[i] - 10, lineBreak: false, ellipsis: true })
+            doc.text(String(cell ?? ''), hx + 5, bandY + 7, { width: headTextW[i] })
             hx += colWidths[i]
           })
           doc.font(bodyFont).fontSize(9)
-          return bandY + 24
+          return bandY + bandedH
         }
       }
     }
 
-    y = o.ensureSpace(y, 30 + 24)
+    y = o.ensureSpace(y, 30 + (theme.table === 'minimal' || theme.table === 'editorial' ? minimalH : bandedH))
     let ry = drawHeaderBand(y)
 
     const colXs: number[] = [margin]

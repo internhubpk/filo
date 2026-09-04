@@ -68,6 +68,7 @@ import {
 import { QueryBoundary } from "@/components/chat/query-boundary";
 import { useSidebar } from "@/components/layout/sidebar-context";
 import { Composer, type ComposerMode, type DocFormat } from "@/components/chat/composer";
+import { DEFAULT_TEMPLATE_ID, FORMAL_TEMPLATES, type FormalTemplate } from "@/config/templates";
 import { ChatMarkdown } from "@/components/chat/chat-markdown";
 import { SourcesBlock, toChatSources } from "@/components/chat/sources-block";
 import { GenerationCard } from "@/components/chat/generation-card";
@@ -110,6 +111,9 @@ export function ChatWorkspace({
   const [chatId, setChatId] = useState<string | null>(initialChatId ?? null);
   const [mode, setMode] = useState<ComposerMode>(initialMode ?? "chat");
   const [format, setFormat] = useState<DocFormat>("docx");
+  // FORMAL TEMPLATE for Document Mode ("none" = blank document). Persisted
+  // per-send so the pipeline can shape the document (letter, form, invoice…).
+  const [template, setTemplate] = useState<string>(DEFAULT_TEMPLATE_ID);
   // The single workspace sidebar (AppShell) starts CLOSED — this workspace
   // only opens it on demand through SidebarContext.
   const sidebar = useSidebar();
@@ -313,6 +317,7 @@ export function ChatWorkspace({
       const currentChatId = chatId;
       const currentMode = mode;
       const currentFormat = format;
+      const currentTemplate = template;
 
       // Chat mode: the THINKING indicator is visible from the first
       // millisecond (network + model latency included); the same bubble then
@@ -340,6 +345,7 @@ export function ChatWorkspace({
                         ? "presentation"
                         : "document",
                   outputFormat: currentFormat,
+                  template: currentTemplate !== DEFAULT_TEMPLATE_ID ? currentTemplate : undefined,
                 }
               : {}),
           }),
@@ -428,6 +434,7 @@ export function ChatWorkspace({
       chatId,
       mode,
       format,
+      template,
       beginStream,
       pushStreamText,
       endStreamTarget,
@@ -605,7 +612,17 @@ export function ChatWorkspace({
           <QueryBoundary>
             <div className="mx-auto w-full max-w-3xl px-4 py-6">
               {showExamples ? (
-                <EmptyState userName={user?.name} onExample={(text) => setPreset({ text, key: Date.now() })} />
+                <EmptyState
+                  userName={user?.name}
+                  onExample={(text) => setPreset({ text, key: Date.now() })}
+                  onTemplate={(t) => {
+                    // A template chip switches to Document Mode, pre-selects
+                    // the template and drops its starter prompt in the box.
+                    setMode("document");
+                    setTemplate(t.id);
+                    setPreset({ text: t.starter, key: Date.now() });
+                  }}
+                />
               ) : null}
 
               {/* Skeleton ONLY when loading a transcript nobody is sending
@@ -647,6 +664,8 @@ export function ChatWorkspace({
               onModeChange={setMode}
               format={format}
               onFormatChange={setFormat}
+              template={template}
+              onTemplateChange={setTemplate}
               onSend={(text) => void send(text)}
               onStop={stop}
               streaming={streaming}
@@ -989,9 +1008,12 @@ const EXAMPLES = [
 function EmptyState({
   userName,
   onExample,
+  onTemplate,
 }: {
   userName?: string;
   onExample: (prompt: string) => void;
+  /** Formal template chip click — switches to Document Mode with a starter. */
+  onTemplate?: (t: FormalTemplate) => void;
 }) {
   const firstName = (userName ?? "there").split(" ")[0];
   return (
@@ -1015,6 +1037,25 @@ function EmptyState({
           </button>
         ))}
       </div>
+      {onTemplate ? (
+        <div className="mt-6 w-full">
+          <p className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Start from a formal template
+          </p>
+          <div className="mt-2.5 flex flex-wrap justify-center gap-1.5">
+            {FORMAL_TEMPLATES.map((t) => (
+              <button
+                key={t.id}
+                onClick={() => onTemplate(t)}
+                title={t.description}
+                className="rounded-full border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground transition-colors hover:border-primary/40 hover:text-foreground"
+              >
+                {t.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
